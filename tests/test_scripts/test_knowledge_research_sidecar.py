@@ -440,6 +440,120 @@ def test_search_by_ids_scope_violation_is_rejected_atomically(tmp_path: Path) ->
     assert snapshot["ledger"]["calls"][0]["verificationStatus"] == ("unverified_scope_violation")
 
 
+def test_model_projection_bounds_search_and_table_inventory(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    media_root = tmp_path / "media"
+    workspace.mkdir()
+    media_root.mkdir()
+    search_payload = _search_payload()
+    search_payload["selectionStrategy"] = "hierarchical_interleave"
+    search_payload["results"][0]["content"] = "x" * 5_000
+    search_payload["results"][0]["locator"].update(
+        {"anchor": "sha256:hidden", "charStart": 1, "charEnd": 5_001}
+    )
+    details_payload = _details_payload()
+    details_payload["tables"][0].update(
+        {
+            "documentId": DOCUMENT_ID,
+            "revision": REVISION,
+            "extractor": {"name": "large-metadata"},
+            "text": {"format": "html", "content": "y" * 2_000},
+        }
+    )
+    upstream = FakeUpstream([_response(search_payload), _response(details_payload)])
+    store = KnowledgeResearchStore(workspace=workspace, media_root=media_root)
+    bridge = KnowledgeResearchBridge(upstream, store)
+    research_id = _begin(bridge)
+
+    search_result = _result_payload(
+        _call(
+            bridge,
+            "search",
+            {"researchId": research_id, "query": "KOSPI"},
+        )
+    )
+    item = search_result["results"][0]
+    assert len(item["content"]) == 800
+    assert item["contentTruncatedForTransport"] is True
+    assert "revision" not in item
+    assert set(item["locator"]) == {"title", "sectionPath", "pageStart", "pageEnd"}
+
+    details_result = _result_payload(
+        _call(
+            bridge,
+            "getFileDetails",
+            {"researchId": research_id, "fileId": FILE_ID},
+        )
+    )
+    assert set(details_result["file"]) == {"fileId", "title", "filename", "mediaType"}
+    table = details_result["tables"][0]
+    assert "documentId" not in table
+    assert "extractor" not in table
+    assert len(table["textPreview"]) == 320
+    assert table["textPreviewTruncatedForTransport"] is True
+
+
+def test_batch_claims_are_atomic(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    media_root = tmp_path / "media"
+    workspace.mkdir()
+    media_root.mkdir()
+    upstream = FakeUpstream([_response(_search_payload())])
+    store = KnowledgeResearchStore(workspace=workspace, media_root=media_root)
+    bridge = KnowledgeResearchBridge(upstream, store)
+    research_id = _begin(bridge)
+    _call(
+        bridge,
+        "searchByIds",
+        {"researchId": research_id, "query": "KOSPI", "fileIds": [FILE_ID]},
+    )
+
+    accepted = _result_payload(
+        _call(
+            bridge,
+            "researchAddClaims",
+            {
+                "researchId": research_id,
+                "claims": [
+                    {
+                        "section": "Performance",
+                        "text": "KOSPI advanced with semiconductor earnings.",
+                        "evidenceIds": [EVIDENCE_ID],
+                    },
+                    {
+                        "section": "Outlook",
+                        "text": "The cited outlook remains conditional.",
+                        "evidenceIds": [EVIDENCE_ID],
+                    },
+                ],
+            },
+        )
+    )
+    assert accepted["claimCount"] == 2
+
+    rejected = _call(
+        bridge,
+        "researchAddClaims",
+        {
+            "researchId": research_id,
+            "claims": [
+                {
+                    "section": "Valid",
+                    "text": "This would be valid alone.",
+                    "evidenceIds": [EVIDENCE_ID],
+                },
+                {
+                    "section": "Invalid",
+                    "text": "This invalid claim must roll back the batch.",
+                    "evidenceIds": ["ev4_99999999999999999999999999999999"],
+                },
+            ],
+        },
+    )
+    assert rejected["isError"] is True
+    assert len(store.snapshot(research_id)["report"]["items"]) == 2
+
+
 def test_retrieval_fallback_is_rejected_atomically(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     media_root = tmp_path / "media"
@@ -533,6 +647,7 @@ def test_tools_list_and_direct_script_entrypoint_are_full_v9_compatible(
     assert {
         "researchBegin",
         "researchAddClaim",
+        "researchAddClaims",
         "researchAddTable",
         "researchFinalize",
     }.issubset(tools)

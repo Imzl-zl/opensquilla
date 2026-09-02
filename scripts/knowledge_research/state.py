@@ -275,6 +275,50 @@ class KnowledgeResearchStore:
             "citationCount": len(ids),
         }
 
+    def add_claims(
+        self,
+        *,
+        research_id: str,
+        claims: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        if isinstance(claims, str | bytes) or not isinstance(claims, Sequence):
+            raise ResearchStateError("claims must be an array")
+        if not claims or len(claims) > 40:
+            raise ResearchStateError("claims must contain between 1 and 40 items")
+
+        state = self._load(research_id)
+        prepared: list[dict[str, Any]] = []
+        citation_count = 0
+        first_item_number = len(state["report"]["items"]) + 1
+        for offset, raw_claim in enumerate(claims):
+            if not isinstance(raw_claim, Mapping):
+                raise ResearchStateError("each claim must be an object")
+            clean_section = _string(raw_claim.get("section"), name="section", maximum=200)
+            clean_text = _string(raw_claim.get("text"), name="text")
+            self._reject_internal_ids(clean_section, clean_text, state=state)
+            ids = self._verified_evidence_ids(state, raw_claim.get("evidenceIds", []))
+            prepared.append(
+                {
+                    "kind": "claim",
+                    "itemId": f"claim-{first_item_number + offset:04d}",
+                    "section": clean_section,
+                    "text": clean_text,
+                    "evidenceIds": ids,
+                }
+            )
+            citation_count += len(ids)
+
+        state["report"]["items"].extend(prepared)
+        state["finalized"] = None
+        self._save(state)
+        self._remove_public_outputs(research_id)
+        return {
+            "status": "accepted",
+            "claimCount": len(prepared),
+            "citationCount": citation_count,
+            "items": [item["itemId"] for item in prepared],
+        }
+
     def add_table(
         self,
         *,

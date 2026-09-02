@@ -29,12 +29,20 @@ else:  # pragma: no cover - exercised by deployment entrypoint smoke tests
     )
 
 _LOCAL_TOOLS = frozenset(
-    {"researchBegin", "researchAddClaim", "researchAddTable", "researchFinalize"}
+    {
+        "researchBegin",
+        "researchAddClaim",
+        "researchAddClaims",
+        "researchAddTable",
+        "researchFinalize",
+    }
 )
 _LEDGER_TOOLS = frozenset({"search", "searchByIds", "getFileDetails", "getTable"})
 _MAX_DETAIL_PAGES = 250
-_MODEL_SEARCH_CONTENT_CHARS = 1_600
-_MODEL_TABLE_CONTENT_CHARS = 40_000
+_MODEL_DISCOVERY_CONTENT_CHARS = 800
+_MODEL_FOCUSED_CONTENT_CHARS = 1_200
+_MODEL_DETAIL_PREVIEW_CHARS = 320
+_MODEL_TABLE_CONTENT_CHARS = 20_000
 
 
 class Upstream(Protocol):
@@ -226,6 +234,11 @@ class KnowledgeResearchBridge:
                 text=_text_argument(arguments, "text"),
                 evidence_ids=arguments.get("evidenceIds", []),
             )
+        elif name == "researchAddClaims":
+            payload = self.store.add_claims(
+                research_id=_text_argument(arguments, "researchId"),
+                claims=arguments.get("claims", []),
+            )
         elif name == "researchAddTable":
             payload = self.store.add_table(
                 research_id=_text_argument(arguments, "researchId"),
@@ -392,6 +405,40 @@ def _research_tools() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "researchAddClaims",
+            "description": (
+                "Atomically add all report paragraphs in reading order with verified evidence. "
+                "Prefer this batch tool over repeated researchAddClaim calls."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["researchId", "claims"],
+                "properties": {
+                    "researchId": research_id,
+                    "claims": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 40,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["section", "text", "evidenceIds"],
+                            "properties": {
+                                "section": {"type": "string", "minLength": 1},
+                                "text": {"type": "string", "minLength": 1},
+                                "evidenceIds": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {"type": "string", "minLength": 1},
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        {
             "name": "researchAddTable",
             "description": (
                 "Add a table whose inventory, canonical text, and original crop were verified."
@@ -457,10 +504,21 @@ def _model_result(name: str, structured: Mapping[str, Any]) -> dict[str, Any]:
     if name in {"search", "searchByIds"}:
         results = projected.get("results")
         if isinstance(results, list):
+            content_limit = (
+                _MODEL_FOCUSED_CONTENT_CHARS
+                if name == "searchByIds"
+                else _MODEL_DISCOVERY_CONTENT_CHARS
+            )
             projected["results"] = [
-                _model_search_item(item) if isinstance(item, Mapping) else item for item in results
+                _model_search_item(item, content_limit=content_limit)
+                if isinstance(item, Mapping)
+                else item
+                for item in results
             ]
+    elif name == "getFileDetails":
+        projected = _model_file_details(structured)
     elif name == "getTable":
+        projected = _model_table(structured)
         text = projected.get("text")
         if isinstance(text, dict):
             content = text.get("content")
@@ -478,23 +536,101 @@ def _model_result(name: str, structured: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _model_search_item(item: Mapping[str, Any]) -> dict[str, Any]:
+def _model_search_item(item: Mapping[str, Any], *, content_limit: int) -> dict[str, Any]:
     projected = {
-        key: copy.deepcopy(value)
-        for key, value in item.items()
-        if key
-        not in {
-            "documentId",
-            "chunkId",
-            "parentChunkId",
-            "previousChunkId",
-            "nextChunkId",
-        }
+        key: copy.deepcopy(item[key])
+        for key in ("evidenceId", "fileId", "title", "contentKind", "content")
+        if key in item
     }
+    locator = item.get("locator")
+    if isinstance(locator, Mapping):
+        projected["locator"] = {
+            key: copy.deepcopy(locator[key])
+            for key in ("title", "sectionPath", "pageStart", "pageEnd")
+            if key in locator
+        }
     content = projected.get("content")
-    if isinstance(content, str) and len(content) > _MODEL_SEARCH_CONTENT_CHARS:
-        projected["content"] = content[:_MODEL_SEARCH_CONTENT_CHARS]
+    if isinstance(content, str) and len(content) > content_limit:
+        projected["content"] = content[:content_limit]
         projected["contentTruncatedForTransport"] = True
+    return projected
+
+
+def _model_file_details(structured: Mapping[str, Any]) -> dict[str, Any]:
+    projected: dict[str, Any] = {
+        key: copy.deepcopy(structured[key])
+        for key in (
+            "contractVersion",
+            "inventoryComplete",
+            "inventoryPageCount",
+            "inventoryTableCount",
+            "nextCursor",
+        )
+        if key in structured
+    }
+    source_file = structured.get("file")
+    if isinstance(source_file, Mapping):
+        projected["file"] = {
+            key: copy.deepcopy(source_file[key])
+            for key in ("fileId", "title", "filename", "mediaType")
+            if key in source_file
+        }
+    extraction = structured.get("tableExtraction")
+    if isinstance(extraction, Mapping):
+        projected["tableExtraction"] = {
+            key: copy.deepcopy(extraction[key])
+            for key in ("status", "tableCount", "policyId")
+            if key in extraction
+        }
+    tables = structured.get("tables")
+    if isinstance(tables, list):
+        projected["tables"] = [
+            _model_table_inventory_item(table) for table in tables if isinstance(table, Mapping)
+        ]
+    projected["tableTextProjection"] = "compact-preview"
+    return projected
+
+
+def _model_table_inventory_item(table: Mapping[str, Any]) -> dict[str, Any]:
+    projected = {
+        key: copy.deepcopy(table[key])
+        for key in (
+            "tableId",
+            "page",
+            "ordinal",
+            "continuationOf",
+            "screenshotAvailable",
+            "textAvailable",
+            "textFormat",
+        )
+        if key in table
+    }
+    preview = table.get("textPreview")
+    if not isinstance(preview, str):
+        text = table.get("text")
+        if isinstance(text, Mapping) and isinstance(text.get("content"), str):
+            preview = text["content"]
+    if isinstance(preview, str) and preview:
+        projected["textPreview"] = preview[:_MODEL_DETAIL_PREVIEW_CHARS]
+        if len(preview) > _MODEL_DETAIL_PREVIEW_CHARS:
+            projected["textPreviewTruncatedForTransport"] = True
+    return projected
+
+
+def _model_table(structured: Mapping[str, Any]) -> dict[str, Any]:
+    projected = {
+        key: copy.deepcopy(structured[key])
+        for key in ("schemaVersion", "tableId", "fileId", "page", "locator", "text")
+        if key in structured
+    }
+    screenshot = structured.get("screenshot")
+    if isinstance(screenshot, Mapping):
+        projected["screenshot"] = {
+            key: copy.deepcopy(screenshot[key])
+            for key in ("mediaType", "widthPixels", "heightPixels")
+            if key in screenshot
+        }
+        projected["screenshotAvailable"] = True
     return projected
 
 
