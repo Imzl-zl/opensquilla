@@ -100,21 +100,27 @@ def _response(payload: dict[str, Any], *, structured: bool = False) -> dict[str,
 
 def _search_payload(*, file_id: str = FILE_ID) -> dict[str, Any]:
     return {
-        "contractVersion": "knowledge-vnext2",
+        "contractVersion": "knowledge-vnext/2",
+        "chunkPolicyId": "hierarchical_token_v4",
+        "indexVersion": "knowledge-index-v5",
         "query": "KOSPI drivers",
-        "requestedProfile": "hybrid_bge_m3_rrf",
-        "effectiveProfile": "hybrid_bge_m3_rrf",
-        "retrievalProfile": "hybrid_bge_m3_rrf",
-        "selectionSource": "request",
+        "requestedProfile": None,
+        "effectiveProfile": "hybrid_rrf_bge_m3_fts5",
+        "retrievalProfile": "hybrid_rrf_bge_m3_fts5",
+        "selectionSource": "service_default",
         "fallbackReason": None,
         "warnings": [],
         "scopeEnforced": True,
+        "budgetExceeded": None,
+        "selectionStrategy": "pure_score",
         "lexicalCandidateCount": 12,
         "vectorCandidateCount": 15,
         "results": [
             {
                 "evidenceId": EVIDENCE_ID,
                 "fileId": file_id,
+                "documentId": DOCUMENT_ID,
+                "chunkId": "doc-v4:child:001",
                 "revision": REVISION,
                 "title": "Korea Equity Strategy",
                 "content": "KOSPI advanced as semiconductor earnings improved.",
@@ -132,7 +138,7 @@ def _search_payload(*, file_id: str = FILE_ID) -> dict[str, Any]:
 
 def _details_payload() -> dict[str, Any]:
     return {
-        "contractVersion": "knowledge-vnext2",
+        "contractVersion": "knowledge-vnext/2",
         "file": {
             "fileId": FILE_ID,
             "documentId": DOCUMENT_ID,
@@ -165,7 +171,7 @@ def _table_payload(screenshot_path: Path) -> dict[str, Any]:
     )
     image_sha = hashlib.sha256(PNG).hexdigest()
     return {
-        "contractVersion": "knowledge-vnext2",
+        "schemaVersion": "knowledge-table-artifact/2",
         "tableId": TABLE_ID,
         "fileId": FILE_ID,
         "documentId": DOCUMENT_ID,
@@ -262,6 +268,8 @@ def test_full_v9_shape_builds_verified_private_media_and_three_public_files(
         },
     )
     assert search_result["isError"] is False
+    projected_search = _result_payload(search_result)
+    assert "chunkId" not in projected_search["results"][0]
 
     details_result = _call(
         bridge,
@@ -290,6 +298,7 @@ def test_full_v9_shape_builds_verified_private_media_and_three_public_files(
         },
     )
     assert table_result["isError"] is False
+    assert "structuredContent" not in table_result
     table_request = upstream.requests[-1][1]
     assert table_request is not None
     assert table_request["arguments"]["includeScreenshot"] is True
@@ -360,6 +369,7 @@ def test_full_v9_shape_builds_verified_private_media_and_three_public_files(
 
     provenance = json.loads((output_dir / "provenance.json").read_text())
     assert EVIDENCE_ID in provenance["ledger"]["evidence"]
+    assert provenance["ledger"]["evidence"][EVIDENCE_ID]["chunkId"] == ("doc-v4:child:001")
     assert TABLE_ID in provenance["ledger"]["tables"]
     assert "screenshotPrivatePath" not in provenance["ledger"]["tables"][TABLE_ID]
     assert "localPath" not in provenance["ledger"]["tables"][TABLE_ID]["screenshot"]
@@ -369,15 +379,26 @@ def test_full_v9_shape_builds_verified_private_media_and_three_public_files(
     call = snapshot["ledger"]["calls"][0]
     assert call["structuredSource"] == "content[0].text"
     assert call["retrieval"] == {
-        "requestedProfile": "hybrid_bge_m3_rrf",
-        "effectiveProfile": "hybrid_bge_m3_rrf",
-        "retrievalProfile": "hybrid_bge_m3_rrf",
-        "selectionSource": "request",
+        "requestedProfile": None,
+        "contractVersion": "knowledge-vnext/2",
+        "chunkPolicyId": "hierarchical_token_v4",
+        "indexVersion": "knowledge-index-v5",
+        "effectiveProfile": "hybrid_rrf_bge_m3_fts5",
+        "retrievalProfile": "hybrid_rrf_bge_m3_fts5",
+        "selectionSource": "service_default",
         "fallbackReason": None,
         "warnings": [],
         "scopeEnforced": True,
+        "selectionStrategy": "pure_score",
+        "budgetExceeded": None,
         "lexicalCandidateCount": 12,
         "vectorCandidateCount": 15,
+    }
+    assert finalized["coverage"] == {
+        "claimCount": 1,
+        "tableCount": 1,
+        "sourceCount": 1,
+        "evidenceCount": 1,
     }
     assert snapshot["ledger"]["files"][FILE_ID]["observedLocators"]
     assert snapshot["ledger"]["inventories"][FILE_ID]["pageCount"] == 2
@@ -417,6 +438,34 @@ def test_search_by_ids_scope_violation_is_rejected_atomically(tmp_path: Path) ->
     assert snapshot["ledger"]["evidence"] == {}
     assert snapshot["ledger"]["files"] == {}
     assert snapshot["ledger"]["calls"][0]["verificationStatus"] == ("unverified_scope_violation")
+
+
+def test_retrieval_fallback_is_rejected_atomically(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    media_root = tmp_path / "media"
+    workspace.mkdir()
+    media_root.mkdir()
+    payload = _search_payload()
+    payload["effectiveProfile"] = "sqlite_fts5_default"
+    payload["retrievalProfile"] = "sqlite_fts5_default"
+    payload["selectionSource"] = "fallback"
+    payload["fallbackReason"] = "hybrid_vector_failed"
+    payload["warnings"] = ["hybrid_vector_failed_fallback_to_fts5"]
+    upstream = FakeUpstream([_response(payload)])
+    store = KnowledgeResearchStore(workspace=workspace, media_root=media_root)
+    bridge = KnowledgeResearchBridge(upstream, store)
+    research_id = _begin(bridge)
+
+    result = _call(
+        bridge,
+        "searchByIds",
+        {"researchId": research_id, "query": "KOSPI", "fileIds": [FILE_ID]},
+    )
+
+    assert result["isError"] is True
+    snapshot = store.snapshot(research_id)
+    assert snapshot["ledger"]["evidence"] == {}
+    assert snapshot["ledger"]["calls"][0]["verificationStatus"] == ("unverified_retrieval_contract")
 
 
 def test_complete_inventory_count_mismatch_is_not_accepted(tmp_path: Path) -> None:

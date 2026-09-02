@@ -13,24 +13,28 @@ artifact allowlist. Do not recreate that logic with files, shell commands, or JS
 
 1. Call `mcp_researchBegin` with the report title. Keep its `researchId` internal and
    pass it unchanged to every Knowledge and research call below.
-2. Discover broadly with several materially different `mcp_search` queries. When a
-   query returns no useful evidence, refine its wording; never fall back to the web
-   or unsupported memory. Collect exact returned file IDs and evidence IDs without
-   guessing them.
+2. Discover broadly with materially different `mcp_search` query families. For a
+   deep report, target 30-50 genuinely relevant, evidence-bearing files when the
+   corpus supports them; stop only after two useful query variants add no new
+   relevant file. Never pad the source count, fall back to the web, or use memory as
+   evidence. Collect exact returned file IDs and evidence IDs without guessing.
 3. Select relevant files, then call `mcp_searchByIds` with focused queries and no
-   more than 20 exact file IDs per call. Seek corroboration, disagreements, numbers,
-   drivers, and forward-looking evidence. Do not cite a result outside the requested
-   file set.
+   more than 20 exact file IDs per call. Cover every selected file. Seek
+   corroboration, disagreements, numbers, causal drivers, and forward-looking
+   evidence. Do not cite a result outside the requested file set.
 4. For each selected PDF that may contain useful tables, call
    `mcp_getFileDetails` once with `fileId` and `researchId`; pagination is automatic.
    Call `mcp_getTable` only for tables actually used in the report. Do not request or
    copy screenshot base64.
-5. Build the report in reading order. Call `mcp_researchAddClaim` once per report
-   paragraph with plain human-facing prose and the exact verified `evidenceIds` that
-   support it. Use multiple evidence IDs when independent files support the same
-   point. Call `mcp_researchAddTable` only after the table inventory and full table
-   were verified.
-6. Call `mcp_researchFinalize`. It creates human-readable inline citations and
+5. Build a substantive report in reading order: executive findings, observed
+   performance, driver chains, multi-source support, conflicting evidence, and
+   conditional outlook. Call `mcp_researchAddClaim` once per paragraph with plain
+   human-facing prose and the exact verified `evidenceIds` that support it. Assign
+   every reference to visible analysis; use multiple independent files for major
+   claims when available. Call `mcp_researchAddTable` only after its inventory and
+   full table were verified.
+6. Call `mcp_researchFinalize`. Check its coverage instead of counting a
+   References-only file as support. It creates human-readable inline citations and
    references, renders parsed tables plus original PDF crops in HTML, and renders
    original table crops in PDF.
 7. From `publicArtifactManifest.files`, call `publish_artifact` exactly once for each

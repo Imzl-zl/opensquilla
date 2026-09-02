@@ -33,6 +33,8 @@ _LOCAL_TOOLS = frozenset(
 )
 _LEDGER_TOOLS = frozenset({"search", "searchByIds", "getFileDetails", "getTable"})
 _MAX_DETAIL_PAGES = 250
+_MODEL_SEARCH_CONTENT_CHARS = 1_600
+_MODEL_TABLE_CONTENT_CHARS = 40_000
 
 
 class Upstream(Protocol):
@@ -193,6 +195,13 @@ class KnowledgeResearchBridge:
                         is_error=True,
                     ),
                 )
+            if not bool(upstream_result.get("isError")):
+                structured, _ = recover_structured_content(upstream_result)
+                if structured is not None:
+                    return _success(
+                        request_id,
+                        _model_result(name, structured),
+                    )
         else:
             error = response.get("error")
             if isinstance(error, Mapping):
@@ -282,7 +291,7 @@ class KnowledgeResearchBridge:
                 )
             page_count += 1
             if page_count == 1 and structured.get("inventoryComplete") is True:
-                return dict(raw_result)
+                return _model_result("getFileDetails", structured)
             tables.extend(structured.get("tables", []))
             if first_result is None:
                 first_result = copy.deepcopy(dict(raw_result))
@@ -295,15 +304,7 @@ class KnowledgeResearchBridge:
                 first_structured["inventoryComplete"] = True
                 first_structured["inventoryPageCount"] = page_count
                 first_structured["inventoryTableCount"] = len(tables)
-                first_result.pop("structuredContent", None)
-                first_result["content"] = [
-                    {
-                        "type": "text",
-                        "text": canonical_json(first_structured),
-                    }
-                ]
-                first_result["isError"] = False
-                return first_result
+                return _model_result("getFileDetails", first_structured)
             if not isinstance(next_cursor, str) or next_cursor in seen:
                 return _tool_result(
                     {"error": "Knowledge table inventory cursor is invalid or repeated"},
@@ -449,6 +450,52 @@ def _tool_result(payload: Any, *, is_error: bool = False) -> dict[str, Any]:
         "structuredContent": structured,
         "isError": is_error,
     }
+
+
+def _model_result(name: str, structured: Mapping[str, Any]) -> dict[str, Any]:
+    projected = copy.deepcopy(dict(structured))
+    if name in {"search", "searchByIds"}:
+        results = projected.get("results")
+        if isinstance(results, list):
+            projected["results"] = [
+                _model_search_item(item) if isinstance(item, Mapping) else item for item in results
+            ]
+    elif name == "getTable":
+        text = projected.get("text")
+        if isinstance(text, dict):
+            content = text.get("content")
+            if isinstance(content, str) and len(content) > _MODEL_TABLE_CONTENT_CHARS:
+                text["content"] = content[:_MODEL_TABLE_CONTENT_CHARS]
+                text["contentTruncatedForTransport"] = True
+                text["fullContentStoredInLedger"] = True
+        projected.pop("screenshotDataBase64", None)
+        screenshot = projected.get("screenshot")
+        if isinstance(screenshot, dict):
+            screenshot.pop("dataBase64", None)
+    return {
+        "content": [{"type": "text", "text": canonical_json(projected)}],
+        "isError": False,
+    }
+
+
+def _model_search_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    projected = {
+        key: copy.deepcopy(value)
+        for key, value in item.items()
+        if key
+        not in {
+            "documentId",
+            "chunkId",
+            "parentChunkId",
+            "previousChunkId",
+            "nextChunkId",
+        }
+    }
+    content = projected.get("content")
+    if isinstance(content, str) and len(content) > _MODEL_SEARCH_CONTENT_CHARS:
+        projected["content"] = content[:_MODEL_SEARCH_CONTENT_CHARS]
+        projected["contentTruncatedForTransport"] = True
+    return projected
 
 
 def _success(request_id: Any, result: Mapping[str, Any]) -> dict[str, Any]:

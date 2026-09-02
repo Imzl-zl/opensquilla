@@ -32,6 +32,10 @@ _INTERNAL_ID_HINT = re.compile(
 _KNOWLEDGE_TOOLS = frozenset({"search", "searchByIds", "getFileDetails", "getTable"})
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MAX_SCREENSHOT_BYTES = 20 * 1024 * 1024
+_EXPECTED_CONTRACT_VERSION = "knowledge-vnext/2"
+_EXPECTED_CHUNK_POLICY_ID = "hierarchical_token_v4"
+_EXPECTED_INDEX_VERSION = "knowledge-index-v5"
+_EXPECTED_RETRIEVAL_PROFILE = "hybrid_rrf_bge_m3_fts5"
 
 
 class ResearchStateError(ValueError):
@@ -353,9 +357,11 @@ class KnowledgeResearchStore:
             "manifestVersion": PUBLIC_MANIFEST_VERSION,
             "files": files,
         }
+        coverage = self._report_coverage(state)
         self._save(state)
         return {
             "status": "finalized",
+            "coverage": coverage,
             "publicArtifactManifest": {
                 "schemaVersion": PUBLIC_MANIFEST_VERSION,
                 "files": files,
@@ -401,9 +407,40 @@ class KnowledgeResearchStore:
         arguments: Mapping[str, Any],
         structured: Mapping[str, Any],
     ) -> tuple[str, int]:
+        expected_strategy = (
+            "pure_score" if tool_name == "searchByIds" else "hierarchical_interleave"
+        )
+        if (
+            structured.get("contractVersion") != _EXPECTED_CONTRACT_VERSION
+            or structured.get("chunkPolicyId") != _EXPECTED_CHUNK_POLICY_ID
+            or structured.get("indexVersion") != _EXPECTED_INDEX_VERSION
+            or structured.get("effectiveProfile") != _EXPECTED_RETRIEVAL_PROFILE
+            or structured.get("retrievalProfile") != _EXPECTED_RETRIEVAL_PROFILE
+            or structured.get("selectionStrategy") != expected_strategy
+            or structured.get("scopeEnforced") is not True
+            or structured.get("selectionSource") == "fallback"
+            or structured.get("fallbackReason") not in {None, ""}
+            or structured.get("warnings") != []
+        ):
+            return "unverified_retrieval_contract", 0
         results = structured.get("results")
         if not isinstance(results, list):
             return "unverified_invalid_payload", 0
+        result_count = structured.get("count")
+        if (
+            not isinstance(result_count, int)
+            or isinstance(result_count, bool)
+            or result_count != len(results)
+        ):
+            return "unverified_invalid_payload", 0
+        for count_name in ("lexicalCandidateCount", "vectorCandidateCount"):
+            candidate_count = structured.get(count_name)
+            if (
+                not isinstance(candidate_count, int)
+                or isinstance(candidate_count, bool)
+                or candidate_count < 0
+            ):
+                return "unverified_invalid_payload", 0
         requested_file_ids: set[str] | None = None
         if tool_name == "searchByIds":
             raw_file_ids = arguments.get("fileIds")
@@ -426,17 +463,25 @@ class KnowledgeResearchStore:
             evidence_id = item.get("evidenceId")
             file_id = item.get("fileId")
             document_id = item.get("documentId")
+            chunk_id = item.get("chunkId")
             revision = item.get("revision")
             content = item.get("content")
             if not all(
                 isinstance(value, str) and value
-                for value in (evidence_id, file_id, revision, content)
+                for value in (
+                    evidence_id,
+                    file_id,
+                    document_id,
+                    chunk_id,
+                    revision,
+                    content,
+                )
             ):
-                return "unverified_invalid_payload", 0
-            if document_id is not None and not isinstance(document_id, str):
                 return "unverified_invalid_payload", 0
             assert isinstance(evidence_id, str)
             assert isinstance(file_id, str)
+            assert isinstance(document_id, str)
+            assert isinstance(chunk_id, str)
             assert isinstance(revision, str)
             assert isinstance(content, str)
             if requested_file_ids is not None and file_id not in requested_file_ids:
@@ -450,11 +495,16 @@ class KnowledgeResearchStore:
                 "evidenceId": evidence_id,
                 "fileId": file_id,
                 "documentId": document_id,
+                "chunkId": chunk_id,
                 "revision": revision,
                 "title": title,
                 "locator": _safe_json(locator),
                 "content": content,
                 "contentSha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "contentKind": item.get("contentKind"),
+                "parentChunkId": item.get("parentChunkId"),
+                "previousChunkId": item.get("previousChunkId"),
+                "nextChunkId": item.get("nextChunkId"),
                 "verificationStatus": "verified",
             }
             existing = ledger["evidence"].get(evidence_id)
@@ -505,6 +555,8 @@ class KnowledgeResearchStore:
         arguments: Mapping[str, Any],
         structured: Mapping[str, Any],
     ) -> tuple[str, int]:
+        if structured.get("contractVersion") != _EXPECTED_CONTRACT_VERSION:
+            return "unverified_contract_version", 0
         file_payload = _mapping(structured.get("file"))
         tables = structured.get("tables")
         requested_file = arguments.get("fileId")
@@ -649,6 +701,8 @@ class KnowledgeResearchStore:
         structured: Mapping[str, Any],
         content: list[Any],
     ) -> tuple[str, int]:
+        if structured.get("schemaVersion") != "knowledge-table-artifact/2":
+            return "unverified_contract_version", 0
         table_id = structured.get("tableId")
         file_id = structured.get("fileId")
         if table_id != arguments.get("tableId") or file_id != arguments.get("fileId"):
@@ -720,6 +774,9 @@ class KnowledgeResearchStore:
         return _safe_json(
             {
                 "requestedProfile": structured.get("requestedProfile"),
+                "contractVersion": structured.get("contractVersion"),
+                "chunkPolicyId": structured.get("chunkPolicyId"),
+                "indexVersion": structured.get("indexVersion"),
                 "effectiveProfile": structured.get("effectiveProfile")
                 or structured.get("retrievalProfile"),
                 "retrievalProfile": structured.get("retrievalProfile"),
@@ -729,6 +786,8 @@ class KnowledgeResearchStore:
                 if isinstance(structured.get("warnings"), list)
                 else [],
                 "scopeEnforced": structured.get("scopeEnforced"),
+                "selectionStrategy": structured.get("selectionStrategy"),
+                "budgetExceeded": structured.get("budgetExceeded"),
                 "lexicalCandidateCount": structured.get("lexicalCandidateCount"),
                 "vectorCandidateCount": structured.get("vectorCandidateCount"),
             }
@@ -920,6 +979,19 @@ class KnowledgeResearchStore:
             known_ids.update(ledger["evidence"])
             known_ids.update(ledger["files"])
             known_ids.update(ledger["tables"])
+            for record in ledger["evidence"].values():
+                if not isinstance(record, Mapping):
+                    continue
+                for name in (
+                    "documentId",
+                    "chunkId",
+                    "parentChunkId",
+                    "previousChunkId",
+                    "nextChunkId",
+                ):
+                    identifier = record.get(name)
+                    if isinstance(identifier, str) and identifier:
+                        known_ids.add(identifier)
         for value in values:
             if _INTERNAL_ID_HINT.search(value) or any(
                 identifier in value for identifier in known_ids
@@ -956,6 +1028,33 @@ class KnowledgeResearchStore:
                 "report.html": hashlib.sha256(html_bytes).hexdigest(),
                 "report.pdf": hashlib.sha256(pdf_bytes).hexdigest(),
             },
+        }
+
+    @staticmethod
+    def _report_coverage(state: Mapping[str, Any]) -> dict[str, int]:
+        evidence_ids: set[str] = set()
+        table_ids: set[str] = set()
+        source_ids: set[str] = set()
+        claim_count = 0
+        for item in state["report"]["items"]:
+            if item.get("kind") == "claim":
+                claim_count += 1
+                evidence_ids.update(item.get("evidenceIds", []))
+            elif item.get("kind") == "table":
+                table_ids.add(str(item["tableId"]))
+        for evidence_id in evidence_ids:
+            record = state["ledger"]["evidence"].get(evidence_id)
+            if isinstance(record, Mapping):
+                source_ids.add(str(record["fileId"]))
+        for table_id in table_ids:
+            record = state["ledger"]["tables"].get(table_id)
+            if isinstance(record, Mapping):
+                source_ids.add(str(record["fileId"]))
+        return {
+            "claimCount": claim_count,
+            "tableCount": len(table_ids),
+            "sourceCount": len(source_ids),
+            "evidenceCount": len(evidence_ids),
         }
 
     def _state_path(self, research_id: str) -> Path:
