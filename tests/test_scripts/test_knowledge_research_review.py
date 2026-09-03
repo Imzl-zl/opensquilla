@@ -27,7 +27,9 @@ from tests.test_scripts.test_knowledge_research_navigation import (
 def test_deep_requires_scoped_call_and_current_complete_comparison(tmp_path: Path) -> None:
     source = search_payload("query", ["file-a"], "Original fact 5,700.")
     scoped = search_payload("precise", ["file-a"], "Original fact 5,700.", scoped=True)
-    bridge, store, _, _ = setup(tmp_path, [result(source), result(scoped)])
+    bridge, store, _, _ = setup(
+        tmp_path, [result(source), result(scoped), result(_source_details(source))]
+    )
     begin, _ = invoke(bridge, "researchBegin", {"title": "Research", "mode": "deep"})
     rid = begin["researchId"]
     common = {"researchId": rid}
@@ -242,7 +244,7 @@ def _submit_fact(store: KnowledgeResearchStore, rid: str, source: Mapping[str, A
     )
 
 
-def test_metadata_completion_invalidates_review_once_before_render(tmp_path: Path) -> None:
+def test_metadata_completion_precedes_review_without_an_extra_full_pass(tmp_path: Path) -> None:
     source = search_payload("q", ["file-a"], scoped=True)
     source["results"][0]["title"] = "[page 7]"
     details = _source_details(source)
@@ -252,19 +254,16 @@ def test_metadata_completion_invalidates_review_once_before_render(tmp_path: Pat
     _submit_fact(store, rid, source)
     first, _ = invoke(bridge, "researchNavigate", {"researchId": rid, "view": "review"})
     assert review_preparation(store.snapshot(rid))["comparisonPrepared"]
-    pending, response = invoke(bridge, "researchFinalize", {"researchId": rid})
-    assert not response["result"]["isError"]
-    assert pending["status"] == "needs_review"
-    assert "publicArtifactManifest" not in pending
     assert not store.output_root.exists()
     assert len(upstream.calls) == 2
-    second, _ = invoke(bridge, "researchNavigate", {"researchId": rid, "view": "review"})
-    assert second["reportHash"] != first["reportHash"]
-    entry = next(row for row in second["entries"] if row["kind"] == "evidence")
+    entry = next(row for row in first["entries"] if row["kind"] == "evidence")
     assert entry["title"] == details["file"]["title"]
     assert entry["sourceFormat"] == "PDF"
     finished, _ = invoke(bridge, "researchFinalize", {"researchId": rid})
     assert finished["status"] == "finalized"
+    second, _ = invoke(bridge, "researchNavigate", {"researchId": rid, "view": "review"})
+    assert second["entries"] == []
+    assert second["reportHash"] == first["reportHash"]
     replay, _ = invoke(bridge, "researchFinalize", {"researchId": rid})
     assert replay == finished
     assert len(upstream.calls) == 2

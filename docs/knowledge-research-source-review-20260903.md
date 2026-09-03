@@ -154,3 +154,105 @@ contradiction is still flagged. Rollout recovery probes also passed for a busy
 Gateway, a corrupt backup and a failed restoration write, without real service
 commands. Idle observations are not atomic admission fencing; rollout must occur
 in a quiet window and preserve before/after task inventories.
+
+## Breadth and Incremental Review Follow-up
+
+The next real user task completed in 522.626 seconds, with 20 paragraphs (5,360
+body characters), 31 references and three table crops. It discovered 83 files
+but scoped-search selected only five files in one call. It projected 91 comparison
+fragments three times: after drafting, after one claim correction, and after
+finalize filled bibliography metadata. One limit=51 navigation call was rejected.
+Compared with the earlier 7,347-character/eight-table report, research breadth
+was not restored by adding heavier review. Reference count is not coverage.
+
+The follow-up makes two separately testable changes:
+
+- Deep fresh review prepares cited-source metadata before creating its snapshot.
+  Metadata I/O is outside the state transaction. Explicit cursors, snapshot
+  resumes and committed request replays do not re-fetch metadata. Failed metadata
+  attempts remain failures, carry warnings and are not immediately retried at
+  finalize for the same report/source hash. An explicit getFileDetails can retry;
+  successful metadata corrections still invalidate affected source comparisons.
+- Review protocol `source-comparison/4` tracks complete comparison groups by item
+  and exact bound source hashes. New, edited or source-affected groups require
+  fresh full fragment coverage; unchanged complete groups carry forward. Missing
+  fragment ranges, old cursors or unmarked legacy snapshots cannot certify a new
+  group. These records mean prepared comparison material, not semantic verification.
+
+The Skill separates question coverage from item review. It follows substantive
+gaps in viewpoints, mechanisms, scenarios and table evidence through discovery and
+scoped reading. It does not enforce word, file, citation, image or iteration quotas,
+nor treat a successful scoped call as enough depth. HTML retains parsed tables
+and original crops; PDF retains prose/citations but uses only crops for tables.
+
+In a read-only in-memory replay of the same latest user report, changing one
+paragraph reduced the next comparison from 91 fragments to five, reusing 22
+unchanged groups. The original state bytes were unchanged. This is a projection
+measurement, not an observed end-to-end speed or semantic-quality claim.
+
+Round one implemented the dependency hashes, metadata preparation and coverage
+guidance. Round two independently reviewed fragment/cursor isolation, metadata
+recovery and realistic Skill decisions. Focused fixtures exercise partial groups,
+dependency invalidation, new interpretations of shared evidence, caption updates,
+legacy snapshots, failed metadata attempts, crash recovery and standard-mode
+compatibility. Exact final verification and deployment receipts accompany the
+immutable release; historical user artifacts remain untouched.
+
+Independent review found two recovery defects and confirmed their fixes. Metadata
+attempts now merge with current committed state under the transaction lock; a
+stale failed request cannot replace another request's attempts or poison a newer
+report version. Reusing already rendered artifacts returns a copy of the receipt
+with current review preparation, without rewriting historical artifact bytes or
+the stored old receipt. Seven deterministic metadata concurrency cases and the
+cached-receipt regression cover these paths.
+
+The final isolated sidecar suite passed 382 tests in 14.18 seconds, including the
+stock stdio restart and real PDF gates. Ruff check, format check (25 files),
+directed mypy (25 files, explicit package bases and ignored missing dependency
+stubs), and git diff whitespace checks passed. No whole-repository gates were run.
+
+### Fresh Same-Question Trial
+
+An isolated Gateway used the same user question, unchanged core/router and
+read-only Full-v10 Knowledge service. Both this trial and the prior user task
+recorded `z-ai/glm-5.2`. The trial workspace is
+`/mnt/data/opensquilla-dev/tmp/research-breadth-candidate-20260903`.
+
+| Observed measure | Prior user task | New isolated trial |
+| --- | ---: | ---: |
+| Task duration, seconds | 522.626 | 407.893 |
+| Body characters | 5,360 | 6,595 |
+| Paragraphs | 20 | 20 |
+| Bibliography entries | 31 | 39 |
+| Original table crops | 3 | 3 |
+| PDF pages | 8 | 10 |
+| Discovery files in ledger | 83 | 88 |
+| Scoped selected files / calls | 5 / 1 | 4 / 1 |
+| Comparison fragment projections | 91 + 91 + 91 | 116 + 10 |
+| Finalize calls | 3 | 1 |
+
+The second comparison followed two claim revisions: two groups were pending,
+21 unchanged groups were reused. Seven review-page calls completed both snapshots
+and finalization succeeded on its first call. There were no tool-result errors.
+The 34 actual tool-use events include six discovery searches, one scoped search,
+two explicit file-details reads and three table reads. Automatic bibliography
+metadata requests are not counted as Agent reading of additional files/tables.
+
+All three manifest SHA256 values match actual artifact bytes. HTML has three
+parsed tables and three inline original images. The A4 PDF is ten pages with
+embedded Noto CJK fonts; the first page was rendered and visually inspected.
+Neither HTML nor extracted PDF text exposes internal evidence/table/research IDs.
+The latest and earlier user report state SHA256 values remained unchanged.
+
+This is one real trial, not a stable performance estimate or proof of broader
+research quality. Body length increased by 23.0% and observed duration fell by
+22.0%, but useful table coverage did not grow and scoped reading remained narrow.
+The trial still contains inconsistent same-currency parenthetical amounts in a
+semiconductor earnings paragraph; the existing narrow direct-equivalence guard
+does not cover general approximate parentheticals. It is not a semantically
+approved report. The incremental protocol proves comparison material was prepared,
+not that the Agent interpreted source numbers, units or forecasts correctly.
+
+The serial model trial did not exercise the late concurrency-recovery fixes;
+those were validated separately by the final focused suite and independent
+closing probes. No historical user task or report was repaired in place.

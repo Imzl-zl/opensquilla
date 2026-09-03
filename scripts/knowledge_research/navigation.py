@@ -13,7 +13,7 @@ if __package__:
     from .claims import claim_hash
     from .locator import locator_fragments, locator_transport, source_locator
     from .references import _clean_title
-    from .review import review_entries, table_item_hash
+    from .review import REVIEW_PROTOCOL, review_entries, table_item_hash
     from .state import ResearchStateError, sha256_json
 else:  # pragma: no cover - direct bridge entrypoint
     from claims import claim_hash  # type: ignore[import-not-found,no-redef]
@@ -23,7 +23,11 @@ else:  # pragma: no cover - direct bridge entrypoint
         source_locator,
     )
     from references import _clean_title  # type: ignore[import-not-found,no-redef]
-    from review import review_entries, table_item_hash  # type: ignore[import-not-found,no-redef]
+    from review import (  # type: ignore[import-not-found,no-redef]
+        REVIEW_PROTOCOL,
+        review_entries,
+        table_item_hash,
+    )
     from state import ResearchStateError, sha256_json  # type: ignore[import-not-found,no-redef]
 
 MAX_FRAME_BYTES = 60 * 1024
@@ -372,6 +376,7 @@ class Navigation:
         ids: list[str] = []
         revisions: list[Any] = []
         metadata: dict[str, Any] = {}
+        review_groups: list[dict[str, Any]] = []
         if view in {"files", "evidence"}:
             for canonical_id, row in self.data[view].items():
                 if view == "files":
@@ -396,7 +401,10 @@ class Navigation:
                 ids.append(ref)
                 revisions.append(row["sourceRevisions"])
         elif view == "review":
-            reviewed = review_entries(self.state, self.reference, locator_projection=source_locator)
+            reviewed = review_entries(
+                self.state, self.reference, locator_projection=source_locator, pending_only=True
+            )
+            review_groups = reviewed.pop("_reviewGroups")
             entries = reviewed["entries"]
             metadata = {key: value for key, value in reviewed.items() if key != "entries"}
             ids = [f"review-{index}" for index in range(len(entries))]
@@ -450,12 +458,17 @@ class Navigation:
                     revisions.append(None)
         else:
             raise NavigationError("INVALID_VIEW", "Unknown navigation view", pointer="/view")
-        return self.snapshot(
+        snapshot_ref = self.snapshot(
             "directory",
             {"view": view, "entries": entries, "progress": self.progress(), **metadata},
             ids,
             revisions,
         )
+        if view == "review":
+            self.data["snapshots"][snapshot_ref].update(
+                reviewProtocol=REVIEW_PROTOCOL, reviewGroups=review_groups
+            )
+        return snapshot_ref
 
     def _locator_metadata(self, snapshot_ref: str, value: Any) -> Any:
         if isinstance(value, list):

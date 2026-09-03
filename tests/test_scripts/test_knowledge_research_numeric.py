@@ -70,9 +70,13 @@ def test_only_gross_direct_same_currency_equivalences(text: str, flagged: bool) 
 
 
 def test_numeric_gate_requires_correction_and_new_review(tmp_path: Path) -> None:
+    from tests.test_scripts.test_knowledge_research_review import _source_details
+
     source = search_payload("q", ["file-a"], "Nomura forecasts KRW 116 trillion for 2026.")
     scoped = search_payload("scope", ["file-a"], source["results"][0]["content"], scoped=True)
-    bridge, store, _, _ = setup(tmp_path, [result(source), result(scoped)])
+    bridge, store, _, _ = setup(
+        tmp_path, [result(source), result(scoped), result(_source_details(source))]
+    )
     begin, _ = invoke(bridge, "researchBegin", {"title": "Report", "mode": "deep"})
     common = {"researchId": begin["researchId"]}
     found, _ = invoke(bridge, "search", {**common, "query": "q"})

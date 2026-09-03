@@ -529,7 +529,9 @@ class KnowledgeResearchStore:
         previous = state.get("finalized")
         if isinstance(previous, Mapping) and previous.get("inputSha256") == input_hash:
             self._check_artifacts(previous["files"])
-            return _safe_json(previous["receipt"])
+            receipt: dict[str, Any] = _safe_json(previous["receipt"])
+            receipt["review"] = preparation
+            return receipt
         html = render_html_report(self._state_for_render(state))
         self._reject_report_leaks(html, state)
         pdf = self.pdf_renderer(html, self.workspace)

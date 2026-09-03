@@ -26,6 +26,7 @@ if __package__:
         strings,
         text,
     )
+    from .review import report_review_hash
     from .state import (
         KnowledgeResearchStore,
         ResearchStateError,
@@ -47,6 +48,7 @@ else:  # pragma: no cover - exercised by deployment entrypoint smoke tests
         strings,
         text,
     )
+    from review import report_review_hash  # type: ignore[import-not-found,no-redef]
     from state import (  # type: ignore[import-not-found,no-redef]
         KnowledgeResearchStore,
         ResearchStateError,
@@ -237,6 +239,13 @@ class KnowledgeResearchBridge:
                 self._call_local(name, self._canonical_arguments(research_id, name, arguments)),
             )
 
+        def project(nav: Navigation, snapshot_ref: str, start: int = 0) -> dict[str, Any]:
+            reply = self._project(
+                nav, snapshot_ref, start, positive_limit(arguments.get("limit")), request_id
+            )
+            nav.commit_request(arguments.get("requestKey"), reply)
+            return reply
+
         def prepare(state: dict[str, Any]) -> dict[str, Any]:
             nav = self._navigation(state)
             key = arguments.get("requestKey")
@@ -247,10 +256,11 @@ class KnowledgeResearchBridge:
             replay = nav.begin_request(key, fingerprint)
             if replay is not None:
                 return {"reply": replay}
+            positive_limit(arguments.get("limit"))
             forwarded: dict[str, Any] = {}
             snapshot_ref: str | None = None
             start = 0
-            if arguments.get("cursor") is not None:
+            if "cursor" in arguments:
                 snapshot_ref, start = nav.from_cursor(arguments["cursor"])
                 self._check_cursor_target(nav, name, arguments, snapshot_ref)
             elif name == "researchNavigate":
@@ -259,6 +269,8 @@ class KnowledgeResearchBridge:
                     if snapshot_ref not in nav.data["snapshots"]:
                         raise NavigationError("UNKNOWN_REFERENCE", "Unknown snapshot")
                     self._check_cursor_target(nav, name, arguments, snapshot_ref)
+                elif arguments.get("view") == "review" and state.get("mode") == "deep":
+                    return {"prepareMetadata": True}
                 else:
                     snapshot_ref = nav.directory(str(arguments.get("view", "progress")))
             elif name == "researchReadEvidence":
@@ -290,16 +302,22 @@ class KnowledgeResearchBridge:
                             "REFERENCE_MISMATCH", "Table belongs to a different file"
                         )
             if snapshot_ref is not None:
-                reply = self._project(
-                    nav, snapshot_ref, start, positive_limit(arguments.get("limit")), request_id
-                )
-                nav.commit_request(key, reply)
-                return {"reply": reply}
+                return {"reply": project(nav, snapshot_ref, start)}
             return {"forwarded": forwarded}
 
         prepared = self.store.atomic_update(research_id, prepare)
         if "reply" in prepared:
             return _success(request_id, prepared["reply"])
+        if prepared.get("prepareMetadata"):
+            warnings = self._prepare_reference_metadata(research_id)
+
+            def review(state: dict[str, Any]) -> dict[str, Any]:
+                nav = self._navigation(state)
+                snapshot_ref = nav.directory("review")
+                nav.data["snapshots"][snapshot_ref].setdefault("metadataWarnings", warnings)
+                return project(nav, snapshot_ref)
+
+            return _success(request_id, self.store.atomic_update(research_id, review))
         forwarded = prepared["forwarded"]
         # Both the upstream call and inventory enumeration run outside the state lock.
         response = (
@@ -569,6 +587,11 @@ class KnowledgeResearchBridge:
         else:
             key = "groups" if kind == "groups" else "entries"
             metadata = {k: v for k, v in source.items() if k != key}
+            if snapshot.get("metadataWarnings"):
+                metadata["warnings"] = [
+                    *metadata.get("warnings", []),
+                    *snapshot["metadataWarnings"],
+                ]
             if kind == "groups":
                 metadata.update(status="grouped", queried=False, subset=True)
             payload = item_page(
@@ -697,6 +720,91 @@ class KnowledgeResearchBridge:
             seen.add(cursor)
         raise NavigationError("INVENTORY_TOO_LARGE", "Upstream inventory exceeded its page limit")
 
+    def _prepare_reference_metadata(self, research_id: str) -> list[str]:
+        for file_id in self.store.missing_reference_metadata(research_id):
+            state = self.store.snapshot(research_id)
+            request_hash = report_review_hash(state)
+            previous = state.get("extensions", {}).get("metadataPreparation", {})
+            if state["ledger"]["files"][file_id].get("metadataSource") == "getFileDetails" or (
+                previous.get("reportHash") == request_hash and file_id in previous["attempts"]
+            ):
+                continue
+            metadata_arguments = {"fileId": file_id, "limit": 1}
+            try:
+                response = self._upstream_tool("getFileDetails", metadata_arguments)
+            except (OSError, RuntimeError):
+                response = {}
+            result = response.get("result")
+
+            def on_commit(
+                state: dict[str, Any], call: dict[str, Any], before_hash: str | None = None
+            ) -> None:
+                call["purpose"] = "bibliography_metadata"
+                before_hash = before_hash or report_review_hash(state)
+                if call["verificationStatus"] != "verified" and before_hash != request_hash:
+                    return
+                current = state.get("extensions", {}).get("metadataPreparation", {})
+                attempts = (
+                    copy.deepcopy(current["attempts"])
+                    if current.get("reportHash") == before_hash
+                    else {}
+                )
+                attempt = {
+                    "callSequence": call["sequence"],
+                    "verificationStatus": call["verificationStatus"],
+                }
+                if call["verificationStatus"] == "verified":
+                    assert isinstance(result, Mapping)
+                    structured, _ = recover_structured_content(result)
+                    assert structured is not None
+                    self._navigation(state).remember_file_metadata(file_id, structured["file"])
+                else:
+                    attempt["warning"] = (
+                        "Metadata preparation attempted, not completed; "
+                        "explicit getFileDetails can retry."
+                    )
+                attempts[file_id] = attempt
+                state.setdefault("extensions", {})["metadataPreparation"] = {
+                    "reportHash": report_review_hash(state),
+                    "attempts": copy.deepcopy(attempts),
+                }
+
+            if isinstance(result, Mapping):
+
+                def record(state: dict[str, Any]) -> dict[str, Any]:
+                    # Match cached attempts before ingestion changes the hash, under the same
+                    # lock; only this accepted metadata update may carry them to the new hash.
+                    before_hash = report_review_hash(state)
+                    return self.store._record_knowledge_call(
+                        state,
+                        research_id=research_id,
+                        tool_name="getFileDetails",
+                        arguments=metadata_arguments,
+                        result=result,
+                        metadata_only=True,
+                        on_commit=lambda state, call: on_commit(state, call, before_hash),
+                    )
+
+                self.store.atomic_update(research_id, record)
+            else:
+                self.store.record_knowledge_error(
+                    research_id=research_id,
+                    tool_name="getFileDetails",
+                    arguments=metadata_arguments,
+                    error={"message": "Bibliography metadata unavailable"},
+                    on_commit=on_commit,
+                )
+        unavailable = len(self.store.missing_reference_metadata(research_id))
+        return (
+            [
+                f"Metadata preparation incomplete for {unavailable} cited files; "
+                "unavailable metadata was not inferred. Automatic retry is deferred until "
+                "report/source data changes; explicit getFileDetails can retry."
+            ]
+            if unavailable
+            else []
+        )
+
     def _call_local(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         if name == "researchBegin":
             payload = self.store.begin(
@@ -733,41 +841,14 @@ class KnowledgeResearchBridge:
             pending = self.store.pending_review(research_id)
             if pending is not None:
                 return _tool_result(pending)
-            unavailable = 0
-            for file_id in self.store.missing_reference_metadata(research_id):
-                metadata_arguments = {"fileId": file_id, "limit": 1}
-                try:
-                    response = self._upstream_tool("getFileDetails", metadata_arguments)
-                except (OSError, RuntimeError):
-                    response = {}
-                result = response.get("result")
-                if isinstance(result, Mapping):
-                    call = self.store.record_knowledge_call(
-                        research_id=research_id,
-                        tool_name="getFileDetails",
-                        arguments=metadata_arguments,
-                        result=result,
-                        metadata_only=True,
-                    )
-                    unavailable += call["verificationStatus"] != "verified"
-                else:
-                    unavailable += 1
-                    self.store.record_knowledge_error(
-                        research_id=research_id,
-                        tool_name="getFileDetails",
-                        arguments=metadata_arguments,
-                        error={"message": "Bibliography metadata unavailable"},
-                    )
+            warnings = self._prepare_reference_metadata(research_id)
             payload = self.store.finalize(
                 research_id=research_id,
                 expected_claim_keys=arguments.get("expectedClaimKeys"),
                 expected_table_ids=arguments.get("expectedTableIds"),
             )
-            if unavailable:
-                payload["warnings"] = [
-                    f"Metadata unavailable for {unavailable} cited files; "
-                    "kept separate without inferred dates or format pairing."
-                ]
+            if warnings:
+                payload["warnings"] = [*payload.get("warnings", []), *warnings]
         else:
             raise NavigationError("UNKNOWN_TOOL", "Unknown local research tool")
         return _tool_result(payload)
@@ -1030,7 +1111,10 @@ def _research_tools() -> list[dict[str, Any]]:
                 "description": (
                     "Page fixed result snapshots, reference directories and progress. "
                     "view=report returns current paragraph keys/hashes/items and added table "
-                    "refs, without paragraph text. Cursor resumes the original snapshot."
+                    "refs, without paragraph text. Fresh view=review returns only pending "
+                    "new/changed items; unchanged complete comparisons are reused. In deep "
+                    "mode it first prepares cited file metadata. Cursor resumes the original "
+                    "snapshot without fetching metadata."
                 ),
                 "inputSchema": {
                     "type": "object",

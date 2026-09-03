@@ -11,16 +11,29 @@ rules. These notes explain tool outputs, not additional research quotas.
   no search. Neither results nor scope membership prove full-file reading.
 - `mcp_researchNavigate` cursors resume a fixed snapshot, not a refreshed directory.
   `view="report"` returns keys/hashes and table mappings without paragraph prose.
-  `view="review"` supplies submitted claim text with `claimKey`, `claimHash`, and
-  `evidenceRefs`; exact bound evidence with `evidenceRef`, title, and locator; and
-  table text with caption, page, and `tableHash`. Follow all fragments/cursors for
-  review. This covers submitted content and cited excerpts, not entire documents;
-  the service records material projection, never successful semantic verification.
+  Use it for current CAS hashes of items absent from pending review.
+  Fresh `view="review"` (no cursor) returns pending groups only, using item and
+  source hashes: new, unfinished, or changed items and items whose sources changed.
+  Before the first fresh review, metadata preparation is automatic but best-effort.
+  Metadata warnings mark incomplete attempts, not source verification; explicitly
+  retry `mcp_getFileDetails` if needed. Unknown metadata alone implies neither bad
+  OCR nor a need for whole-report rereading.
+  Completed unchanged groups carry forward; changed attribution can reopen affected
+  groups. Follow every pending page and fragment, then use a fresh view after edits,
+  not the old snapshot or a whole-report reread.
+- Review groups supply claim text with `claimKey`, `claimHash`, and `evidenceRefs`;
+  exact bound evidence with `evidenceRef`, title, locator, and `forClaimItem` linkage;
+  and table text with caption, page, and `tableHash`. Projection covers submitted
+  content and bound excerpts, not confirmed model reading or semantic
+  verification. No pending groups means no pending projection, not adequate research.
 - `mcp_researchReadEvidence` reads saved canonical evidence with continuations,
   not new upstream context. `mcp_getFileDetails` inventories detected tables;
   inventory completeness does not establish PDF extraction completeness.
   `mcp_getTable` preserves available table text and original crop metadata;
-  materializing a crop does not mean the model saw it.
+  materializing a crop does not mean the model saw it. HTML retains original
+  screenshots and full tables. PDF retains research prose and citations, but tables
+  use only original screenshots, not redrawn HTML tables. Both are self-contained.
+  Select tables by analytical contribution, not a representative-image limit or quota.
 - Progress: `discoveredFileCount` means discovery. Search/scoped call counts are
   committed ledger calls; successful counts describe verified receipts, not useful
   findings. Grouping, cache replays, and unrecorded uncertain calls are excluded.

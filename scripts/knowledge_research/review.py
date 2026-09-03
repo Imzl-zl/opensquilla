@@ -28,6 +28,7 @@ else:  # pragma: no cover - standalone bridge
 
 FRAGMENT_CHARS = 2_000
 MAX_METADATA_BYTES = 12_000
+REVIEW_PROTOCOL = "source-comparison/4"
 Reference = Callable[[str, str, Mapping[str, Any]], str]
 LocatorProjection = Callable[[Mapping[str, Any], str], dict[str, Any]]
 
@@ -71,7 +72,7 @@ def report_review_hash(state: Mapping[str, Any]) -> str:
     )
     return sha256_json(
         {
-            "protocol": "source-comparison/3",
+            "protocol": REVIEW_PROTOCOL,
             "report": items,
             "files": [
                 {
@@ -128,6 +129,36 @@ def report_review_hash(state: Mapping[str, Any]) -> str:
     )
 
 
+def item_review_hash(state: Mapping[str, Any], item: Mapping[str, Any]) -> str:
+    return report_review_hash({**state, "report": {"items": [item]}})
+
+
+def _prepared_items(state: Mapping[str, Any]) -> dict[str, set[str]]:
+    nav = state.get("extensions", {}).get("navigation", {})
+    ranges_by_snapshot: dict[str, list[tuple[int, int]]] = {}
+    for row in nav.get("projections", {}).values():
+        ranges_by_snapshot.setdefault(row["snapshotRef"], []).append(
+            (row["range"]["start"], row["range"]["end"])
+        )
+    prepared: dict[str, set[str]] = {}
+    for ref, snapshot in nav.get("snapshots", {}).items():
+        if snapshot.get("reviewProtocol") != REVIEW_PROTOCOL:
+            continue
+        ranges = sorted(ranges_by_snapshot.get(ref, []))
+        for group in snapshot.get("reviewGroups", []):
+            covered = group["start"]
+            for start, end in ranges:
+                if end <= covered:
+                    continue
+                if start > covered:
+                    break
+                covered = max(covered, end)
+                if covered >= group["end"]:
+                    prepared.setdefault(group["item"], set()).add(group["hash"])
+                    break
+    return prepared
+
+
 def _fragments(metadata: dict[str, Any], content: str) -> list[dict[str, Any]]:
     encoded = canonical_json(metadata)
     if len(encoded.encode("utf-8")) > MAX_METADATA_BYTES:
@@ -175,9 +206,13 @@ def review_entries(
     reference: Reference,
     *,
     locator_projection: LocatorProjection = review_locator,
+    pending_only: bool = False,
 ) -> dict[str, Any]:
     ledger = state["ledger"]
     entries: list[dict[str, Any]] = []
+    groups: list[dict[str, Any]] = []
+    prepared = _prepared_items(state) if pending_only else {}
+    reused = 0
 
     def append_evidence(key: str, claim_item: str) -> None:
         record = ledger["evidence"][key]
@@ -200,6 +235,11 @@ def review_entries(
         )
 
     for item in state["report"]["items"]:
+        digest = item_review_hash(state, item)
+        if digest in prepared.get(item["itemId"], set()):
+            reused += 1
+            continue
+        start = len(entries)
         if item["kind"] == "claim":
             refs = []
             for key in item["evidenceIds"]:
@@ -248,8 +288,13 @@ def review_entries(
                     table_text,
                 )
             )
+        groups.append({"item": item["itemId"], "hash": digest, "start": start, "end": len(entries)})
     return {
         "reportHash": report_review_hash(state),
+        "reviewProtocol": REVIEW_PROTOCOL,
+        "_reviewGroups": groups,
+        "pendingItemCount": len(groups),
+        "reusedItemCount": reused,
         "entries": entries,
         "scope": "submitted_claims_and_cited_excerpts_not_full_documents",
         "semanticVerification": "not_performed_by_service",
@@ -258,11 +303,15 @@ def review_entries(
             "sources, linked by forClaimItem. Check each paragraph as its "
             "sources arrive and record mismatches before requesting the next page. "
             "Compare each assertion with its cited excerpt: attribution, number, unit, date, "
-            "forecast horizon and direction. Follow all pages; revise wrong text or references "
+            "forecast horizon and direction. This snapshot includes only pending items when "
+            "requested through review navigation; unchanged complete comparisons are reused. "
+            "Follow all pages; revise wrong text or references "
             "with the current claimHash. Search scoped files for missing context. "
             "For metadata entries, join JSON content ranges with the same metadataSha256 "
             "and parse the result for that item's full source information. "
-            "Bibliography metadata completion may require one fresh comparison before finalize. "
+            "After edits start a fresh review for affected items only. "
+            "Comparison completion is not research completeness: check missing viewpoints, "
+            "mechanisms, counterevidence and useful tables before deciding to finish. "
             "A complete projection does not certify accurate interpretation."
         ),
     }
@@ -270,33 +319,20 @@ def review_entries(
 
 def review_preparation(state: Mapping[str, Any]) -> dict[str, Any]:
     digest = report_review_hash(state)
-    nav = state.get("extensions", {}).get("navigation", {})
-    complete = False
-    for ref, snapshot in nav.get("snapshots", {}).items():
-        payload = snapshot.get("payload", {})
-        if payload.get("view") != "review" or payload.get("reportHash") != digest:
-            continue
-        total = len(payload.get("entries", []))
-        ranges = sorted(
-            (row["range"]["start"], row["range"]["end"])
-            for row in nav.get("projections", {}).values()
-            if row.get("snapshotRef") == ref
-        )
-        covered = 0
-        for start, end in ranges:
-            if start > covered:
-                break
-            covered = max(covered, end)
-        if total and covered >= total:
-            complete = True
-            break
+    prepared = _prepared_items(state)
+    items = state["report"]["items"]
+    pending = sum(
+        item_review_hash(state, item) not in prepared.get(item["itemId"], set()) for item in items
+    )
     scoped_calls = sum(
         call.get("toolName") == "searchByIds" and call.get("verificationStatus") == "verified"
         for call in state["ledger"]["calls"]
     )
     return {
         "reportHash": digest,
-        "comparisonPrepared": complete,
+        "comparisonPrepared": bool(items) and pending == 0,
+        "pendingItemCount": pending,
+        "preparedItemCount": len(items) - pending,
         "scopedSearchCallCount": scoped_calls,
         "semanticVerification": "not_performed_by_service",
     }
@@ -326,11 +362,11 @@ def review_requirements(state: Mapping[str, Any]) -> dict[str, Any] | None:
                 "tool": "researchNavigate",
                 "arguments": {"researchId": state["researchId"], "view": "review"},
                 "message": (
-                    "Obtain all comparison pages for the current report, check attribution, "
+                    "Obtain all pending comparison pages, check attribution, "
                     "numbers, units, horizons and direction against each cited source. "
                     "Revise incorrect text or references before finalizing. "
-                    "If bibliography metadata was completed after review, obtain a fresh "
-                    "comparison of the now-known sources, then finalize again. "
+                    "A fresh review includes changed/new items and affected sources only; "
+                    "unchanged complete comparisons are reused. "
                     "Material delivery is not semantic verification."
                 ),
             }
