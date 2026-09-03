@@ -213,7 +213,9 @@ def _call(
     )
     assert response is not None
     assert response["id"] == request_id
-    return response["result"]
+    result = response["result"]
+    assert isinstance(result, dict)
+    return result
 
 
 def _result_payload(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -222,12 +224,16 @@ def _result_payload(result: Mapping[str, Any]) -> dict[str, Any]:
         return structured
     content = result.get("content")
     assert isinstance(content, list)
-    return json.loads(content[0]["text"])
+    payload = json.loads(content[0]["text"])
+    assert isinstance(payload, dict)
+    return payload
 
 
 def _begin(bridge: KnowledgeResearchBridge) -> str:
     result = _call(bridge, "researchBegin", {"title": "KOSPI Research"})
-    return _result_payload(result)["researchId"]
+    research_id = _result_payload(result)["researchId"]
+    assert isinstance(research_id, str)
+    return research_id
 
 
 def test_full_v9_shape_builds_verified_private_media_and_three_public_files(
@@ -597,8 +603,9 @@ def test_model_projection_bounds_search_and_table_inventory(tmp_path: Path) -> N
         )
     )
     item = search_result["results"][0]
-    assert len(item["content"]) == 800
-    assert item["contentTruncatedForTransport"] is True
+    assert item["content"] == "x" * 5_000
+    assert item["contentTruncatedForTransport"] is False
+    assert item["contentRange"] == {"start": 0, "end": 5_000, "total": 5_000}
     assert "revision" not in item
     assert set(item["locator"]) == {"title", "sectionPath", "pageStart", "pageEnd"}
 
@@ -609,12 +616,18 @@ def test_model_projection_bounds_search_and_table_inventory(tmp_path: Path) -> N
             {"researchId": research_id, "fileId": FILE_ID},
         )
     )
-    assert set(details_result["file"]) == {"fileId", "title", "filename", "mediaType"}
+    assert set(details_result["file"]) == {"fileRef", "title", "filename", "mediaType"}
     table = details_result["tables"][0]
     assert "documentId" not in table
     assert "extractor" not in table
-    assert len(table["textPreview"]) == 320
-    assert table["textPreviewTruncatedForTransport"] is True
+    assert "textPreview" not in table
+    assert table["tableRef"]
+    assert table["parseComplete"] is False
+    assert table["tables"] == []
+    assert "no_structured_table" in table["issues"]
+    assert store.snapshot(research_id)["ledger"]["evidence"][EVIDENCE_ID]["content"] == (
+        "x" * 5_000
+    )
 
 
 def test_batch_claims_are_atomic(tmp_path: Path) -> None:

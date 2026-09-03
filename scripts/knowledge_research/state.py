@@ -3,20 +3,37 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import hashlib
 import json
 import os
 import re
 import secrets
 import stat
-from collections.abc import Callable, Mapping, Sequence
+import tempfile
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, cast
 
 if __package__:
+    from .claims import (
+        ResearchStateError,
+        apply_claim_batch,
+        canonical_json,
+        invalidate_finalized,
+        sha256_json,
+    )
     from .references import build_bibliography, cited_file_ids
     from .report import render_html_report
 else:  # pragma: no cover - exercised by deployment entrypoint smoke tests
+    from claims import (  # type: ignore[import-not-found,no-redef]
+        ResearchStateError,
+        apply_claim_batch,
+        canonical_json,
+        invalidate_finalized,
+        sha256_json,
+    )
     from references import (  # type: ignore[import-not-found,no-redef]
         build_bibliography,
         cited_file_ids,
@@ -29,8 +46,11 @@ PROVENANCE_SCHEMA_VERSION = "opensquilla-knowledge-provenance/1"
 PUBLIC_MANIFEST_VERSION = "opensquilla-public-artifact-manifest/1"
 
 _RESEARCH_ID = re.compile(r"^kr_[0-9a-f]{32}$")
+_NAVIGATION_NAMESPACE = re.compile(r"^[A-Za-z0-9_-]{22}$")
 _INTERNAL_ID_HINT = re.compile(
-    r"(?:\bev(?:idence)?\d*_[0-9a-f]{8,}\b|\b(?:tbl\d*|t\d+)_[0-9a-z]{8,}\b|"
+    r"(?:kref_[0-9a-f]{8,32}_[a-z]+[0-9]+|"
+    r"[A-Za-z0-9_-]{22}:(?:[DETC][1-9][0-9]*|[SN][0-9a-f]{24})|"
+    r"\bev(?:idence)?\d*_[0-9a-f]{8,}\b|\b(?:tbl\d*|t\d+)_[0-9a-z]{8,}\b|"
     r"\bkr_[0-9a-f]{32}\b|\b(?:researchId|fileId|evidenceId|tableId)\b)",
     re.IGNORECASE,
 )
@@ -41,24 +61,6 @@ _EXPECTED_CONTRACT_VERSION = "knowledge-vnext/2"
 _EXPECTED_CHUNK_POLICY_ID = "hierarchical_token_v4"
 _EXPECTED_INDEX_VERSION = "knowledge-index-v5"
 _EXPECTED_RETRIEVAL_PROFILE = "hybrid_rrf_bge_m3_fts5"
-
-
-class ResearchStateError(ValueError):
-    """Raised when a research action cannot be verified safely."""
-
-
-def canonical_json(value: Any) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def sha256_json(value: Any) -> str:
-    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def _string(value: Any, *, name: str, maximum: int = 20_000) -> str:
@@ -150,8 +152,11 @@ class KnowledgeResearchStore:
         self._reject_internal_ids(clean_title, clean_subtitle or "")
         while True:
             research_id = f"kr_{secrets.token_hex(16)}"
-            if not self._state_path(research_id).exists():
+            try:
+                self._state_path(research_id).parent.mkdir(parents=True, mode=0o700)
                 break
+            except FileExistsError:
+                continue
         state: dict[str, Any] = {
             "schemaVersion": STATE_SCHEMA_VERSION,
             "researchId": research_id,
@@ -167,8 +172,10 @@ class KnowledgeResearchStore:
             },
             "report": {"items": []},
             "finalized": None,
+            "stateRevision": 0,
         }
-        self._save(state)
+        with self._research_lock(research_id):
+            self._save(state)
         return {
             "researchId": research_id,
             "status": "ready",
@@ -179,7 +186,30 @@ class KnowledgeResearchStore:
         return self._state_path(research_id).is_file()
 
     def snapshot(self, research_id: str) -> dict[str, Any]:
-        return _safe_json(self._load(research_id))
+        with self._research_lock(research_id, shared=True):
+            return _safe_json(self._load(research_id))
+
+    def atomic_update[T](self, research_id: str, mutator: Callable[[dict[str, Any]], T]) -> T:
+        """Serialize one research's read/modify/write, including callback changes.
+
+        Mutators must not perform network I/O, nest transactions, or save state.
+        A failure after file replacement may have committed; replay by batchKey.
+        """
+
+        with self._research_lock(research_id):
+            state = self._load(research_id)
+            before = canonical_json(state)
+            revision = int(state.get("stateRevision", 0))
+            result = mutator(state)
+            if (
+                state.get("researchId") != research_id
+                or state.get("schemaVersion") != STATE_SCHEMA_VERSION
+            ):
+                raise ResearchStateError("a transaction cannot change research identity or schema")
+            if canonical_json(state) != before:
+                state["stateRevision"] = revision + 1
+                self._save(state)
+            return result
 
     def record_knowledge_call(
         self,
@@ -189,10 +219,34 @@ class KnowledgeResearchStore:
         arguments: Mapping[str, Any],
         result: Mapping[str, Any],
         metadata_only: bool = False,
+        on_commit: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            return self._record_knowledge_call(
+                state,
+                research_id=research_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                result=result,
+                metadata_only=metadata_only,
+                on_commit=on_commit,
+            )
+
+        return self.atomic_update(research_id, update)
+
+    def _record_knowledge_call(
+        self,
+        state: dict[str, Any],
+        *,
+        research_id: str,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        result: Mapping[str, Any],
+        metadata_only: bool,
+        on_commit: Callable[[dict[str, Any], dict[str, Any]], None] | None,
     ) -> dict[str, Any]:
         if tool_name not in _KNOWLEDGE_TOOLS:
             raise ResearchStateError(f"unsupported Knowledge tool: {tool_name}")
-        state = self._load(research_id)
         ledger = state["ledger"]
         structured, structured_source = recover_structured_content(result)
         if bool(result.get("isError")):
@@ -231,7 +285,8 @@ class KnowledgeResearchStore:
         if tool_name in {"search", "searchByIds"} and structured is not None:
             call["retrieval"] = self._retrieval_telemetry(structured)
         ledger["calls"].append(call)
-        self._save(state)
+        if on_commit is not None:
+            on_commit(state, call)
         return _safe_json(call)
 
     def record_knowledge_error(
@@ -241,24 +296,29 @@ class KnowledgeResearchStore:
         tool_name: str,
         arguments: Mapping[str, Any],
         error: Mapping[str, Any],
+        on_commit: Callable[[dict[str, Any], dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Record an actual upstream JSON-RPC failure without accepting evidence."""
 
         if tool_name not in _KNOWLEDGE_TOOLS:
             raise ResearchStateError(f"unsupported Knowledge tool: {tool_name}")
-        state = self._load(research_id)
-        ledger = state["ledger"]
-        call = {
-            "sequence": len(ledger["calls"]) + 1,
-            "toolName": tool_name,
-            "arguments": _safe_json(dict(arguments)),
-            "resultSha256": sha256_json({"error": error}),
-            "verificationStatus": "upstream_rpc_error",
-            "acceptedRecordCount": 0,
-        }
-        ledger["calls"].append(call)
-        self._save(state)
-        return _safe_json(call)
+
+        def update(state: dict[str, Any]) -> dict[str, Any]:
+            ledger = state["ledger"]
+            call = {
+                "sequence": len(ledger["calls"]) + 1,
+                "toolName": tool_name,
+                "arguments": _safe_json(dict(arguments)),
+                "resultSha256": sha256_json({"error": error}),
+                "verificationStatus": "upstream_rpc_error",
+                "acceptedRecordCount": 0,
+            }
+            ledger["calls"].append(call)
+            if on_commit is not None:
+                on_commit(state, call)
+            return _safe_json(call)
+
+        return self.atomic_update(research_id, update)
 
     def add_claim(
         self,
@@ -267,72 +327,34 @@ class KnowledgeResearchStore:
         section: str,
         text: str,
         evidence_ids: Sequence[str],
+        batch_key: str | None = None,
+        claim_key: str | None = None,
+        expected_claim_hash: str | None = None,
     ) -> dict[str, Any]:
-        state = self._load(research_id)
-        clean_section = _string(section, name="section", maximum=200)
-        clean_text = _string(text, name="text")
-        self._reject_internal_ids(clean_section, clean_text, state=state)
-        ids = self._verified_evidence_ids(state, evidence_ids)
-        item = {
-            "kind": "claim",
-            "itemId": f"claim-{len(state['report']['items']) + 1:04d}",
-            "section": clean_section,
-            "text": clean_text,
-            "evidenceIds": ids,
-        }
-        state["report"]["items"].append(item)
-        state["finalized"] = None
-        self._save(state)
-        self._remove_public_outputs(research_id)
-        return {
-            "status": "accepted",
-            "item": item["itemId"],
-            "citationCount": len(ids),
-        }
+        claim: dict[str, Any] = {"section": section, "text": text, "evidenceIds": evidence_ids}
+        if claim_key is not None:
+            claim["claimKey"] = claim_key
+        if expected_claim_hash is not None:
+            claim["expectedClaimHash"] = expected_claim_hash
+        result = self.add_claims(research_id=research_id, claims=[claim], batch_key=batch_key)
+        return {**result, "item": result["items"][0]}
 
     def add_claims(
         self,
         *,
         research_id: str,
         claims: Sequence[Mapping[str, Any]],
+        batch_key: str | None = None,
     ) -> dict[str, Any]:
-        if isinstance(claims, str | bytes) or not isinstance(claims, Sequence):
-            raise ResearchStateError("claims must be an array")
-        if not claims or len(claims) > 40:
-            raise ResearchStateError("claims must contain between 1 and 40 items")
-
-        state = self._load(research_id)
-        prepared: list[dict[str, Any]] = []
-        citation_count = 0
-        first_item_number = len(state["report"]["items"]) + 1
-        for offset, raw_claim in enumerate(claims):
-            if not isinstance(raw_claim, Mapping):
-                raise ResearchStateError("each claim must be an object")
-            clean_section = _string(raw_claim.get("section"), name="section", maximum=200)
-            clean_text = _string(raw_claim.get("text"), name="text")
-            self._reject_internal_ids(clean_section, clean_text, state=state)
-            ids = self._verified_evidence_ids(state, raw_claim.get("evidenceIds", []))
-            prepared.append(
-                {
-                    "kind": "claim",
-                    "itemId": f"claim-{first_item_number + offset:04d}",
-                    "section": clean_section,
-                    "text": clean_text,
-                    "evidenceIds": ids,
-                }
-            )
-            citation_count += len(ids)
-
-        state["report"]["items"].extend(prepared)
-        state["finalized"] = None
-        self._save(state)
-        self._remove_public_outputs(research_id)
-        return {
-            "status": "accepted",
-            "claimCount": len(prepared),
-            "citationCount": citation_count,
-            "items": [item["itemId"] for item in prepared],
-        }
+        return self.atomic_update(
+            research_id,
+            lambda state: apply_claim_batch(
+                state,
+                claims,
+                batch_key=batch_key,
+                reject_text=lambda text: self._reject_internal_ids(text, state=state),
+            ),
+        )
 
     def add_table(
         self,
@@ -342,10 +364,38 @@ class KnowledgeResearchStore:
         table_id: str,
         caption: str,
     ) -> dict[str, Any]:
-        state = self._load(research_id)
+        return self.atomic_update(
+            research_id,
+            lambda state: self._add_table(
+                state, section=section, table_id=table_id, caption=caption
+            ),
+        )
+
+    def _add_table(
+        self, state: dict[str, Any], *, section: str, table_id: str, caption: str
+    ) -> dict[str, Any]:
         clean_section = _string(section, name="section", maximum=200)
         clean_caption = _string(caption, name="caption", maximum=1_000)
         self._reject_internal_ids(clean_section, clean_caption, state=state)
+        for existing in state["report"]["items"]:
+            if existing.get("kind") != "table" or existing.get("tableId") != table_id:
+                continue
+            issues = [
+                {"code": "TABLE_ITEM_CONFLICT", "path": f"/{field}", "itemId": existing["itemId"]}
+                for field, value in (("section", clean_section), ("caption", clean_caption))
+                if existing.get(field) != value
+            ]
+            if issues:
+                raise ResearchStateError(
+                    "tableId is already included with different section or caption",
+                    details={
+                        "code": "TABLE_ITEM_CONFLICT",
+                        "committed": False,
+                        "tableId": table_id,
+                        "issues": issues,
+                    },
+                )
+            return {"status": "accepted", "item": existing["itemId"], "tableCount": 1}
         table = state["ledger"]["tables"].get(table_id)
         if not isinstance(table, Mapping) or table.get("verificationStatus") != "verified":
             raise ResearchStateError("table was not verified by an actual getTable response")
@@ -357,11 +407,6 @@ class KnowledgeResearchStore:
             raise ResearchStateError("table is not present in the verified file inventory")
         if file_id not in state["ledger"]["files"]:
             raise ResearchStateError("table source metadata is unavailable")
-        if any(
-            item.get("kind") == "table" and item.get("tableId") == table_id
-            for item in state["report"]["items"]
-        ):
-            raise ResearchStateError("table is already present in the report")
         item = {
             "kind": "table",
             "itemId": f"table-{len(state['report']['items']) + 1:04d}",
@@ -370,16 +415,51 @@ class KnowledgeResearchStore:
             "tableId": table_id,
         }
         state["report"]["items"].append(item)
-        state["finalized"] = None
-        self._save(state)
-        self._remove_public_outputs(research_id)
+        state["report"]["revision"] = int(state["report"].get("revision", 0)) + 1
+        invalidate_finalized(state)
         return {"status": "accepted", "item": item["itemId"], "tableCount": 1}
 
-    def finalize(self, *, research_id: str) -> dict[str, Any]:
-        state = self._load(research_id)
+    def finalize(
+        self,
+        *,
+        research_id: str,
+        expected_claim_keys: Sequence[str] | None = None,
+        expected_table_ids: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        """Serialize local rendering with writes to this research, not other research."""
+
+        return self.atomic_update(
+            research_id,
+            lambda state: self._finalize(
+                state,
+                expected_claim_keys=expected_claim_keys,
+                expected_table_ids=expected_table_ids,
+            ),
+        )
+
+    def _finalize(
+        self,
+        state: dict[str, Any],
+        *,
+        expected_claim_keys: Sequence[str] | None,
+        expected_table_ids: Sequence[str] | None,
+    ) -> dict[str, Any]:
+        research_id = state["researchId"]
         items = state["report"]["items"]
         if not items or not any(item.get("kind") == "claim" for item in items):
             raise ResearchStateError("report requires at least one cited claim")
+        self._check_expected_items(items, "claim", "claimKey", expected_claim_keys)
+        self._check_expected_items(items, "table", "tableId", expected_table_ids)
+        for item in items:
+            if item.get("kind") == "claim":
+                self._verified_evidence_ids(state, item["evidenceIds"])
+        input_hash = sha256_json(
+            {name: state.get(name) for name in ("title", "subtitle", "ledger", "report")}
+        )
+        previous = state.get("finalized")
+        if isinstance(previous, Mapping) and previous.get("inputSha256") == input_hash:
+            self._check_artifacts(previous["files"])
+            return _safe_json(previous["receipt"])
         html = render_html_report(self._state_for_render(state))
         self._reject_report_leaks(html, state)
         pdf = self.pdf_renderer(html, self.workspace)
@@ -391,34 +471,39 @@ class KnowledgeResearchStore:
         provenance_bytes = (
             json.dumps(provenance, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
-        output_dir = (self.output_root / research_id).resolve()
-        output_dir.relative_to(self.workspace)
-        output_dir.mkdir(parents=True, exist_ok=True)
+        self.output_root.resolve().relative_to(self.workspace)
+        self.output_root.mkdir(parents=True, exist_ok=True)
+        output_dir = self.output_root / research_id
+        while output_dir.exists() or output_dir.is_symlink():
+            output_dir = self.output_root / f"{research_id}-{secrets.token_hex(8)}"
         outputs = {
             "report.html": (html_bytes, "text/html"),
             "report.pdf": (pdf, "application/pdf"),
             "provenance.json": (provenance_bytes, "application/json"),
         }
         files: list[dict[str, Any]] = []
-        for name, (payload, mime) in outputs.items():
-            target = output_dir / name
-            self._atomic_write(target, payload)
-            files.append(
-                {
-                    "path": target.relative_to(self.workspace).as_posix(),
-                    "name": name,
-                    "mime": mime,
-                    "sha256": hashlib.sha256(payload).hexdigest(),
-                    "bundle": "none",
-                }
-            )
-        state["finalized"] = {
-            "manifestVersion": PUBLIC_MANIFEST_VERSION,
-            "files": files,
-        }
+        # Only this attempt's temporary directory is disposable. A promoted
+        # directory survives a failed state save and is never overwritten.
+        with tempfile.TemporaryDirectory(
+            prefix=f".{research_id}.staging-", dir=self.output_root
+        ) as temporary:
+            staging = Path(temporary)
+            for name, (payload, mime) in outputs.items():
+                self._atomic_write(staging / name, payload)
+                files.append(
+                    {
+                        "path": (output_dir / name).relative_to(self.workspace).as_posix(),
+                        "name": name,
+                        "mime": mime,
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                        "bundle": "none",
+                    }
+                )
+            self._fsync_directory(staging)
+            staging.rename(output_dir)
+            self._fsync_directory(self.output_root)
         coverage = self._report_coverage(state)
-        self._save(state)
-        return {
+        receipt = {
             "status": "finalized",
             "coverage": coverage,
             "publicArtifactManifest": {
@@ -430,9 +515,68 @@ class KnowledgeResearchStore:
                 "the report directory or any private research state."
             ),
         }
+        invalidate_finalized(state)
+        state["finalized"] = {
+            "manifestVersion": PUBLIC_MANIFEST_VERSION,
+            "files": files,
+            "inputSha256": input_hash,
+            "receipt": receipt,
+        }
+        state.setdefault("artifactHistory", []).append(_safe_json(state["finalized"]))
+        return _safe_json(receipt)
+
+    @staticmethod
+    def _check_expected_items(
+        items: Sequence[Mapping[str, Any]],
+        kind: str,
+        field: str,
+        expected: Sequence[str] | None,
+    ) -> None:
+        if expected is None:
+            return
+        if (
+            isinstance(expected, str | bytes)
+            or not isinstance(expected, Sequence)
+            or any(not isinstance(value, str) or not value for value in expected)
+            or len(set(expected)) != len(expected)
+        ):
+            raise ResearchStateError("expected item keys must be an array of distinct strings")
+        actual = [item.get(field) for item in items if item.get("kind") == kind]
+        if None in actual or set(actual) != set(expected):
+            raise ResearchStateError(
+                "expected items do not match the submitted report",
+                details={
+                    "code": "EXPECTED_ITEMS_MISMATCH",
+                    "committed": False,
+                    "kind": kind,
+                    "missing": sorted(set(expected) - set(actual)),
+                    "unexpected": sorted(
+                        value for value in set(actual) - set(expected) if value is not None
+                    ),
+                    "unkeyedCount": actual.count(None),
+                },
+            )
+
+    def _check_artifacts(self, files: Sequence[Mapping[str, Any]]) -> None:
+        if {item.get("name") for item in files} != {
+            "report.html",
+            "report.pdf",
+            "provenance.json",
+        } or len(files) != 3:
+            raise ResearchStateError("finalized manifest is invalid")
+        for item in files:
+            target = (self.workspace / str(item["path"])).resolve()
+            target.relative_to(self.output_root.resolve())
+            if (
+                not target.is_file()
+                or hashlib.sha256(target.read_bytes()).hexdigest() != item["sha256"]
+            ):
+                raise ResearchStateError(
+                    "finalized artifact is missing or changed; preserved without overwriting"
+                )
 
     def missing_reference_metadata(self, research_id: str) -> list[str]:
-        state = self._load(research_id)
+        state = self.snapshot(research_id)
         files = state["ledger"]["files"]
         return [
             file_id
@@ -830,6 +974,9 @@ class KnowledgeResearchStore:
             "screenshotPrivatePath": private_path.relative_to(self.private_root).as_posix(),
             "verificationStatus": "verified",
         }
+        for field in ("textTruncated", "textPreviewTruncatedForTransport", "tableTextProjection"):
+            if field in structured:
+                record[field] = _safe_json(structured[field])
         existing = ledger["tables"].get(table_id)
         if existing is not None and sha256_json(existing) != sha256_json(record):
             return "unverified_collision", 0
@@ -1047,6 +1194,30 @@ class KnowledgeResearchStore:
             known_ids.update(ledger["evidence"])
             known_ids.update(ledger["files"])
             known_ids.update(ledger["tables"])
+            extensions = _mapping(state.get("extensions")) or {}
+            navigation = _mapping(extensions.get("navigation")) or {}
+            namespace = navigation.get("namespace")
+            if isinstance(namespace, str) and _NAVIGATION_NAMESPACE.fullmatch(namespace):
+                # Match the whole namespace, including snapshot/cursor suffixes,
+                # without treating ordinary D1/E1 labels as internal identifiers.
+                known_ids.add(namespace + ":")
+            for bucket_name in (
+                "files",
+                "evidence",
+                "tables",
+                "scopes",
+                "snapshots",
+                "projections",
+            ):
+                bucket = _mapping(navigation.get(bucket_name)) or {}
+                for entry in bucket.values():
+                    row = _mapping(entry) or {}
+                    for field in ("ref", "scopeRef", "snapshotRef", "nextCursor", "resumeCursor"):
+                        reference = row.get(field)
+                        if isinstance(reference, str):
+                            prefix, separator, _ = reference.partition(":")
+                            if separator and _NAVIGATION_NAMESPACE.fullmatch(prefix):
+                                known_ids.add(reference)
             for record in ledger["evidence"].values():
                 if not isinstance(record, Mapping):
                     continue
@@ -1132,6 +1303,22 @@ class KnowledgeResearchStore:
             raise ResearchStateError("researchId is invalid")
         return self.private_root / research_id / "state.json"
 
+    @contextmanager
+    def _research_lock(self, research_id: str, *, shared: bool = False) -> Iterator[None]:
+        lock_path = self._state_path(research_id).parent / ".state.lock"
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(lock_path, flags, 0o600)
+        except FileNotFoundError as exc:
+            raise ResearchStateError("researchId was not found") from exc
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ResearchStateError("research lock is not a regular file")
+            fcntl.flock(descriptor, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(descriptor)
+
     def _load(self, research_id: str) -> dict[str, Any]:
         path = self._state_path(research_id)
         try:
@@ -1151,33 +1338,37 @@ class KnowledgeResearchStore:
             path.parent.chmod(0o700)
         except OSError:
             pass
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        self._atomic_write(
+            path,
+            (
+                json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
+                + "\n"
+            ).encode("utf-8"),
         )
-        try:
-            tmp.chmod(0o600)
-        except OSError:
-            pass
-        tmp.replace(path)
-
-    def _remove_public_outputs(self, research_id: str) -> None:
-        output_dir = (self.output_root / research_id).resolve()
-        try:
-            output_dir.relative_to(self.workspace)
-        except ValueError as exc:
-            raise ResearchStateError("research output path escaped the workspace") from exc
-        for name in ("report.html", "report.pdf", "provenance.json"):
-            try:
-                (output_dir / name).unlink()
-            except FileNotFoundError:
-                pass
 
     @staticmethod
     def _atomic_write(path: Path, payload: bytes) -> None:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_bytes(payload)
-        tmp.replace(path)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        tmp = Path(temporary)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            tmp.replace(path)
+            KnowledgeResearchStore._fsync_directory(path.parent)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def _render_pdf(html: str, base_url: Path) -> bytes:

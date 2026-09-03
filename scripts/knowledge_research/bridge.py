@@ -8,11 +8,23 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, BinaryIO, Protocol
 
 if __package__:
+    from .navigation import (
+        MAX_FRAME_BYTES,
+        PAGE_BUDGET,
+        Navigation,
+        NavigationError,
+        choose,
+        content_page,
+        item_page,
+        positive_limit,
+        strings,
+        text,
+    )
     from .state import (
         KnowledgeResearchStore,
         ResearchStateError,
@@ -21,6 +33,18 @@ if __package__:
     )
 else:  # pragma: no cover - exercised by deployment entrypoint smoke tests
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from navigation import (  # type: ignore[import-not-found,no-redef]
+        MAX_FRAME_BYTES,
+        PAGE_BUDGET,
+        Navigation,
+        NavigationError,
+        choose,
+        content_page,
+        item_page,
+        positive_limit,
+        strings,
+        text,
+    )
     from state import (  # type: ignore[import-not-found,no-redef]
         KnowledgeResearchStore,
         ResearchStateError,
@@ -35,14 +59,12 @@ _LOCAL_TOOLS = frozenset(
         "researchAddClaims",
         "researchAddTable",
         "researchFinalize",
+        "researchNavigate",
+        "researchReadEvidence",
     }
 )
 _LEDGER_TOOLS = frozenset({"search", "searchByIds", "getFileDetails", "getTable"})
 _MAX_DETAIL_PAGES = 250
-_MODEL_DISCOVERY_CONTENT_CHARS = 800
-_MODEL_FOCUSED_CONTENT_CHARS = 1_200
-_MODEL_DETAIL_PREVIEW_CHARS = 320
-_MODEL_TABLE_CONTENT_CHARS = 20_000
 
 
 class Upstream(Protocol):
@@ -105,7 +127,9 @@ class SubprocessUpstream:
         if self.process.stdout is None:
             raise RuntimeError("upstream Knowledge MCP stdout is unavailable")
         while True:
-            line = self.process.stdout.readline()
+            line = self.process.stdout.readline(16 * 1024 * 1024 + 1)
+            if len(line) > 16 * 1024 * 1024:
+                raise RuntimeError("Knowledge private-hop frame exceeded 16 MiB")
             if not line:
                 raise RuntimeError("upstream Knowledge MCP process closed")
             try:
@@ -117,17 +141,44 @@ class SubprocessUpstream:
 
 
 class KnowledgeResearchBridge:
-    def __init__(self, upstream: Upstream, store: KnowledgeResearchStore) -> None:
+    def __init__(
+        self,
+        upstream: Upstream,
+        store: KnowledgeResearchStore,
+        *,
+        caller_binding: Callable[[], str | None] | None = None,
+    ) -> None:
         self.upstream = upstream
         self.store = store
+        self.caller_binding = caller_binding or (lambda: None)
 
     def handle(self, message: Mapping[str, Any]) -> dict[str, Any] | None:
+        request_id = message.get("id")
+        if request_id is not None and (
+            type(request_id) not in {str, int} or len(canonical_json(request_id).encode()) > 256
+        ):
+            return _rpc_error(None, -32600, "Invalid request id")
+        response = self._handle(message)
+        if response is not None and _frame_bytes(response) > MAX_FRAME_BYTES:
+            return _success(
+                request_id,
+                _tool_result(
+                    {
+                        "error": "Response exceeds frame budget; saved snapshots remain navigable",
+                        "details": {"code": "FRAME_TOO_LARGE"},
+                    },
+                    is_error=True,
+                ),
+            )
+        return response
+
+    def _handle(self, message: Mapping[str, Any]) -> dict[str, Any] | None:
         method = message.get("method")
         request_id = message.get("id")
         params = message.get("params")
         params = params if isinstance(params, Mapping) else None
         if request_id is None:
-            if isinstance(method, str):
+            if method == "notifications/initialized":
                 self.upstream.notify(method, params)
             return None
         try:
@@ -146,7 +197,11 @@ class KnowledgeResearchBridge:
             return _with_id(self.upstream.request(method, params), request_id)
         except ResearchStateError as exc:
             if method == "tools/call":
-                return _success(request_id, _tool_result({"error": str(exc)}, is_error=True))
+                payload: dict[str, Any] = {"error": str(exc)}
+                details = getattr(exc, "details", None)
+                if isinstance(details, Mapping):
+                    payload["details"] = dict(details)
+                return _success(request_id, _tool_result(payload, is_error=True))
             return _rpc_error(request_id, -32602, str(exc))
         except (OSError, RuntimeError, ValueError) as exc:
             return _rpc_error(request_id, -32603, f"Knowledge research bridge failed: {exc}")
@@ -161,65 +216,482 @@ class KnowledgeResearchBridge:
         arguments = params.get("arguments", {})
         if not isinstance(name, str) or not isinstance(arguments, Mapping):
             return _rpc_error(request_id, -32602, "tool name and arguments are required")
-        if name in _LOCAL_TOOLS:
-            return _success(request_id, self._call_local(name, arguments))
-
-        research_id = arguments.get("researchId")
-        forwarded = {key: value for key, value in arguments.items() if key != "researchId"}
-        if research_id is None or name not in _LEDGER_TOOLS:
-            return _with_id(
-                self.upstream.request("tools/call", {"name": name, "arguments": forwarded}),
-                request_id,
+        if name not in _LOCAL_TOOLS | _LEDGER_TOOLS:
+            raise NavigationError("UNKNOWN_TOOL", "Unknown research tool")
+        if name == "researchBegin":
+            result = self._call_local(name, arguments)
+            payload, _ = recover_structured_content(result)
+            assert payload is not None
+            self.store.atomic_update(
+                str(payload["researchId"]), lambda state: self._navigation(state).progress()
             )
-        if not isinstance(research_id, str) or not self.store.exists(research_id):
-            raise ResearchStateError("researchId was not found")
-        if name == "getFileDetails" and (
-            forwarded.get("cursor") is None or forwarded.get("cursor") == ""
-        ):
-            result = self._auto_paginate_details(research_id, forwarded)
             return _success(request_id, result)
-        if name == "getTable":
-            forwarded["includeScreenshot"] = True
-        response = self._upstream_tool(name, forwarded)
+        research_id = text(arguments.get("researchId"), "/researchId", 35)
+        # The transport has no per-model session auth. Only a trusted host may supply this binding.
+        self._navigation(self.store.snapshot(research_id))
+        if name in _LOCAL_TOOLS - {"researchNavigate", "researchReadEvidence"}:
+            return _success(
+                request_id,
+                self._call_local(name, self._canonical_arguments(research_id, name, arguments)),
+            )
+
+        def prepare(state: dict[str, Any]) -> dict[str, Any]:
+            nav = self._navigation(state)
+            key = arguments.get("requestKey")
+            fingerprint = {
+                "tool": name,
+                "arguments": {k: v for k, v in arguments.items() if k != "requestKey"},
+            }
+            replay = nav.begin_request(key, fingerprint)
+            if replay is not None:
+                return {"reply": replay}
+            forwarded: dict[str, Any] = {}
+            snapshot_ref: str | None = None
+            start = 0
+            if arguments.get("cursor") is not None:
+                snapshot_ref, start = nav.from_cursor(arguments["cursor"])
+                self._check_cursor_target(nav, name, arguments, snapshot_ref)
+            elif name == "researchNavigate":
+                if "snapshotRef" in arguments:
+                    snapshot_ref = text(arguments["snapshotRef"], "/snapshotRef")
+                    if snapshot_ref not in nav.data["snapshots"]:
+                        raise NavigationError("UNKNOWN_REFERENCE", "Unknown snapshot")
+                    self._check_cursor_target(nav, name, arguments, snapshot_ref)
+                else:
+                    snapshot_ref = nav.directory(str(arguments.get("view", "progress")))
+            elif name == "researchReadEvidence":
+                snapshot_ref = nav.read_snapshot(arguments)
+            elif name in {"search", "searchByIds"}:
+                forwarded = {
+                    "query": text(arguments.get("query"), "/query"),
+                    "limit": positive_limit(arguments.get("limit"), 10),
+                }
+                if name == "searchByIds":
+                    selected = nav.selected_files(arguments)
+                    if len(selected) > 20:
+                        snapshot_ref = nav.grouping(selected)
+                    else:
+                        forwarded["fileIds"] = selected
+                elif "collectionIds" in arguments:
+                    forwarded["collectionIds"] = strings(
+                        arguments["collectionIds"], "/collectionIds"
+                    )
+            else:
+                forwarded["fileId"] = nav.canonical(arguments, "file")
+                if name == "getTable":
+                    forwarded.update(
+                        tableId=nav.canonical(arguments, "table"), includeScreenshot=True
+                    )
+                    table_row = nav.data["tables"].get(forwarded["tableId"])
+                    if table_row and table_row["fileId"] != forwarded["fileId"]:
+                        raise NavigationError(
+                            "REFERENCE_MISMATCH", "Table belongs to a different file"
+                        )
+            if snapshot_ref is not None:
+                reply = self._project(
+                    nav, snapshot_ref, start, positive_limit(arguments.get("limit")), request_id
+                )
+                nav.commit_request(key, reply)
+                return {"reply": reply}
+            return {"forwarded": forwarded}
+
+        prepared = self.store.atomic_update(research_id, prepare)
+        if "reply" in prepared:
+            return _success(request_id, prepared["reply"])
+        forwarded = prepared["forwarded"]
+        # Both the upstream call and inventory enumeration run outside the state lock.
+        response = (
+            self._fetch_details(forwarded)
+            if name == "getFileDetails"
+            else self._upstream_tool(name, forwarded)
+        )
         upstream_result = response.get("result")
+        committed: dict[str, Any] = {}
+
+        def on_commit(state: dict[str, Any], call: dict[str, Any]) -> None:
+            nav = self._navigation(state)
+            if call["verificationStatus"] != "verified":
+                reply = _tool_result(
+                    {
+                        "error": "Knowledge result was not accepted by the evidence ledger",
+                        "verificationStatus": call["verificationStatus"],
+                    },
+                    is_error=True,
+                )
+            else:
+                assert isinstance(upstream_result, Mapping)
+                structured, _ = recover_structured_content(upstream_result)
+                assert structured is not None
+                snapshot_ref = nav.observe(name, structured)
+                call["navigationSnapshotRef"] = snapshot_ref
+                if name in {"search", "searchByIds"}:
+                    call["orderedResultIds"] = [row["evidenceId"] for row in structured["results"]]
+                try:
+                    reply = self._project(
+                        nav, snapshot_ref, 0, positive_limit(arguments.get("limit")), request_id
+                    )
+                except ValueError:
+                    # Retain accepted source data even if its projection cannot fit this frame.
+                    reply = _tool_result(
+                        {
+                            "error": "Projection unavailable; complete source snapshot retained",
+                            "details": {"code": "PROJECTION_UNAVAILABLE"},
+                            "snapshotRef": snapshot_ref,
+                            "resumeCursor": nav.cursor(snapshot_ref, 0),
+                            "modelDelivery": "unknown",
+                        },
+                        is_error=True,
+                    )
+            nav.commit_request(arguments.get("requestKey"), reply)
+            committed["reply"] = reply
+
         if isinstance(upstream_result, Mapping):
-            call = self.store.record_knowledge_call(
+            self.store.record_knowledge_call(
                 research_id=research_id,
                 tool_name=name,
                 arguments=forwarded,
                 result=upstream_result,
+                on_commit=on_commit,
             )
-            if (
-                not bool(upstream_result.get("isError"))
-                and call["verificationStatus"] != "verified"
-            ):
-                return _success(
-                    request_id,
-                    _tool_result(
-                        {
-                            "error": "Knowledge result was not accepted by the evidence ledger",
-                            "verificationStatus": call["verificationStatus"],
-                        },
-                        is_error=True,
-                    ),
-                )
-            if not bool(upstream_result.get("isError")):
-                structured, _ = recover_structured_content(upstream_result)
-                if structured is not None:
-                    return _success(
-                        request_id,
-                        _model_result(name, structured),
-                    )
         else:
             error = response.get("error")
-            if isinstance(error, Mapping):
-                self.store.record_knowledge_error(
-                    research_id=research_id,
-                    tool_name=name,
-                    arguments=forwarded,
-                    error=error,
+            self.store.record_knowledge_error(
+                research_id=research_id,
+                tool_name=name,
+                arguments=forwarded,
+                error=error
+                if isinstance(error, Mapping)
+                else {"message": "Invalid upstream response"},
+                on_commit=on_commit,
+            )
+        return _success(request_id, committed["reply"])
+
+    def _navigation(self, state: dict[str, Any]) -> Navigation:
+        return Navigation(state, self.caller_binding())
+
+    def _canonical_arguments(
+        self, research_id: str, name: str, arguments: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        nav = self._navigation(self.store.snapshot(research_id))
+        normalized = copy.deepcopy(dict(arguments))
+
+        def claim(raw: Mapping[str, Any], prefix: str) -> dict[str, Any]:
+            value = dict(raw)
+            selector = choose(value, ("evidenceRefs", "evidenceIds"))
+            ids = strings(value[selector], prefix + "/" + selector, 200)
+            if selector == "evidenceRefs":
+                translated = []
+                for index, ref in enumerate(ids):
+                    try:
+                        translated.append(nav.resolve("evidence", ref))
+                    except NavigationError as exc:
+                        exc.details["pointer"] = f"{prefix}/evidenceRefs/{index}"
+                        raise
+                value.pop("evidenceRefs")
+                value["evidenceIds"] = translated
+            for field in ("text", "section"):
+                prose = value.get(field)
+                if isinstance(prose, str) and nav.namespace + ":" in prose:
+                    raise NavigationError(
+                        "INTERNAL_REFERENCE_IN_TEXT",
+                        "Report text contains an internal reference",
+                        pointer=f"{prefix}/{field}",
+                    )
+            return value
+
+        if name == "researchAddClaim":
+            normalized = claim(normalized, "")
+        elif name == "researchAddClaims":
+            claims = arguments.get("claims")
+            if not isinstance(claims, list) or not all(isinstance(row, Mapping) for row in claims):
+                raise NavigationError(
+                    "INVALID_CLAIMS", "claims must be an array of objects", pointer="/claims"
                 )
-        return _with_id(response, request_id)
+            normalized["claims"] = [
+                claim(row, f"/claims/{index}") for index, row in enumerate(claims)
+            ]
+        elif name == "researchAddTable":
+            normalized["tableId"] = nav.canonical(arguments, "table")
+            normalized.pop("tableRef", None)
+            if any(
+                isinstance(arguments.get(key), str) and nav.namespace + ":" in arguments[key]
+                for key in ("section", "caption")
+            ):
+                raise NavigationError(
+                    "INTERNAL_REFERENCE_IN_TEXT", "Report text contains an internal reference"
+                )
+        elif name == "researchFinalize" and "expectedTableRefs" in arguments:
+            if "expectedTableIds" in arguments:
+                raise NavigationError(
+                    "INVALID_SELECTOR", "Supply expectedTableRefs or expectedTableIds"
+                )
+            values = arguments["expectedTableRefs"]
+            if not isinstance(values, list) or len(values) > 1000:
+                raise NavigationError("INVALID_SELECTOR", "Invalid expectedTableRefs")
+            normalized["expectedTableIds"] = [nav.resolve("table", value) for value in values]
+            normalized.pop("expectedTableRefs")
+        return normalized
+
+    def _project(
+        self, nav: Navigation, snapshot_ref: str, start: int, limit: int, request_id: Any
+    ) -> dict[str, Any]:
+        snapshot = nav.data["snapshots"][snapshot_ref]
+        kind, source = snapshot["kind"], snapshot["payload"]
+
+        def decorate(payload: Mapping[str, Any]) -> dict[str, Any]:
+            return nav.wrap_page(snapshot_ref, payload)
+
+        def frame_bytes(payload: Mapping[str, Any]) -> int:
+            return _frame_bytes(_success(request_id, _projected_result(decorate(payload))))
+
+        if kind == "search":
+            original = source["results"]
+            items = [self._search_item(nav, row) for row in original]
+            metadata = {
+                key: copy.deepcopy(source[key])
+                for key in (
+                    "contractVersion",
+                    "chunkPolicyId",
+                    "indexVersion",
+                    "query",
+                    "scopeRef",
+                    "retrievalProfile",
+                    "requestedProfile",
+                    "effectiveProfile",
+                    "selectionSource",
+                    "fallbackReason",
+                    "warnings",
+                    "scopeEnforced",
+                    "selectionStrategy",
+                    "lexicalCandidateCount",
+                    "vectorCandidateCount",
+                    "budgetExceeded",
+                )
+                if key in source
+            }
+
+            def build(selected: list[Any], page: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    **metadata,
+                    "results": selected,
+                    "count": len(selected),
+                    "page": page,
+                    "projectionComplete": all(
+                        not item["contentTruncatedForTransport"] for item in selected
+                    ),
+                }
+
+            # Large chunks have an explicit ledger read path; small chunks remain whole.
+            if start < len(items):
+                first = items[start]
+                first_page = {
+                    "start": start,
+                    "end": start + 1,
+                    "total": len(items),
+                    "hasMore": start + 1 < len(items),
+                }
+                if frame_bytes(build([first], first_page)) > PAGE_BUDGET:
+
+                    def prefix(content: str, page: dict[str, Any]) -> dict[str, Any]:
+                        projected = {
+                            **first,
+                            "content": content,
+                            "contentRange": page,
+                            "contentTruncatedForTransport": page["end"] < page["total"],
+                        }
+                        return build([projected], first_page)
+
+                    payload = content_page(first["content"], 0, prefix, frame_bytes)
+                else:
+                    payload = item_page(items, start, limit, build, frame_bytes)
+            else:
+                payload = item_page(items, start, limit, build, frame_bytes)
+        elif kind == "evidence":
+            item = self._search_item(nav, source)
+
+            def evidence_page(content: str, page: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    **{
+                        key: value
+                        for key, value in item.items()
+                        if key not in {"contentRange", "contentTruncatedForTransport"}
+                    },
+                    "content": content,
+                    "page": page,
+                    "offsetUnit": "unicode_code_point",
+                }
+
+            payload = content_page(source["content"], start, evidence_page, frame_bytes)
+        elif kind in {"inventory", "table"}:
+            if __package__:
+                from .table_views import (
+                    project_inventory_page,
+                    project_table_page,
+                    table_quality_view,
+                )
+            else:  # pragma: no cover
+                from table_views import (  # type: ignore[import-not-found,no-redef]
+                    project_inventory_page,
+                    project_table_page,
+                    table_quality_view,
+                )
+            if kind == "inventory":
+                payload = project_inventory_page(
+                    source,
+                    start=start,
+                    max_items=limit,
+                    frame_bytes=frame_bytes,
+                    max_frame_bytes=PAGE_BUDGET,
+                )
+            else:
+                quality = table_quality_view(source)
+
+                def table_frame(candidate: Mapping[str, Any]) -> int:
+                    return frame_bytes({**candidate, "quality": quality})
+
+                payload = project_table_page(
+                    source,
+                    start=start,
+                    target_chars=10_000,
+                    frame_bytes=table_frame,
+                    max_frame_bytes=PAGE_BUDGET,
+                )
+                payload["quality"] = quality
+        else:
+            key = "groups" if kind == "groups" else "entries"
+            metadata = {k: v for k, v in source.items() if k != key}
+            if kind == "groups":
+                metadata.update(status="grouped", queried=False, subset=True)
+            payload = item_page(
+                source[key],
+                start,
+                limit,
+                lambda items, page: {**metadata, key: items, "page": page},
+                frame_bytes,
+            )
+        projected = decorate(payload)
+        result = _projected_result(projected)
+        if _frame_bytes(_success(request_id, result)) > MAX_FRAME_BYTES:
+            raise NavigationError(
+                "FRAME_TOO_LARGE", "Projection exceeds the complete RPC frame budget"
+            )
+        nav.record_projection(snapshot_ref, projected)
+        return result
+
+    @staticmethod
+    def _search_item(nav: Navigation, source: Mapping[str, Any]) -> dict[str, Any]:
+        evidence_id = source["evidenceId"]
+        record = nav.state["ledger"]["evidence"][evidence_id]
+        content = record["content"]
+        locator = record.get("locator", {})
+        compact_locator: dict[str, Any] = {
+            key: value for key in ("pageStart", "pageEnd") if type(value := locator.get(key)) is int
+        }
+        if isinstance(locator.get("title"), str):
+            compact_locator["title"] = locator["title"][:300]
+        if isinstance(locator.get("sectionPath"), list):
+            compact_locator["sectionPath"] = [
+                value[:128] for value in locator["sectionPath"][:8] if isinstance(value, str)
+            ]
+        return {
+            "fileRef": nav.data["files"][record["fileId"]]["ref"],
+            "evidenceRef": nav.data["evidence"][evidence_id]["ref"],
+            "sourceRevision": record["revision"],
+            "contentSha256": record["contentSha256"],
+            "title": str(record.get("title", ""))[:300],
+            "locator": compact_locator,
+            "contentKind": str(record.get("contentKind") or "text")[:100],
+            "content": content,
+            "contentRange": {"start": 0, "end": len(content), "total": len(content)},
+            "contentTruncatedForTransport": False,
+        }
+
+    def _check_cursor_target(
+        self, nav: Navigation, name: str, arguments: Mapping[str, Any], ref: str
+    ) -> None:
+        snapshot = nav.data["snapshots"][ref]
+        expected = {
+            "getTable": "table",
+            "getFileDetails": "inventory",
+            "researchReadEvidence": "evidence",
+        }
+        if name != "researchNavigate" and snapshot["kind"] != expected.get(name):
+            raise NavigationError("INVALID_CURSOR", "Cursor belongs to a different operation")
+        payload = snapshot["payload"]
+        if name == "researchNavigate":
+            if "snapshotRef" in arguments and arguments["snapshotRef"] != ref:
+                raise NavigationError("REFERENCE_MISMATCH", "Cursor belongs to another snapshot")
+            if "view" in arguments and (
+                snapshot["kind"] != "directory" or payload.get("view") != arguments["view"]
+            ):
+                raise NavigationError("REFERENCE_MISMATCH", "Snapshot belongs to another view")
+        if name in {"getTable", "getFileDetails"}:
+            source_file = payload.get("file", payload)
+            if nav.canonical(arguments, "file") != source_file["fileId"]:
+                raise NavigationError("REFERENCE_MISMATCH", "Cursor belongs to a different file")
+        if name == "getTable" and nav.canonical(arguments, "table") != payload["tableId"]:
+            raise NavigationError("REFERENCE_MISMATCH", "Cursor belongs to a different table")
+        if (
+            name == "researchReadEvidence"
+            and nav.canonical(arguments, "evidence") != payload["evidenceId"]
+        ):
+            raise NavigationError("REFERENCE_MISMATCH", "Cursor belongs to different evidence")
+
+    def _fetch_details(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        merged: dict[str, Any] | None = None
+        tables: list[Any] = []
+        seen: set[str] = set()
+        cursor: str | None = None
+        for index in range(_MAX_DETAIL_PAGES):
+            forwarded = {**arguments, "limit": 20}
+            if cursor is not None:
+                forwarded["cursor"] = cursor
+            response = self._upstream_tool("getFileDetails", forwarded)
+            raw = response.get("result")
+            if not isinstance(raw, Mapping) or raw.get("isError"):
+                return response
+            payload, _ = recover_structured_content(raw)
+            if payload is None:
+                return response
+            if index == 0 and payload.get("inventoryComplete") is True:
+                return response
+            if merged is None:
+                merged = copy.deepcopy(dict(payload))
+            elif merged.get("file") != payload.get("file"):
+                raise NavigationError(
+                    "REVISION_CONFLICT", "File identity changed during inventory pagination"
+                )
+            elif any(
+                merged.get(key) != payload.get(key)
+                for key in ("contractVersion", "tableExtraction")
+            ):
+                raise NavigationError(
+                    "INVENTORY_CONTRACT_CHANGED",
+                    "Source contract or extraction metadata changed during inventory pagination",
+                )
+            if not isinstance(payload.get("tables"), list):
+                raise NavigationError("INVALID_INVENTORY", "Invalid table inventory")
+            tables.extend(payload["tables"])
+            if len(canonical_json(tables).encode()) > 8 * 1024 * 1024:
+                raise NavigationError(
+                    "INVENTORY_TOO_LARGE", "Inventory exceeds the private 8 MiB limit"
+                )
+            cursor = payload.get("nextCursor")
+            if cursor is None:
+                merged.update(
+                    tables=tables,
+                    nextCursor=None,
+                    inventoryComplete=True,
+                    inventoryPageCount=index + 1,
+                    inventoryTableCount=len(tables),
+                )
+                return {"result": _tool_result(merged)}
+            if not isinstance(cursor, str) or not cursor or cursor in seen:
+                raise NavigationError(
+                    "INVALID_CURSOR", "Upstream inventory cursor repeated or is invalid"
+                )
+            seen.add(cursor)
+        raise NavigationError("INVENTORY_TOO_LARGE", "Upstream inventory exceeded its page limit")
 
     def _call_local(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         if name == "researchBegin":
@@ -233,11 +705,15 @@ class KnowledgeResearchBridge:
                 section=_text_argument(arguments, "section"),
                 text=_text_argument(arguments, "text"),
                 evidence_ids=arguments.get("evidenceIds", []),
+                batch_key=arguments.get("batchKey"),
+                claim_key=arguments.get("claimKey"),
+                expected_claim_hash=arguments.get("expectedClaimHash"),
             )
         elif name == "researchAddClaims":
             payload = self.store.add_claims(
                 research_id=_text_argument(arguments, "researchId"),
                 claims=arguments.get("claims", []),
+                batch_key=arguments.get("batchKey"),
             )
         elif name == "researchAddTable":
             payload = self.store.add_table(
@@ -246,7 +722,7 @@ class KnowledgeResearchBridge:
                 table_id=_text_argument(arguments, "tableId"),
                 caption=_text_argument(arguments, "caption"),
             )
-        else:
+        elif name == "researchFinalize":
             research_id = _text_argument(arguments, "researchId")
             unavailable = 0
             for file_id in self.store.missing_reference_metadata(research_id):
@@ -273,93 +749,19 @@ class KnowledgeResearchBridge:
                         arguments=metadata_arguments,
                         error={"message": "Bibliography metadata unavailable"},
                     )
-            payload = self.store.finalize(research_id=research_id)
+            payload = self.store.finalize(
+                research_id=research_id,
+                expected_claim_keys=arguments.get("expectedClaimKeys"),
+                expected_table_ids=arguments.get("expectedTableIds"),
+            )
             if unavailable:
                 payload["warnings"] = [
                     f"Metadata unavailable for {unavailable} cited files; "
                     "kept separate without inferred dates or format pairing."
                 ]
+        else:
+            raise NavigationError("UNKNOWN_TOOL", "Unknown local research tool")
         return _tool_result(payload)
-
-    def _auto_paginate_details(
-        self, research_id: str, arguments: Mapping[str, Any]
-    ) -> dict[str, Any]:
-        cursor: str | None = None
-        seen: set[str] = set()
-        tables: list[Any] = []
-        first_result: dict[str, Any] | None = None
-        first_structured: dict[str, Any] | None = None
-        page_count = 0
-        while page_count < _MAX_DETAIL_PAGES:
-            page_arguments = dict(arguments)
-            page_arguments["limit"] = 20
-            if cursor is None:
-                page_arguments.pop("cursor", None)
-            else:
-                page_arguments["cursor"] = cursor
-            response = self._upstream_tool("getFileDetails", page_arguments)
-            if "error" in response:
-                error = response["error"]
-                error_record = error if isinstance(error, Mapping) else {"message": str(error)}
-                self.store.record_knowledge_error(
-                    research_id=research_id,
-                    tool_name="getFileDetails",
-                    arguments=page_arguments,
-                    error=error_record,
-                )
-                return _tool_result(response["error"], is_error=True)
-            raw_result = response.get("result")
-            if not isinstance(raw_result, Mapping):
-                return _tool_result(
-                    {"error": "Knowledge getFileDetails returned an invalid result"},
-                    is_error=True,
-                )
-            call = self.store.record_knowledge_call(
-                research_id=research_id,
-                tool_name="getFileDetails",
-                arguments=page_arguments,
-                result=raw_result,
-            )
-            if bool(raw_result.get("isError")):
-                return dict(raw_result)
-            if call["verificationStatus"] != "verified":
-                return _tool_result(
-                    {"error": "Knowledge table inventory could not be verified"},
-                    is_error=True,
-                )
-            structured, _ = recover_structured_content(raw_result)
-            if structured is None:
-                return _tool_result(
-                    {"error": "Knowledge table inventory has no structured content"},
-                    is_error=True,
-                )
-            page_count += 1
-            if page_count == 1 and structured.get("inventoryComplete") is True:
-                return _model_result("getFileDetails", structured)
-            tables.extend(structured.get("tables", []))
-            if first_result is None:
-                first_result = copy.deepcopy(dict(raw_result))
-                first_structured = copy.deepcopy(dict(structured))
-            next_cursor = structured.get("nextCursor")
-            if next_cursor is None or next_cursor == "":
-                assert first_result is not None and first_structured is not None
-                first_structured["tables"] = tables
-                first_structured["nextCursor"] = None
-                first_structured["inventoryComplete"] = True
-                first_structured["inventoryPageCount"] = page_count
-                first_structured["inventoryTableCount"] = len(tables)
-                return _model_result("getFileDetails", first_structured)
-            if not isinstance(next_cursor, str) or next_cursor in seen:
-                return _tool_result(
-                    {"error": "Knowledge table inventory cursor is invalid or repeated"},
-                    is_error=True,
-                )
-            seen.add(next_cursor)
-            cursor = next_cursor
-        return _tool_result(
-            {"error": f"Knowledge table inventory exceeded {_MAX_DETAIL_PAGES} pages"},
-            is_error=True,
-        )
 
     def _upstream_tool(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         return self.upstream.request("tools/call", {"name": name, "arguments": dict(arguments)})
@@ -389,9 +791,52 @@ class KnowledgeResearchBridge:
                             "verify evidence used by the final report."
                         ),
                     }
+                    properties["requestKey"] = {"type": "string", "minLength": 1, "maxLength": 128}
+                    required = [
+                        key
+                        for key in schema.get("required", [])
+                        if key not in {"fileId", "fileIds", "tableId"}
+                    ]
+                    schema["required"] = list(dict.fromkeys([*required, "researchId"]))
+                    if tool["name"] == "searchByIds":
+                        properties["fileRefs"] = _ref_array("D")
+                        properties["scopeRefs"] = _ref_array("S")
+                        schema["oneOf"] = [
+                            {"required": [key]} for key in ("fileIds", "fileRefs", "scopeRefs")
+                        ]
+                        tool["description"] = (
+                            "Search selected files. Over 20 files returns group scopeRefs without "
+                            "querying; explicitly search each group."
+                        )
+                    if tool["name"] in {"getFileDetails", "getTable"}:
+                        properties["fileRef"] = _ref_schema("D")
+                        properties["cursor"] = {"type": "string", "minLength": 1, "maxLength": 512}
+                        schema["allOf"] = [
+                            {"oneOf": [{"required": ["fileId"]}, {"required": ["fileRef"]}]}
+                        ]
+                        if tool["name"] == "getTable":
+                            properties["tableRef"] = _ref_schema("T")
+                            schema["allOf"].append(
+                                {"oneOf": [{"required": ["tableId"]}, {"required": ["tableRef"]}]}
+                            )
+                        else:
+                            properties["limit"] = {"type": "integer", "minimum": 1, "maximum": 20}
+                            tool["description"] = (
+                                "Page a fixed extracted table inventory using nextCursor, "
+                                "then getTable for selected tables."
+                            )
                 tools.append(tool)
         tools.extend(_research_tools())
         return tools
+
+
+def _ref_schema(kind: str) -> dict[str, Any]:
+    suffix = "[0-9a-f]{24}" if kind == "S" else "[1-9][0-9]*"
+    return {"type": "string", "pattern": "^[A-Za-z0-9_-]{22}:" + kind + suffix + "$"}
+
+
+def _ref_array(kind: str) -> dict[str, Any]:
+    return {"type": "array", "minItems": 1, "maxItems": 20, "items": _ref_schema(kind)}
 
 
 def _research_tools() -> list[dict[str, Any]]:
@@ -400,7 +845,7 @@ def _research_tools() -> list[dict[str, Any]]:
         "pattern": "^kr_[0-9a-f]{32}$",
         "description": "Copy exactly from researchBegin.",
     }
-    return [
+    tools: list[dict[str, Any]] = [
         {
             "name": "researchBegin",
             "description": "Begin an authoritative local-Knowledge report assembly.",
@@ -500,6 +945,96 @@ def _research_tools() -> list[dict[str, Any]]:
             },
         },
     ]
+    for tool in tools:
+        schema = tool["inputSchema"]
+        properties = schema["properties"]
+        name = tool["name"]
+        if name in {"researchAddClaim", "researchAddClaims"}:
+            properties["batchKey"] = {"type": "string", "minLength": 1, "maxLength": 128}
+            claim_schema = schema if name == "researchAddClaim" else properties["claims"]["items"]
+            claim_properties = claim_schema["properties"]
+            claim_properties["evidenceRefs"] = {**_ref_array("E"), "maxItems": 200}
+            claim_properties["claimKey"] = {"type": "string", "minLength": 1, "maxLength": 128}
+            claim_properties["expectedClaimHash"] = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            claim_schema["required"] = [
+                key for key in claim_schema["required"] if key != "evidenceIds"
+            ]
+            claim_schema["oneOf"] = [{"required": ["evidenceRefs"]}, {"required": ["evidenceIds"]}]
+            tool["description"] = (
+                "Atomically add a small batch with evidenceRefs or legacy evidenceIds; "
+                "batchKey makes committed retries idempotent. To revise a claimKey, supply its "
+                "current expectedClaimHash from researchNavigate view=report."
+            )
+        elif name == "researchAddTable":
+            properties["tableRef"] = _ref_schema("T")
+            schema["required"].remove("tableId")
+            schema["oneOf"] = [{"required": ["tableRef"]}, {"required": ["tableId"]}]
+            tool["description"] += (
+                " Same table, section and caption replays the existing item; changed metadata "
+                "is rejected."
+            )
+        elif name == "researchFinalize":
+            properties["expectedClaimKeys"] = {
+                "type": "array",
+                "maxItems": 1000,
+                "items": {"type": "string"},
+            }
+            properties["expectedTableIds"] = {
+                "type": "array",
+                "maxItems": 1000,
+                "items": {"type": "string"},
+            }
+            properties["expectedTableRefs"] = {**_ref_array("T"), "minItems": 0, "maxItems": 1000}
+    common = {
+        "researchId": research_id,
+        "requestKey": {"type": "string", "minLength": 1, "maxLength": 128},
+        "cursor": {"type": "string", "minLength": 1, "maxLength": 512},
+    }
+    tools.extend(
+        [
+            {
+                "name": "researchNavigate",
+                "description": (
+                    "Page fixed result snapshots, reference directories and progress. "
+                    "view=report returns current paragraph keys/hashes/items and added table "
+                    "refs, without paragraph text. Cursor resumes the original snapshot."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["researchId"],
+                    "properties": {
+                        **common,
+                        "view": {
+                            "type": "string",
+                            "enum": ["files", "scopes", "evidence", "progress", "report"],
+                        },
+                        "snapshotRef": {"type": "string", "minLength": 1},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+                    },
+                },
+            },
+            {
+                "name": "researchReadEvidence",
+                "description": (
+                    "Read exact saved evidence text using nextCursor for long text. "
+                    "No new upstream query."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["researchId"],
+                    "oneOf": [{"required": ["evidenceRef"]}, {"required": ["evidenceId"]}],
+                    "properties": {
+                        **common,
+                        "evidenceRef": _ref_schema("E"),
+                        "evidenceId": {"type": "string", "minLength": 1},
+                    },
+                },
+            },
+        ]
+    )
+    return tools
 
 
 def _text_argument(
@@ -530,139 +1065,12 @@ def _tool_result(payload: Any, *, is_error: bool = False) -> dict[str, Any]:
     }
 
 
-def _model_result(name: str, structured: Mapping[str, Any]) -> dict[str, Any]:
-    projected = copy.deepcopy(dict(structured))
-    if name in {"search", "searchByIds"}:
-        results = projected.get("results")
-        if isinstance(results, list):
-            content_limit = (
-                _MODEL_FOCUSED_CONTENT_CHARS
-                if name == "searchByIds"
-                else _MODEL_DISCOVERY_CONTENT_CHARS
-            )
-            projected["results"] = [
-                _model_search_item(item, content_limit=content_limit)
-                if isinstance(item, Mapping)
-                else item
-                for item in results
-            ]
-    elif name == "getFileDetails":
-        projected = _model_file_details(structured)
-    elif name == "getTable":
-        projected = _model_table(structured)
-        text = projected.get("text")
-        if isinstance(text, dict):
-            content = text.get("content")
-            if isinstance(content, str) and len(content) > _MODEL_TABLE_CONTENT_CHARS:
-                text["content"] = content[:_MODEL_TABLE_CONTENT_CHARS]
-                text["contentTruncatedForTransport"] = True
-                text["fullContentStoredInLedger"] = True
-        projected.pop("screenshotDataBase64", None)
-        screenshot = projected.get("screenshot")
-        if isinstance(screenshot, dict):
-            screenshot.pop("dataBase64", None)
-    return {
-        "content": [{"type": "text", "text": canonical_json(projected)}],
-        "isError": False,
-    }
+def _projected_result(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {"content": [{"type": "text", "text": canonical_json(payload)}], "isError": False}
 
 
-def _model_search_item(item: Mapping[str, Any], *, content_limit: int) -> dict[str, Any]:
-    projected = {
-        key: copy.deepcopy(item[key])
-        for key in ("evidenceId", "fileId", "title", "contentKind", "content")
-        if key in item
-    }
-    locator = item.get("locator")
-    if isinstance(locator, Mapping):
-        projected["locator"] = {
-            key: copy.deepcopy(locator[key])
-            for key in ("title", "sectionPath", "pageStart", "pageEnd")
-            if key in locator
-        }
-    content = projected.get("content")
-    if isinstance(content, str) and len(content) > content_limit:
-        projected["content"] = content[:content_limit]
-        projected["contentTruncatedForTransport"] = True
-    return projected
-
-
-def _model_file_details(structured: Mapping[str, Any]) -> dict[str, Any]:
-    projected: dict[str, Any] = {
-        key: copy.deepcopy(structured[key])
-        for key in (
-            "contractVersion",
-            "inventoryComplete",
-            "inventoryPageCount",
-            "inventoryTableCount",
-            "nextCursor",
-        )
-        if key in structured
-    }
-    source_file = structured.get("file")
-    if isinstance(source_file, Mapping):
-        projected["file"] = {
-            key: copy.deepcopy(source_file[key])
-            for key in ("fileId", "title", "filename", "mediaType")
-            if key in source_file
-        }
-    extraction = structured.get("tableExtraction")
-    if isinstance(extraction, Mapping):
-        projected["tableExtraction"] = {
-            key: copy.deepcopy(extraction[key])
-            for key in ("status", "tableCount", "policyId")
-            if key in extraction
-        }
-    tables = structured.get("tables")
-    if isinstance(tables, list):
-        projected["tables"] = [
-            _model_table_inventory_item(table) for table in tables if isinstance(table, Mapping)
-        ]
-    projected["tableTextProjection"] = "compact-preview"
-    return projected
-
-
-def _model_table_inventory_item(table: Mapping[str, Any]) -> dict[str, Any]:
-    projected = {
-        key: copy.deepcopy(table[key])
-        for key in (
-            "tableId",
-            "page",
-            "ordinal",
-            "continuationOf",
-            "screenshotAvailable",
-            "textAvailable",
-            "textFormat",
-        )
-        if key in table
-    }
-    preview = table.get("textPreview")
-    if not isinstance(preview, str):
-        text = table.get("text")
-        if isinstance(text, Mapping) and isinstance(text.get("content"), str):
-            preview = text["content"]
-    if isinstance(preview, str) and preview:
-        projected["textPreview"] = preview[:_MODEL_DETAIL_PREVIEW_CHARS]
-        if len(preview) > _MODEL_DETAIL_PREVIEW_CHARS:
-            projected["textPreviewTruncatedForTransport"] = True
-    return projected
-
-
-def _model_table(structured: Mapping[str, Any]) -> dict[str, Any]:
-    projected = {
-        key: copy.deepcopy(structured[key])
-        for key in ("schemaVersion", "tableId", "fileId", "page", "locator", "text")
-        if key in structured
-    }
-    screenshot = structured.get("screenshot")
-    if isinstance(screenshot, Mapping):
-        projected["screenshot"] = {
-            key: copy.deepcopy(screenshot[key])
-            for key in ("mediaType", "widthPixels", "heightPixels")
-            if key in screenshot
-        }
-        projected["screenshotAvailable"] = True
-    return projected
+def _frame_bytes(payload: Mapping[str, Any]) -> int:
+    return len((canonical_json(payload) + "\n").encode("utf-8"))
 
 
 def _success(request_id: Any, result: Mapping[str, Any]) -> dict[str, Any]:
@@ -713,6 +1121,8 @@ def _read_frame(stream: BinaryIO) -> tuple[dict[str, Any], bool] | None:
 
 def _write_frame(stream: BinaryIO, payload: Mapping[str, Any], content_length: bool) -> None:
     encoded = canonical_json(payload).encode("utf-8")
+    if len(encoded) + 1 > MAX_FRAME_BYTES:
+        raise ValueError("MCP frame exceeds 60 KiB")
     if content_length:
         stream.write(f"Content-Length: {len(encoded)}\r\n\r\n".encode("ascii"))
     stream.write(encoded + (b"" if content_length else b"\n"))

@@ -3,23 +3,57 @@
 from __future__ import annotations
 
 import html
-import re
 from collections.abc import Mapping
 from html.parser import HTMLParser
 from typing import Any
 
 if __package__:
     from .references import build_bibliography, source_format
+    from .table_views import (
+        MAX_PARSE_CHARS,
+        MAX_SPAN,
+        markdown_table_html,
+        summarize_table,
+        table_quality_view,
+    )
 else:  # pragma: no cover
     from references import (  # type: ignore[import-not-found,no-redef]
         build_bibliography,
         source_format,
     )
+    from table_views import (  # type: ignore[import-not-found,no-redef]
+        MAX_PARSE_CHARS,
+        MAX_SPAN,
+        markdown_table_html,
+        summarize_table,
+        table_quality_view,
+    )
 
 
 class _TableSanitizer(HTMLParser):
     _allowed = frozenset(
-        {"table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption", "colgroup", "col"}
+        {
+            "table",
+            "thead",
+            "tbody",
+            "tfoot",
+            "tr",
+            "th",
+            "td",
+            "caption",
+            "colgroup",
+            "col",
+            "strong",
+            "em",
+            "code",
+            "span",
+            "b",
+            "i",
+            "sub",
+            "sup",
+            "p",
+            "div",
+        }
     )
     _void = frozenset({"col"})
 
@@ -27,16 +61,37 @@ class _TableSanitizer(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
         self.depth = 0
+        self.suppressed: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style", "template"}:
+            self.suppressed.append(tag)
+        if self.suppressed:
+            return
+        if tag == "br" and self.depth:
+            self.parts.append("<br>")
+            return
         if tag not in self._allowed:
             return
+        for span_name in ("rowspan", "colspan"):
+            if sum(name == span_name for name, _ in attrs) > 1:
+                raise ValueError("duplicate_span_attribute")
         kept: list[str] = []
         for name, value in attrs:
+            if (
+                name == "style"
+                and isinstance(value, str)
+                and value in {"text-align:left", "text-align:center", "text-align:right"}
+            ):
+                kept.append(f' class="align-{value.removeprefix("text-align:")}"')
+                continue
             if name not in {"colspan", "rowspan", "scope"} or value is None:
                 continue
-            if name in {"colspan", "rowspan"} and not value.isdigit():
-                continue
+            if name in {"colspan", "rowspan"}:
+                if not value.isascii() or not value.isdigit() or len(value) > 3:
+                    continue
+                if not 1 <= int(value) <= MAX_SPAN:
+                    continue
             if name == "scope" and value not in {"row", "col", "rowgroup", "colgroup"}:
                 continue
             kept.append(f' {name}="{html.escape(value, quote=True)}"')
@@ -45,24 +100,41 @@ class _TableSanitizer(HTMLParser):
             self.depth += 1
 
     def handle_endtag(self, tag: str) -> None:
+        if self.suppressed:
+            if tag == self.suppressed[-1]:
+                self.suppressed.pop()
+            return
         if tag in self._allowed and tag not in self._void:
             self.parts.append(f"</{tag}>")
             self.depth = max(0, self.depth - 1)
 
     def handle_data(self, data: str) -> None:
-        if self.depth:
+        if not self.suppressed:
             self.parts.append(html.escape(data))
 
 
 def _render_table_text(text_payload: Mapping[str, Any]) -> str:
     content = str(text_payload.get("content") or "")
     fmt = str(text_payload.get("format") or "").lower()
-    if fmt in {"html", "text/html"} or "<table" in content.lower():
+    is_markdown = fmt in {"md", "markdown", "text/markdown", "text/x-markdown"}
+    if fmt in {"html", "text/html"} or (not is_markdown and "<table" in content.lower()):
+        inspection = summarize_table({"text": text_payload})
+        if any(issue != "outside_table_text" for issue in inspection["issues"]):
+            return (
+                '<p class="table-warning">Parsed HTML cannot be safely displayed; '
+                "consult the original PDF crop.</p>"
+            )
         parser = _TableSanitizer()
         parser.feed(content)
+        parser.close()
         rendered = "".join(parser.parts)
         if "<table" in rendered:
             return rendered
+    if len(content) > MAX_PARSE_CHARS:
+        return (
+            '<p class="table-warning">Parsed text exceeds the display limit; '
+            "consult the original PDF crop.</p>"
+        )
     markdown = _markdown_table(content)
     if markdown is not None:
         return markdown
@@ -70,25 +142,13 @@ def _render_table_text(text_payload: Mapping[str, Any]) -> str:
 
 
 def _markdown_table(content: str) -> str | None:
-    lines = [line.strip() for line in content.splitlines() if line.strip()]
-    if len(lines) < 2 or "|" not in lines[0]:
+    rendered, issues = markdown_table_html(content)
+    if rendered is None or issues:
         return None
-    rows = [_pipe_cells(line) for line in lines]
-    if len(rows[0]) < 2 or any(len(row) != len(rows[0]) for row in rows):
-        return None
-    separator = all(re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in rows[1])
-    body_start = 2 if separator else 1
-    head = "".join(f"<th>{html.escape(cell)}</th>" for cell in rows[0])
-    body = "".join(
-        "<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>"
-        for row in rows[body_start:]
-    )
-    return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
-
-
-def _pipe_cells(line: str) -> list[str]:
-    clean = line.strip().strip("|")
-    return [cell.strip() for cell in re.split(r"(?<!\\)\|", clean)]
+    parser = _TableSanitizer()
+    parser.feed(rendered)
+    parser.close()
+    return "".join(parser.parts)
 
 
 def _page(record: Mapping[str, Any]) -> tuple[int | None, int | None]:
@@ -146,6 +206,9 @@ def render_html_report(state: Mapping[str, Any]) -> str:
 
     sections: dict[str, list[str]] = {}
     section_order: list[str] = []
+    unknown_table_quality = False
+    assessments = ledger.get("tableAssessments", {})
+    assessments = assessments if isinstance(assessments, Mapping) else {}
     for item in state["report"]["items"]:
         section = str(item["section"])
         if section not in sections:
@@ -166,6 +229,12 @@ def render_html_report(state: Mapping[str, Any]) -> str:
         mime = html.escape(str(screenshot["mediaType"]), quote=True)
         data = html.escape(str(table["screenshotDataBase64"]), quote=True)
         caption = html.escape(str(item["caption"]))
+        quality = table_quality_view(table, assessment=assessments.get(item["tableId"]))
+        unknown_table_quality |= quality["sourceCompleteness"] == "unknown"
+        warning_html = "".join(
+            f'<p class="table-warning">{html.escape(warning)}</p>'
+            for warning in quality["warnings"]
+        )
         sections[section].append(
             '<figure class="table-evidence">'
             f"<figcaption>{caption} {citation}</figcaption>"
@@ -173,6 +242,7 @@ def render_html_report(state: Mapping[str, Any]) -> str:
             f"{parsed}</div>"
             '<div class="original-table"><h3>Original PDF crop</h3>'
             f'<img src="data:{mime};base64,{data}" alt="Original PDF table crop"></div>'
+            f"{warning_html}"
             "</figure>"
         )
 
@@ -192,6 +262,14 @@ def render_html_report(state: Mapping[str, Any]) -> str:
     subtitle = state.get("subtitle")
     subtitle_html = f'<div class="subtitle">{html.escape(str(subtitle))}</div>' if subtitle else ""
     title = html.escape(str(state["title"]))
+    quality_note = (
+        '<p class="table-quality-note">Table source and artifact checks do not establish '
+        "visual review or OCR completeness. Tables without a current server assessment "
+        "remain unassessed; extracted inventories do not prove that every PDF table "
+        "was identified.</p>"
+        if unknown_table_quality
+        else ""
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -216,12 +294,16 @@ figcaption {{ font-weight: 700; margin-bottom: 12px; }}
 table {{ border-collapse: collapse; width: 100%; font-size: 12px; }}
 th, td {{ border: 1px solid #aab2bb; padding: 6px 8px; text-align: left; vertical-align: top; }}
 th {{ background: #eef2f5; }}
+.align-left {{ text-align: left; }}
+.align-center {{ text-align: center; }}
+.align-right {{ text-align: right; }}
 img {{ display: block; max-width: 100%; height: auto; border: 1px solid #b8c0c8; }}
 pre {{ white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f7f9; padding: 12px; }}
 .references {{ margin-top: 42px; border-top: 2px solid #183153; padding-top: 18px; }}
 .references ol {{ padding-left: 24px; }}
 .references li {{ margin: 0 0 9px; overflow-wrap: anywhere; }}
 .filename {{ color: #66717c; }}
+.table-quality-note, .table-warning {{ font-size: 13px; color: #7a341b; }}
 @media print {{
   body {{ max-width: none; padding: 0; }}
   .parsed-table {{ display: none; }}
@@ -231,7 +313,7 @@ pre {{ white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f7f9; padd
 </head>
 <body>
 <header><h1>{title}</h1>{subtitle_html}</header>
-<main>{section_html}</main>
+<main>{quality_note}{section_html}</main>
 <section class="references"><h2>References</h2><ol>{reference_html}</ol></section>
 </body>
 </html>
