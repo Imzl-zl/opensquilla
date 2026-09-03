@@ -8,6 +8,14 @@ from collections.abc import Mapping
 from html.parser import HTMLParser
 from typing import Any
 
+if __package__:
+    from .references import build_bibliography, source_format
+else:  # pragma: no cover
+    from references import (  # type: ignore[import-not-found,no-redef]
+        build_bibliography,
+        source_format,
+    )
+
 
 class _TableSanitizer(HTMLParser):
     _allowed = frozenset(
@@ -112,38 +120,29 @@ def render_html_report(state: Mapping[str, Any]) -> str:
     evidence = ledger["evidence"]
     files = ledger["files"]
     tables = ledger["tables"]
-    reference_numbers: dict[str, int] = {}
-    references: list[dict[str, Any]] = []
-
-    def source_number(file_id: str, fallback_title: str) -> int:
-        if file_id in reference_numbers:
-            return reference_numbers[file_id]
-        file_record = files.get(file_id, {})
-        number = len(references) + 1
-        reference_numbers[file_id] = number
-        references.append(
-            {
-                "number": number,
-                "title": file_record.get("title") or fallback_title,
-                "filename": file_record.get("filename"),
-            }
-        )
-        return number
+    bibliography = build_bibliography(state)
+    reference_numbers = bibliography["fileReferenceNumbers"]
+    references = bibliography["references"]
 
     def evidence_citations(evidence_ids: list[str]) -> str:
         labels: list[str] = []
-        seen: set[tuple[int, int | None, int | None]] = set()
+        seen: set[str] = set()
         for evidence_id in evidence_ids:
             record = evidence[evidence_id]
             file_id = str(record["fileId"])
-            number = source_number(file_id, str(record.get("title") or "Local document"))
+            number = reference_numbers[file_id]
             start, end = _page(record)
-            key = (number, start, end)
-            if key in seen:
+            suffix = (
+                _page_label(start, end)
+                if source_format(files[file_id]) == "PDF"
+                else ", text version"
+            )
+            label = f"[{number}{suffix}]"
+            if label in seen:
                 continue
-            seen.add(key)
-            labels.append(f"[{number}{_page_label(start, end)}]")
-        return '<span class="citation">' + " ".join(labels) + "</span>"
+            seen.add(label)
+            labels.append(f'<span class="citation">{label}</span>')
+        return " ".join(labels)
 
     sections: dict[str, list[str]] = {}
     section_order: list[str] = []
@@ -159,8 +158,7 @@ def render_html_report(state: Mapping[str, Any]) -> str:
             continue
         table = tables[item["tableId"]]
         file_id = str(table["fileId"])
-        file_record = files[file_id]
-        number = source_number(file_id, str(file_record.get("title") or "Local document"))
+        number = reference_numbers[file_id]
         start, end = _page(table)
         citation = f'<span class="citation">[{number}{_page_label(start, end)}]</span>'
         parsed = _render_table_text(table["text"])
@@ -185,11 +183,9 @@ def render_html_report(state: Mapping[str, Any]) -> str:
     reference_html = "".join(
         "<li>"
         + html.escape(str(reference["title"]))
-        + (
-            f' <span class="filename">({html.escape(str(reference["filename"]))})</span>'
-            if reference.get("filename") and reference["filename"] != reference["title"]
-            else ""
-        )
+        + ' <span class="filename">['
+        + " + ".join(dict.fromkeys(member["format"] for member in reference["members"]))
+        + "]</span>"
         + "</li>"
         for reference in references
     )
@@ -224,7 +220,7 @@ img {{ display: block; max-width: 100%; height: auto; border: 1px solid #b8c0c8;
 pre {{ white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f7f9; padding: 12px; }}
 .references {{ margin-top: 42px; border-top: 2px solid #183153; padding-top: 18px; }}
 .references ol {{ padding-left: 24px; }}
-.references li {{ margin: 0 0 9px; }}
+.references li {{ margin: 0 0 9px; overflow-wrap: anywhere; }}
 .filename {{ color: #66717c; }}
 @media print {{
   body {{ max-width: none; padding: 0; }}

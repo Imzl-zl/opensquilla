@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import subprocess
@@ -14,6 +15,8 @@ import pytest
 from opensquilla.mcp.stdio import MCPStdioClient
 from opensquilla.mcp.types import MCPServerConfig
 from scripts.knowledge_research.bridge import KnowledgeResearchBridge
+from scripts.knowledge_research.references import build_bibliography
+from scripts.knowledge_research.report import render_html_report
 from scripts.knowledge_research.state import KnowledgeResearchStore
 
 PNG = base64.b64decode(
@@ -398,6 +401,7 @@ def test_full_v9_shape_builds_verified_private_media_and_three_public_files(
         "claimCount": 1,
         "tableCount": 1,
         "sourceCount": 1,
+        "sourceFileCount": 1,
         "evidenceCount": 1,
     }
     assert snapshot["ledger"]["files"][FILE_ID]["observedLocators"]
@@ -405,6 +409,126 @@ def test_full_v9_shape_builds_verified_private_media_and_three_public_files(
     private_state = workspace / ".codex" / "knowledge-research" / research_id
     assert len(list((private_state / "media").iterdir())) == 1
     assert base64.b64encode(PNG).decode() not in (private_state / "state.json").read_text()
+
+
+def test_bibliography_pairs_formats_but_preserves_different_issues() -> None:
+    files: dict[str, Any] = {}
+    evidence: dict[str, Any] = {}
+    for index, (date, extension) in enumerate(
+        [
+            ("2026-06-26", "md"),
+            ("2026-06-26", "pdf"),
+            ("2026-07-10", "md"),
+        ]
+    ):
+        stem = f"{date}+Korea Weekly Kickstart Market performance and earnings"
+        file_id = f"private-file-{index}"
+        files[file_id] = {
+            "title": "KOREA WEEKLY KICKSTART",
+            "filename": f"{stem}.{extension}",
+            "sourcePath": f"goldman/{date}/{stem}/{stem}.{extension}",
+            "revision": str(index) * 64,
+            "verificationStatus": "verified",
+        }
+        evidence[f"e-{index}"] = {
+            "fileId": file_id,
+            "locator": {"pageStart": index + 1, "pageEnd": index + 1},
+        }
+    state = {
+        "title": "Research",
+        "ledger": {"files": files, "evidence": evidence, "tables": {}},
+        "report": {
+            "items": [
+                {
+                    "kind": "claim",
+                    "section": "Review",
+                    "text": "Claim",
+                    "evidenceIds": list(evidence),
+                }
+            ]
+        },
+    }
+    bibliography = build_bibliography(state)
+    assert bibliography["sourceFileCount"] == 3
+    assert bibliography["sourceCount"] == 2
+    assert bibliography["fileReferenceNumbers"] == {
+        "private-file-0": 1,
+        "private-file-1": 1,
+        "private-file-2": 2,
+    }
+    assert "2026-06-26" in bibliography["references"][0]["title"]
+    assert "2026-07-10" in bibliography["references"][1]["title"]
+    html = render_html_report(state)
+    assert "[1, text version]" in html
+    assert "[1, p. 2]" in html
+    assert "[2, text version]" in html
+    assert "[1, p. 1]" not in html
+    assert html.count('<span class="citation">') == 3
+    assert "private-file-" not in html
+    assert build_bibliography(copy.deepcopy(state)) == bibliography
+
+    # Generic date folders, different report stems and ambiguous versions must not merge.
+    files["private-file-1"]["sourcePath"] = "goldman/2026-06-26/different-report.pdf"
+    assert build_bibliography(state)["sourceCount"] == 3
+    files["private-file-1"]["sourcePath"] = files["private-file-0"]["sourcePath"].replace(
+        ".md", ".pdf"
+    )
+    files["private-file-2"] = copy.deepcopy(files["private-file-1"])
+    assert build_bibliography(state)["sourceCount"] == 3
+    files["private-file-1"].update(title="[page 1]", filename="2~aaaabbbb.pdf")
+    files["private-file-1"]["sourcePath"] = str(
+        Path(files["private-file-0"]["sourcePath"]).parent / "2~aaaabbbb.pdf"
+    )
+    reference = build_bibliography(state)["references"][1]
+    assert "Market performance and earnings" in reference["title"]
+    assert "2~" not in reference["title"]
+
+
+def test_finalize_hydrates_only_cited_metadata_once_without_changing_inventory(
+    tmp_path: Path,
+) -> None:
+    store = KnowledgeResearchStore(workspace=tmp_path, pdf_renderer=lambda *_: b"%PDF-test")
+    upstream = FakeUpstream([_response(_search_payload()), _response(_details_payload())])
+    bridge = KnowledgeResearchBridge(upstream, store)
+    research_id = _begin(bridge)
+    assert not _call(
+        bridge, "searchByIds", {"researchId": research_id, "query": "KOSPI", "fileIds": [FILE_ID]}
+    )["isError"]
+    _call(
+        bridge,
+        "researchAddClaim",
+        {
+            "researchId": research_id,
+            "section": "Review",
+            "text": "A supported statement",
+            "evidenceIds": [EVIDENCE_ID],
+        },
+    )
+    result = _call(bridge, "researchFinalize", {"researchId": research_id})
+    assert result["isError"] is False
+    state = store.snapshot(research_id)
+    assert state["ledger"]["inventories"] == {}
+    assert state["ledger"]["calls"][-1]["purpose"] == "bibliography_metadata"
+    assert state["ledger"]["files"][FILE_ID]["filename"] == "korea-equity.pdf"
+    assert _call(bridge, "researchFinalize", {"researchId": research_id})["isError"] is False
+    assert len(upstream.requests) == 2
+    provenance = json.loads(
+        (tmp_path / "knowledge-reports" / research_id / "provenance.json").read_text()
+    )
+    assert provenance["bibliography"]["fileReferenceNumbers"][FILE_ID] == 1
+
+    before = copy.deepcopy(state["ledger"]["files"])
+    bad_details = _details_payload()
+    bad_details["file"]["revision"] = "b" * 64
+    call = store.record_knowledge_call(
+        research_id=research_id,
+        tool_name="getFileDetails",
+        arguments={"fileId": FILE_ID},
+        result=_mcp_result(bad_details),
+        metadata_only=True,
+    )
+    assert call["verificationStatus"] == "unverified_revision_mismatch"
+    assert store.snapshot(research_id)["ledger"]["files"] == before
 
 
 def test_search_by_ids_scope_violation_is_rejected_atomically(tmp_path: Path) -> None:

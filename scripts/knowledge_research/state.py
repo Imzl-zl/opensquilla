@@ -14,8 +14,13 @@ from pathlib import Path
 from typing import Any, cast
 
 if __package__:
+    from .references import build_bibliography, cited_file_ids
     from .report import render_html_report
 else:  # pragma: no cover - exercised by deployment entrypoint smoke tests
+    from references import (  # type: ignore[import-not-found,no-redef]
+        build_bibliography,
+        cited_file_ids,
+    )
     from report import render_html_report  # type: ignore[import-not-found,no-redef]
 
 STATE_SCHEMA_VERSION = "opensquilla-knowledge-research-state/1"
@@ -183,6 +188,7 @@ class KnowledgeResearchStore:
         tool_name: str,
         arguments: Mapping[str, Any],
         result: Mapping[str, Any],
+        metadata_only: bool = False,
     ) -> dict[str, Any]:
         if tool_name not in _KNOWLEDGE_TOOLS:
             raise ResearchStateError(f"unsupported Knowledge tool: {tool_name}")
@@ -195,6 +201,13 @@ class KnowledgeResearchStore:
         elif structured is None:
             status = "unverified_missing_structured_content"
             accepted = 0
+        elif metadata_only and tool_name == "getFileDetails":
+            scratch = {"files": dict(ledger["files"]), "inventories": {}}
+            status, accepted = self._ingest_file_details(scratch, arguments, structured)
+            if status == "verified":
+                file_id = arguments["fileId"]
+                ledger["files"][file_id] = scratch["files"][file_id]
+                accepted = 1
         else:
             status, accepted = self._ingest(
                 research_id=research_id,
@@ -213,6 +226,8 @@ class KnowledgeResearchStore:
             "acceptedRecordCount": accepted,
             "structuredSource": structured_source,
         }
+        if metadata_only:
+            call["purpose"] = "bibliography_metadata"
         if tool_name in {"search", "searchByIds"} and structured is not None:
             call["retrieval"] = self._retrieval_telemetry(structured)
         ledger["calls"].append(call)
@@ -415,6 +430,15 @@ class KnowledgeResearchStore:
                 "the report directory or any private research state."
             ),
         }
+
+    def missing_reference_metadata(self, research_id: str) -> list[str]:
+        state = self._load(research_id)
+        files = state["ledger"]["files"]
+        return [
+            file_id
+            for file_id in cited_file_ids(state)
+            if files[file_id].get("metadataSource") != "getFileDetails"
+        ]
 
     def _ingest(
         self,
@@ -1068,6 +1092,7 @@ class KnowledgeResearchStore:
             "title": state["title"],
             "ledger": ledger,
             "report": _safe_json(state["report"]),
+            "bibliography": build_bibliography(state),
             "artifacts": {
                 "report.html": hashlib.sha256(html_bytes).hexdigest(),
                 "report.pdf": hashlib.sha256(pdf_bytes).hexdigest(),
@@ -1097,7 +1122,8 @@ class KnowledgeResearchStore:
         return {
             "claimCount": claim_count,
             "tableCount": len(table_ids),
-            "sourceCount": len(source_ids),
+            "sourceCount": build_bibliography(state)["sourceCount"],
+            "sourceFileCount": len(source_ids),
             "evidenceCount": len(evidence_ids),
         }
 

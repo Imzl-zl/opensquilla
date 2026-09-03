@@ -247,7 +247,38 @@ class KnowledgeResearchBridge:
                 caption=_text_argument(arguments, "caption"),
             )
         else:
-            payload = self.store.finalize(research_id=_text_argument(arguments, "researchId"))
+            research_id = _text_argument(arguments, "researchId")
+            unavailable = 0
+            for file_id in self.store.missing_reference_metadata(research_id):
+                metadata_arguments = {"fileId": file_id, "limit": 1}
+                try:
+                    response = self._upstream_tool("getFileDetails", metadata_arguments)
+                except (OSError, RuntimeError):
+                    response = {}
+                result = response.get("result")
+                if isinstance(result, Mapping):
+                    call = self.store.record_knowledge_call(
+                        research_id=research_id,
+                        tool_name="getFileDetails",
+                        arguments=metadata_arguments,
+                        result=result,
+                        metadata_only=True,
+                    )
+                    unavailable += call["verificationStatus"] != "verified"
+                else:
+                    unavailable += 1
+                    self.store.record_knowledge_error(
+                        research_id=research_id,
+                        tool_name="getFileDetails",
+                        arguments=metadata_arguments,
+                        error={"message": "Bibliography metadata unavailable"},
+                    )
+            payload = self.store.finalize(research_id=research_id)
+            if unavailable:
+                payload["warnings"] = [
+                    f"Metadata unavailable for {unavailable} cited files; "
+                    "kept separate without inferred dates or format pairing."
+                ]
         return _tool_result(payload)
 
     def _auto_paginate_details(
