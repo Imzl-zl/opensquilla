@@ -1280,6 +1280,11 @@ def _arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--media-root",
         default=os.environ.get("OPENSQUILLA_KNOWLEDGE_MCP_MEDIA_DIR"),
     )
+    parser.add_argument(
+        "--coverage-db",
+        default=os.environ.get("OPENSQUILLA_KNOWLEDGE_COVERAGE_DB"),
+        help="Read-only Knowledge database for bibliography text coverage",
+    )
     parser.add_argument("upstream", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if not args.workspace:
@@ -1295,6 +1300,15 @@ def _arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _arguments(argv)
+    coverage_resolver = None
+    if args.coverage_db:
+        if __package__:
+            from .reading_coverage import SQLiteReadingCoverage
+        else:
+            from reading_coverage import (  # type: ignore[import-not-found,no-redef]
+                SQLiteReadingCoverage,
+            )
+        coverage_resolver = SQLiteReadingCoverage(args.coverage_db)
     upstream = SubprocessUpstream(args.upstream)
     bridge = KnowledgeResearchBridge(
         upstream,
@@ -1302,6 +1316,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             workspace=args.workspace,
             private_root=args.private_root,
             media_root=args.media_root,
+            reading_coverage_resolver=coverage_resolver,
         ),
     )
     try:

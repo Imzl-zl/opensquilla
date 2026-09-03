@@ -137,6 +137,7 @@ class KnowledgeResearchStore:
         private_root: str | os.PathLike[str] | None = None,
         media_root: str | os.PathLike[str] | None = None,
         pdf_renderer: Callable[[str, Path], bytes] | None = None,
+        reading_coverage_resolver: Callable[[Mapping[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self.private_root = (
@@ -149,6 +150,7 @@ class KnowledgeResearchStore:
         )
         self.output_root = self.workspace / "knowledge-reports"
         self.pdf_renderer = pdf_renderer or _render_pdf
+        self.reading_coverage_resolver = reading_coverage_resolver
 
     def begin(
         self,
@@ -519,27 +521,31 @@ class KnowledgeResearchStore:
         pending = review_requirements(state)
         if pending is not None:
             return pending
-        input_hash = sha256_json(
-            {
-                name: state.get(name)
-                for name in ("title", "subtitle", "ledger", "report", "language", "mode")
-                if name in state
-            }
-        )
+        rendered_state = state
+        inputs = {
+            name: state.get(name)
+            for name in ("title", "subtitle", "ledger", "report", "language", "mode")
+            if name in state
+        }
+        if self.reading_coverage_resolver is not None:
+            reading_coverage = self.reading_coverage_resolver(state)
+            rendered_state = {**state, "readingCoverage": reading_coverage}
+            inputs["readingCoverage"] = reading_coverage
+        input_hash = sha256_json(inputs)
         previous = state.get("finalized")
         if isinstance(previous, Mapping) and previous.get("inputSha256") == input_hash:
             self._check_artifacts(previous["files"])
             receipt: dict[str, Any] = _safe_json(previous["receipt"])
             receipt["review"] = preparation
             return receipt
-        html = render_html_report(self._state_for_render(state))
+        html = render_html_report(self._state_for_render(rendered_state))
         self._reject_report_leaks(html, state)
         pdf = self.pdf_renderer(html, self.workspace)
         if not isinstance(pdf, bytes) or not pdf.startswith(b"%PDF"):
             raise ResearchStateError("PDF renderer did not return a PDF")
 
         html_bytes = html.encode("utf-8")
-        provenance = self._provenance(state, html_bytes=html_bytes, pdf_bytes=pdf)
+        provenance = self._provenance(rendered_state, html_bytes=html_bytes, pdf_bytes=pdf)
         provenance_bytes = (
             json.dumps(provenance, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         ).encode("utf-8")
@@ -1340,6 +1346,11 @@ class KnowledgeResearchStore:
             "ledger": ledger,
             "report": _safe_json(state["report"]),
             "bibliography": build_bibliography(state),
+            **(
+                {"readingCoverage": _safe_json(state["readingCoverage"])}
+                if "readingCoverage" in state
+                else {}
+            ),
             "artifacts": {
                 "report.html": hashlib.sha256(html_bytes).hexdigest(),
                 "report.pdf": hashlib.sha256(pdf_bytes).hexdigest(),

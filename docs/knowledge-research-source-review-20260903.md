@@ -256,3 +256,64 @@ not that the Agent interpreted source numbers, units or forecasts correctly.
 The serial model trial did not exercise the late concurrency-recovery fixes;
 those were validated separately by the final focused suite and independent
 closing probes. No historical user task or report was repaired in place.
+
+### Automatic Bibliography Reading Coverage
+
+The report sidecar now computes reading coverage during finalization. Each HTML
+and PDF bibliography entry receives only a localized coverage percentage; the
+Agent does not estimate it, supply new arguments or write an explanatory note.
+The Skill delegates this field to the renderer. The prose, citations, table
+selection and original-crop-only PDF presentation remain unchanged.
+
+Coverage is the union of source-character ranges actually prepared in tool
+projections, divided by the union of indexed child-chunk character ranges for
+the same document revision. Repeated and overlapping text is counted once.
+Review fragments count only when projected; merely fetching evidence into the
+ledger does not count as reading. Metadata and table OCR are excluded. Grouped
+format variants retain separate coordinate spaces and use a weighted ratio.
+This measures tool-projected text, not model comprehension or original-PDF
+extraction completeness. Machine details reside in provenance.json only.
+
+The operator enables measurement with --coverage-db or
+OPENSQUILLA_KNOWLEDGE_COVERAGE_DB. It must target the active Full-v10 Knowledge
+database. Access is read-only, uses the existing document and chunk indexes,
+and is bounded by 20,000 chunk rows per document, a 10-second overall query
+budget and a 100-ms SQLite lock timeout. Revision, policy, index and locator
+mismatches, missing projection history, or unavailable data produce the visible
+unavailable label rather than a fabricated percentage. No database migration,
+write, vector query, new MCP parameter or extra Agent search is introduced.
+
+Coverage participates in finalization's input hash. An unchanged result reuses
+the artifact receipt; a changed result creates a new immutable generation.
+Existing historical reports are not rewritten. Deploy the exact sidecar commit
+with the coverage database environment variable and copied Skill; retain the
+old pointer and config for rollback. Only an idle Full-v10 Gateway is restarted;
+Knowledge, proxy and data-processing services are not changed.
+
+Round one implemented the resolver, renderer and fresh MCP delivery path. Local
+round-two review added chunk-revision checks, bounded-query recovery, multiformat
+fixtures and cache-invalidation coverage. The requested subagent was attempted
+twice, but the agent backend returned HTTP 404 both times; no independent
+subagent review is claimed for this change.
+
+Verification: 26 focused tests passed in 1.40 seconds; the complete isolated
+sidecar suite passed 408 tests in 14.49 seconds, including stock stdio restart
+and real PDF gates. Ruff, format check and directed mypy passed for the 16
+checked files, as did Skill validation and git diff whitespace checks. A fresh
+in-process MCP task produces the percentage with ordinary search, claim and
+finalize calls and no model-supplied percentage. No whole-repository or new
+full-model research task was run.
+
+A bounded read-only lookup of the latest 51-reference report matched all 51
+previously audited percentages in 0.059 seconds. An isolated replay through the
+real PDF renderer retained the exact body and seven image sources, and produced
+51 labels in each delivery format and 51 machine records in provenance. Original
+report state bytes remained unchanged. This lookup timing is not an end-to-end
+performance claim. Receipts are under
+/mnt/data/opensquilla-dev/tmp/research-coverage-render-20260903/receipt.json.
+
+| Isolated artifact | SHA256 |
+| --- | --- |
+| HTML | 552a0033c8db7b845b3a1bb597c2063c2ffb68ee46a157b44794d42aa9300b4d |
+| PDF | e212f2767ebc07a7099ce9d8ae0b9733e83136410852cffa3c2d28278dbd6e8f |
+| Provenance | f789a8b638c06c171e9971b7646ecc0b609e2fe5cd678e92ccd614b22f344c64 |

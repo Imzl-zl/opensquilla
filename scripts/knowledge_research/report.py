@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import math
 import re
 from collections.abc import Mapping
 from html.parser import HTMLParser
@@ -35,6 +36,8 @@ _CJK = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff\U00020
 _LABELS = {
     "en": {
         "references": "References",
+        "coverage": "Coverage: ",
+        "coverage_unavailable": "unavailable",
         "notes": "Source Notes",
         "parsed": "Parsed table",
         "original": "Original PDF crop",
@@ -50,6 +53,8 @@ _LABELS = {
     },
     "zh-CN": {
         "references": "\u53c2\u8003\u6587\u732e",
+        "coverage": "\u8986\u76d6\u7387\uff1a",
+        "coverage_unavailable": "\u672a\u7edf\u8ba1",
         "notes": "\u8d44\u6599\u8bf4\u660e",
         "parsed": "\u8868\u683c\u6587\u5b57",
         "original": "\u539f\u59cb PDF \u622a\u56fe",
@@ -275,6 +280,26 @@ def render_html_report(state: Mapping[str, Any]) -> str:
     reference_numbers = bibliography["fileReferenceNumbers"]
     references = bibliography["references"]
 
+    def reference_coverage(number: int) -> str:
+        reading = state.get("readingCoverage")
+        if not isinstance(reading, Mapping):
+            return ""
+        row: Mapping[str, Any] = next(
+            (item for item in reading.get("references", []) if item.get("number") == number),
+            {},
+        )
+        value = row.get("percentage")
+        label = labels["coverage_unavailable"]
+        if (
+            row.get("status") == "available"
+            and isinstance(value, int | float)
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and 0 <= value <= 100
+        ):
+            label = f"{value:.2f}%"
+        return '<span class="reading-coverage">' + labels["coverage"] + label + "</span>"
+
     def evidence_citations(evidence_ids: list[str]) -> str:
         citation_labels: list[str] = []
         seen: set[str] = set()
@@ -350,6 +375,7 @@ def render_html_report(state: Mapping[str, Any]) -> str:
         + ' <span class="filename">['
         + " + ".join(dict.fromkeys(member["format"] for member in reference["members"]))
         + "]</span>"
+        + reference_coverage(reference["number"])
         + "</li>"
         for reference in references
     )
@@ -395,6 +421,8 @@ pre {{ white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f7f9; padd
 .references ol {{ padding-left: 24px; }}
 .references li {{ margin: 0 0 9px; overflow-wrap: anywhere; }}
 .filename {{ color: #66717c; }}
+.reading-coverage {{ display: inline-block; margin-left: 10px;
+  white-space: nowrap; color: #66717c; }}
 .table-quality-note, .table-warning {{ font-size: 13px; color: #7a341b; }}
 @media print {{
   body {{ max-width: none; padding: 0; }}

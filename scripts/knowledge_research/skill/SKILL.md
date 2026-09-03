@@ -148,6 +148,8 @@ conclusions. Never invent values or turn conditional scenarios into guaranteed f
    substitute an older manifest. Expected-item lists check submitted items, not
    research completeness.
 5. Only `status="finalized"` permits publication; it is not semantic verification.
+   The renderer adds bibliography coverage percentages automatically. Do not
+   estimate, write or inflate them, or add an explanation beside the percentages.
    Publish exactly that result's `publicArtifactManifest` entries: `report.html`,
    `report.pdf`, and `provenance.json`, each with `bundle="none"`. Never publish
    directories, drafts, screenshot assets, or private state. Never hand-edit
