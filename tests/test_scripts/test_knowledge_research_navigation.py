@@ -198,6 +198,330 @@ def test_schema_keeps_original_tools_and_adds_only_two(tmp_path: Path) -> None:
     )
 
 
+def test_stock_gateway_properties_and_required_keep_model_selectors_unambiguous(
+    tmp_path: Path,
+) -> None:
+    bridge, _, _, _ = setup(tmp_path)
+    response = bridge.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert response is not None
+    # Stock discovery retains only these two schema fields.
+    schemas = {
+        tool["name"]: {key: tool["inputSchema"][key] for key in ("properties", "required")}
+        for tool in response["result"]["tools"]
+    }
+    for name, refs, legacy in [
+        ("getFileDetails", ["fileRef"], ["fileId"]),
+        ("getTable", ["fileRef", "tableRef"], ["fileId", "tableId"]),
+        ("researchReadEvidence", ["evidenceRef"], ["evidenceId"]),
+        ("researchAddTable", ["tableRef"], ["tableId"]),
+        ("researchAddClaim", ["evidenceRefs"], ["evidenceIds"]),
+    ]:
+        schema = schemas[name]
+        assert set(refs) <= set(schema["required"])
+        assert not set(legacy) & schema["properties"].keys()
+        for ref in refs:
+            value = schema["properties"][ref]
+            assert "Never invent" in value.get("items", value)["description"]
+    claim = schemas["researchAddClaims"]["properties"]["claims"]["items"]
+    assert "evidenceRefs" in claim["required"] and "evidenceIds" not in claim["properties"]
+    assert claim["properties"]["evidenceRefs"]["maxItems"] == 200
+    scope = schemas["searchByIds"]["properties"]
+    assert "fileIds" not in scope
+    for name in ("fileRefs", "scopeRefs"):
+        assert scope[name]["minItems"] == 1 and scope[name]["maxItems"] == 20
+        assert "exactly one" in scope[name]["description"]
+        assert (
+            "fileRefs" in scope[name]["description"] and "scopeRefs" in scope[name]["description"]
+        )
+    assert "expectedTableIds" not in schemas["researchFinalize"]["properties"]
+    assert (
+        schemas["researchAddTable"]["properties"]["expectedTableHash"]["pattern"]
+        == "^[0-9a-f]{64}$"
+    )
+    assert "expectedTableHash" not in schemas["researchAddTable"]["required"]
+    assert "review" in schemas["researchNavigate"]["properties"]["view"]["enum"]
+    assert schemas["researchBegin"]["properties"]["mode"]["default"] == "standard"
+    assert schemas["researchBegin"]["properties"]["language"]["enum"] == ["zh-CN", "en"]
+
+
+def test_begin_forwards_only_explicit_mode_and_language(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge, store, _, _ = setup(tmp_path)
+    received = []
+    original = store.begin
+
+    def begin(**kwargs: Any) -> dict[str, Any]:
+        received.append(copy.deepcopy(kwargs))
+        return original(title=kwargs["title"], subtitle=kwargs["subtitle"])
+
+    monkeypatch.setattr(store, "begin", begin)
+    for options in ({}, {"mode": "deep", "language": "zh-CN"}, {"mode": "standard"}):
+        payload, response = invoke(bridge, "researchBegin", {"title": "Research", **options})
+        assert not response["result"]["isError"], payload
+        assert received[-1] == {"title": "Research", "subtitle": None, **options}
+
+
+def test_finalize_pending_review_precedes_metadata_and_rendering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge, store, upstream, rid = setup(tmp_path)
+    pending = {
+        "status": "needs_review",
+        "researchId": rid,
+        "checks": [{"code": "SOURCE_COMPARISON_REQUIRED"}],
+    }
+
+    def pending_review(research_id: str) -> dict[str, Any]:
+        assert research_id == rid
+        return pending
+
+    def unexpected(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("Review must be prepared before metadata fetching or rendering")
+
+    monkeypatch.setattr(store, "pending_review", pending_review)
+    monkeypatch.setattr(store, "missing_reference_metadata", unexpected)
+    monkeypatch.setattr(store, "finalize", unexpected)
+    before = store.snapshot(rid)
+    payload, response = invoke(bridge, "researchFinalize", {"researchId": rid})
+    assert not response["result"]["isError"] and payload == pending
+    assert upstream.calls == [] and store.snapshot(rid) == before
+    assert "publicArtifactManifest" not in payload and not store.output_root.exists()
+
+
+def test_readable_directories_keep_known_metadata_and_executable_page_scope(tmp_path: Path) -> None:
+    source = search_payload("q", ["pdf-source", "unknown-source"])
+    first = source["results"][0]
+    first.update(
+        title="<b>Forecast</b>", filename="forecast.pdf", mediaType="application/pdf", pageCount=40
+    )
+    first["locator"] = {
+        "title": "Forecast",
+        "pageStart": 9,
+        "pageEnd": 12,
+        "sectionPath": [f"section-{i} " + "heading " * 30 for i in range(12)],
+        "anchor": "sha256:private",
+    }
+    bridge, store, upstream, rid = setup(tmp_path, [result(source)])
+    search = discovery(bridge, rid, "q")
+    hit = search["results"][0]
+    assert hit["title"] == "Forecast" and hit["fileType"] == "PDF" and hit["pageCount"] == 40
+    assert hit["locator"]["sectionPath"] == first["locator"]["sectionPath"]
+    assert "title" not in hit["locator"] and "anchor" not in hit["locator"]
+    files, _ = invoke(bridge, "researchNavigate", {"researchId": rid, "view": "files", "limit": 1})
+    entry = files["entries"][0]
+    assert entry["title"] == hit["title"] and entry["fileType"] == "PDF"
+    assert entry["observedLocators"] == [hit["locator"]]
+    assert files["searchScope"] == {"fileRefs": [hit["fileRef"]]}
+    assert "institution" not in entry and "publicationDate" not in entry
+    last, _ = invoke(bridge, "researchNavigate", {"researchId": rid, "cursor": files["nextCursor"]})
+    assert "fileType" not in last["entries"][0] and "pageCount" not in last["entries"][0]
+    evidence, _ = invoke(bridge, "researchNavigate", {"researchId": rid, "view": "evidence"})
+    assert evidence["entries"][0]["locator"] == hit["locator"]
+    serialized = json.dumps([search, files, evidence])
+    assert REVISION not in serialized and "contentSha256" not in serialized
+    private = store.snapshot(rid)["ledger"]["evidence"][first["evidenceId"]]
+    assert private["revision"] == REVISION and private["locator"] == first["locator"]
+    upstream.responses.append(result(search_payload("narrow", [], scoped=True)))
+    narrow, envelope = invoke(
+        bridge, "searchByIds", {"researchId": rid, "query": "narrow", **files["searchScope"]}
+    )
+    assert not envelope["result"]["isError"] and narrow["results"] == []
+    assert upstream.calls[-1]["arguments"]["fileIds"] == ["pdf-source"]
+
+
+def test_progress_counts_committed_scoped_calls_not_scope_membership_or_reading(
+    tmp_path: Path,
+) -> None:
+    bridge, store, upstream, rid = setup(tmp_path, [result(search_payload("q", ["a", "b"]))])
+    search = discovery(bridge, rid, "q")
+
+    def progress() -> dict[str, Any]:
+        reply, _ = invoke(bridge, "researchNavigate", {"researchId": rid, "view": "files"})
+        return cast(dict[str, Any], reply["progress"])
+
+    before = progress()
+    assert before["discoveredFileCount"] == 2 and before["searchCallCount"] == 1
+    assert before["searchByIdsCallCount"] == before["searchByIdsSelectedFileCount"] == 0
+    assert before["completeEvidenceProjectionCount"] == 2
+    assert not {"readFileCount", "readEvidenceCount", "scopedFileCount"} & before.keys()
+    upstream.responses.extend(
+        [
+            result(search_payload("absent", [], scoped=True)),
+            {"error": {"message": "Unavailable"}},
+        ]
+    )
+    arguments = {
+        "researchId": rid,
+        "query": "absent",
+        "scopeRefs": [search["scopeRef"]],
+        "requestKey": "zero",
+    }
+    zero, _ = invoke(bridge, "searchByIds", arguments)
+    assert zero["results"] == []
+    replay, _ = invoke(bridge, "searchByIds", arguments)
+    assert replay == zero
+    counted = progress()
+    assert counted["searchByIdsCallCount"] == counted["searchByIdsSuccessfulCallCount"] == 1
+    assert counted["searchByIdsSelectedFileCount"] == 2
+    assert counted["completeEvidenceProjectionCount"] == before["completeEvidenceProjectionCount"]
+    invoke(bridge, "searchByIds", {**arguments, "requestKey": "failed"})
+    failed = progress()
+    assert failed["searchByIdsCallCount"] == 2 and failed["searchByIdsSuccessfulCallCount"] == 1
+    assert failed["searchByIdsSelectedFileCount"] == 2 and len(upstream.calls) == 3
+    restarted = KnowledgeResearchBridge(upstream, KnowledgeResearchStore(workspace=tmp_path))
+    current, _ = invoke(restarted, "researchNavigate", {"researchId": rid, "view": "files"})
+    assert current["progress"] == failed
+    assert len(store.snapshot(rid)["ledger"]["calls"]) == 3
+
+
+def test_same_content_hints_do_not_merge_or_deduplicate_similar_titles(tmp_path: Path) -> None:
+    source = search_payload("q", ["a", "b", "c", "d"])
+    source["results"][2]["content"] = "Different passage in a similarly titled report."
+    source["results"][3]["content"] = "Another excerpt from the same source identity."
+    source["results"][3]["documentId"] = source["results"][0]["documentId"]
+    bridge, store, upstream, rid = setup(tmp_path, [result(source)])
+    search = discovery(bridge, rid, "q")
+    a, b, c, d = search["results"]
+    assert b["sameContentAs"] == a["evidenceRef"]
+    assert "not independent corroboration" in b["sourceRelationMeaning"]
+    assert "sameContentAs" not in c and "relatedSourceFileRef" not in c
+    assert d["relatedSourceFileRef"] == a["fileRef"]
+    assert len({row["evidenceRef"] for row in search["results"]}) == 4
+    assert len({row["fileRef"] for row in search["results"]}) == 4
+    assert [row["content"] for row in search["results"]] == [
+        row["content"] for row in source["results"]
+    ]
+    upstream.responses.append(result(search_payload("next", ["e"])))
+    discovery(bridge, rid, "next")
+    replay, _ = invoke(
+        bridge, "researchNavigate", {"researchId": rid, "snapshotRef": search["snapshotRef"]}
+    )
+    assert replay == search
+    assert len(store.snapshot(rid)["ledger"]["evidence"]) == 5
+
+
+def read_locator_continuation(
+    bridge: KnowledgeResearchBridge, rid: str, continuation: Mapping[str, Any]
+) -> tuple[Any, list[dict[str, Any]]]:
+    parts: list[str] = []
+    pages: list[dict[str, Any]] = []
+    cursor = continuation["cursor"]
+    while cursor:
+        page, response = invoke(
+            bridge,
+            "researchNavigate",
+            {"researchId": rid, "cursor": cursor, "limit": 2},
+            request_id='\u4e2d"\\\n' * 8,
+        )
+        assert not response["result"]["isError"], page
+        assert page["format"] == "json" and page["offsetUnit"] == "unicode_code_point"
+        for fragment in page["entries"]:
+            assert fragment["contentRange"]["start"] == sum(map(len, parts))
+            parts.append(fragment["content"])
+        pages.append(page)
+        cursor = page["nextCursor"]
+    return json.loads("".join(parts)), pages
+
+
+@pytest.mark.parametrize("heading", ["\u4e2d" * 25_000, '\u4e2d\U0001f680"\\\n\t\x00' * 6000])
+def test_large_locator_has_lossless_bounded_continuation_and_restart(
+    tmp_path: Path, heading: str
+) -> None:
+    from scripts.knowledge_research.locator import source_locator
+
+    source = search_payload("q", ["long-location"])
+    locator = {"page": {"start": 7, "end": 8}, "sectionPath": [heading, "Normal section"]}
+    source["results"][0]["locator"] = locator
+    bridge, store, upstream, rid = setup(tmp_path, [result(source)])
+    search = discovery(bridge, rid, "q", requestKey="original-search")
+    hit = search["results"][0]
+    assert hit["content"] == source["results"][0]["content"]
+    assert hit["contentTruncatedForTransport"] is False and hit["locatorComplete"] is False
+    assert not search["projectionComplete"]
+    assert (hit["locator"]["pageStart"], hit["locator"]["pageEnd"]) == (7, 8)
+    restarted = KnowledgeResearchBridge(upstream, KnowledgeResearchStore(workspace=tmp_path))
+    rebuilt, pages = read_locator_continuation(restarted, rid, hit["locatorContinuation"])
+    assert rebuilt == source_locator(locator) and len(pages) > 1
+    first_replay, _ = invoke(
+        restarted,
+        "researchNavigate",
+        {"researchId": rid, "cursor": hit["locatorContinuation"]["cursor"], "limit": 2},
+    )
+    assert first_replay == pages[0]
+    cached = discovery(restarted, rid, "q", requestKey="original-search")
+    assert cached == search
+    private = store.snapshot(rid)
+    metadata_snapshot = private["extensions"]["navigation"]["snapshots"][pages[0]["snapshotRef"]]
+    assert metadata_snapshot["payload"]["sourceSnapshotRef"] == search["snapshotRef"]
+    assert private["ledger"]["evidence"][source["results"][0]["evidenceId"]]["locator"] == locator
+    assert len(upstream.calls) == 1
+    assert bridge._navigation(private).progress()["completeEvidenceProjectionCount"] == 1
+    foreign, _ = invoke(restarted, "researchBegin", {"title": "Other research"})
+    rejected, _ = invoke(
+        restarted,
+        "researchNavigate",
+        {
+            "researchId": foreign["researchId"],
+            "cursor": hit["locatorContinuation"]["cursor"],
+        },
+    )
+    assert rejected["details"]["code"] == "INVALID_CURSOR"
+
+
+def test_old_snapshot_long_locator_and_directory_metadata_remain_recoverable(
+    tmp_path: Path,
+) -> None:
+    from scripts.knowledge_research.locator import source_locator
+
+    source = search_payload("q", ["location-source"])
+    locator = {"sectionPath": ["\u4e2d" * 25_000], "pageStart": 1, "pageEnd": 2}
+    source["results"][0]["locator"] = locator
+    bridge, store, _, rid = setup(tmp_path)
+    store.record_knowledge_call(
+        research_id=rid,
+        tool_name="search",
+        arguments={"query": "q"},
+        result=result(source)["result"],
+    )
+
+    def save_old(state: dict[str, Any]) -> str:
+        nav = bridge._navigation(state)
+        evidence = source["results"][0]
+        nav.file_ref(evidence["fileId"])
+        nav.reference(
+            "evidence", evidence["evidenceId"], state["ledger"]["evidence"][evidence["evidenceId"]]
+        )
+        return nav.snapshot("search", source, [evidence["evidenceId"]], [REVISION])
+
+    old_ref = store.atomic_update(rid, save_old)
+    old, response = invoke(bridge, "researchNavigate", {"researchId": rid, "snapshotRef": old_ref})
+    assert not response["result"]["isError"], old
+    rebuilt, _ = read_locator_continuation(bridge, rid, old["results"][0]["locatorContinuation"])
+    assert rebuilt == source_locator(locator)
+    for view, field in (("files", "observedLocators"), ("evidence", "locator")):
+        directory, response = invoke(bridge, "researchNavigate", {"researchId": rid, "view": view})
+        assert not response["result"]["isError"], directory
+        row = directory["entries"][0]
+        recovered, _ = read_locator_continuation(bridge, rid, row[field + "Continuation"])
+        assert recovered == (
+            [source_locator(locator)] if view == "files" else source_locator(locator)
+        )
+    evidence, response = invoke(
+        bridge,
+        "researchReadEvidence",
+        {
+            "researchId": rid,
+            "evidenceRef": old["results"][0]["evidenceRef"],
+        },
+    )
+    assert (
+        not response["result"]["isError"] and evidence["content"] == source["results"][0]["content"]
+    )
+    recovered, _ = read_locator_continuation(bridge, rid, evidence["locatorContinuation"])
+    assert recovered == source_locator(locator)
+
+
 @pytest.mark.parametrize("research_id", [None, "", "bad", "kr_" + "0" * 32])
 def test_missing_or_invalid_research_rejected_before_upstream(
     tmp_path: Path, research_id: Any
@@ -297,6 +621,26 @@ def test_references_are_namespaced_and_selectors_are_exclusive(tmp_path: Path) -
         assert "error" in reply
     assert len(upstream.calls) == 1
     assert store.snapshot(other["researchId"])["ledger"]["evidence"] == {}
+    hit = payload["results"][0]
+    before = store.snapshot(rid)
+    for name, arguments in [
+        ("getFileDetails", {"fileRef": ref, "fileId": "file-one"}),
+        ("researchReadEvidence", {"evidenceRef": hit["evidenceRef"], "evidenceId": "invented"}),
+        (
+            "researchAddClaim",
+            {
+                "section": "Findings",
+                "text": "Finding.",
+                "evidenceRefs": [hit["evidenceRef"]],
+                "evidenceIds": ["invented"],
+            },
+        ),
+        ("researchFinalize", {"expectedTableRefs": [], "expectedTableIds": []}),
+    ]:
+        rejected, _ = invoke(bridge, name, {"researchId": rid, **arguments})
+        assert rejected["details"]["code"] == "INVALID_SELECTOR"
+        assert store.snapshot(rid) == before
+    assert len(upstream.calls) == 1
 
 
 def test_full_evidence_unicode_pagination_reassembles_and_counts_prepared_only(
@@ -326,7 +670,7 @@ def test_full_evidence_unicode_pagination_reassembles_and_counts_prepared_only(
         assert page["modelDelivery"] == "unknown"
         assert page["projectionPrepared"] is True
         assert "projectionReturned" not in page
-        assert page["contentSha256"] == hashlib.sha256(content.encode()).hexdigest()
+        assert "contentSha256" not in page and "sourceRevision" not in page
         received.append(page["content"])
         before = store.snapshot(rid)
         replay, _ = invoke(bridge, "researchReadEvidence", arguments)
@@ -339,6 +683,10 @@ def test_full_evidence_unicode_pagination_reassembles_and_counts_prepared_only(
     assert "".join(received) == content
     assert len(upstream.calls) == 1
     state = store.snapshot(rid)
+    assert (
+        next(iter(state["ledger"]["evidence"].values()))["contentSha256"]
+        == hashlib.sha256(content.encode()).hexdigest()
+    )
     nav = state["extensions"]["navigation"]
     assert list(nav["coverage"].values()) == [[[0, len(content)]]]
     assert all(row["modelDelivery"] == "unknown" for row in nav["projections"].values())
@@ -569,6 +917,8 @@ def test_navigation_rejects_conflicting_cursor_view_and_snapshot(tmp_path: Path)
 
 
 def test_inventory_and_table_cursors_use_original_tools(tmp_path: Path) -> None:
+    from scripts.knowledge_research.review import table_item_hash
+
     media = tmp_path / "media"
     media.mkdir()
     screenshot = media / "table.png"
@@ -672,6 +1022,17 @@ def test_inventory_and_table_cursors_use_original_tools(tmp_path: Path) -> None:
     replay, response = invoke(bridge, "researchAddTable", arguments)
     assert not response["result"]["isError"] and replay == added
     assert store.snapshot(rid) == before
+    legacy_arguments = {key: value for key, value in arguments.items() if key != "tableRef"}
+    legacy, response = invoke(
+        bridge, "researchAddTable", {**legacy_arguments, "tableId": table["tableId"]}
+    )
+    assert not response["result"]["isError"] and legacy == added
+    assert store.snapshot(rid) == before
+    for table_id in (table["tableId"], "invented-label", None):
+        error, response = invoke(bridge, "researchAddTable", {**arguments, "tableId": table_id})
+        assert response["result"]["isError"]
+        assert error["details"]["code"] == "INVALID_SELECTOR"
+        assert store.snapshot(rid) == before
     for changed in ({"section": "Other"}, {"caption": "Changed caption"}):
         error, response = invoke(bridge, "researchAddTable", {**arguments, **changed})
         assert response["result"]["isError"]
@@ -687,8 +1048,25 @@ def test_inventory_and_table_cursors_use_original_tools(tmp_path: Path) -> None:
             "section": "Tables",
             "caption": "Source data",
             "tableRef": table_arguments["tableRef"],
-            "sourceRevision": REVISION,
+            "tableHash": table_item_hash(store.snapshot(rid)["report"]["items"][0]),
         }
     ]
     assert str(table["tableId"]) not in json.dumps(report)
     assert content not in json.dumps(report) and "localPath" not in json.dumps(report)
+    original_hash = report["entries"][0]["tableHash"]
+    corrected, response = invoke(
+        bridge,
+        "researchAddTable",
+        {**arguments, "caption": "Corrected data", "expectedTableHash": original_hash},
+    )
+    assert not response["result"]["isError"], corrected
+    corrected_state = store.snapshot(rid)
+    assert corrected_state["report"]["items"][0]["caption"] == "Corrected data"
+    assert len(corrected_state["report"]["items"]) == 1
+    stale, response = invoke(
+        bridge,
+        "researchAddTable",
+        {**arguments, "caption": "Another change", "expectedTableHash": original_hash},
+    )
+    assert response["result"]["isError"], stale
+    assert store.snapshot(rid) == corrected_state

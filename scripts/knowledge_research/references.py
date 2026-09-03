@@ -124,10 +124,8 @@ def _label(record: Mapping[str, Any]) -> str:
     if package and package[1] == "source_package_variants":
         stem = _clean(path.parent.name)
     title = _clean_title(str(record.get("title") or ""))
-    if not title:
-        if _DATE.match(path.parent.name) and len(path.parent.name) > 40:
-            stem = _clean(path.parent.name)
-    date = next((part[:10] for part in [stem, *reversed(path.parts)] if _DATE.match(part)), "")
+    # Storage folders are neither publisher identity nor publication-date evidence.
+    date = stem[:10] if _DATE.match(stem) else ""
     if not title:
         title = stem or "Local document"
     elif title.isupper() and len(title) < 70 and _SERIES.search(title):
@@ -150,10 +148,8 @@ def _label(record: Mapping[str, Any]) -> str:
         )
         if heading and heading.casefold() not in title.casefold():
             title += f" (cited section: {heading})"
-    if date and not title.startswith(date):
+    if date and not _TITLE_DATE.search(title):
         title = f"{date} {title}"
-    if path.parts and path.parts[0] == "goldman" and "goldman sachs" not in title.lower():
-        title = f"Goldman Sachs | {title}"
     return title
 
 

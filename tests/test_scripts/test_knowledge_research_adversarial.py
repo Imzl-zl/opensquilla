@@ -528,7 +528,7 @@ def test_nav_partial_search_text_cannot_claim_complete_projection(tmp_path: Path
     assert hit["contentTruncatedForTransport"] is True
     assert 0 < len(hit["content"]) < len(content)
     assert reply["projectionComplete"] is False
-    assert Navigation(store.snapshot(rid)).progress()["readEvidenceCount"] == 0
+    assert Navigation(store.snapshot(rid)).progress()["completeEvidenceProjectionCount"] == 0
 
 
 def test_nav_committed_request_replays_original_after_later_discovery(tmp_path: Path) -> None:
@@ -689,7 +689,14 @@ def test_nav_file_revision_change_does_not_replace_cursor_source(tmp_path: Path)
         page, _ = nav_fixture.invoke(
             bridge, "researchReadEvidence", {**args, "cursor": page["nextCursor"]}
         )
-        assert page["sourceRevision"] == nav_fixture.REVISION
+        assert "sourceRevision" not in page
+        private = store.snapshot(rid)
+        snapshot = private["extensions"]["navigation"]["snapshots"][page["snapshotRef"]]
+        assert snapshot["sourceRevisions"] == [nav_fixture.REVISION]
+        assert (
+            private["ledger"]["evidence"][first_source["results"][0]["evidenceId"]]["revision"]
+            == nav_fixture.REVISION
+        )
         parts.append(page["content"])
     assert "".join(parts) == content
     assert "new-evidence" not in store.snapshot(rid)["ledger"]["evidence"]
@@ -772,7 +779,7 @@ def test_nav_oversize_projection_retains_snapshot_not_false_prepared_count_and_c
     state = store.snapshot(rid)
     nav = Navigation(state)
     assert len(state["ledger"]["evidence"]) == len(nav.data["snapshots"]) == 2
-    assert len(nav.data["projections"]) == nav.progress()["readEvidenceCount"] == 1
+    assert len(nav.data["projections"]) == nav.progress()["completeEvidenceProjectionCount"] == 1
     assert nav.progress()["modelDelivery"] == "unknown"
     assert len(upstream.calls) == 2
 

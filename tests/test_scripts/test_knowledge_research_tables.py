@@ -149,22 +149,25 @@ def test_structured_headers_units_spans_and_empty_cells_are_preserved() -> None:
     assert view["parseComplete"] is True
     assert parsed["titleRaw"] == "Annual returns (%)"
     assert parsed["headerBasis"] == "thead"
-    assert parsed["headerRows"][0]["cells"][0]["rowspan"] == 2
-    assert parsed["headerRows"][0]["cells"][1]["colspan"] == 2
-    assert parsed["headerRows"][1]["cells"][1]["text"] == "2026"
+    assert parsed["headerRows"][0]["spans"] == [[0, 2, 1], [1, 1, 2]]
+    assert parsed["headerRows"][1]["cells"][1] == "2026"
+    assert "not an expanded column grid" in parsed["spanLayout"]
     assert "Return (%)" in parsed["unitTextsRaw"]
-    assert parsed["representativeRows"][0]["cells"][1]["text"] == ""
-    assert parsed["representativeRows"][1]["cells"][1]["text"] == "0"
+    assert parsed["representativeRows"][0]["cells"][1] == ""
+    assert parsed["representativeRows"][1]["cells"][1] == "0"
     assert "screenshotDataBase64" not in view
 
 
-def test_td_header_is_explicitly_heuristic_and_kept_as_a_sample() -> None:
+def test_td_header_is_explicitly_heuristic_without_duplicating_sample() -> None:
     table = _table(
         "<table><tr><td>Index</td><td>2026</td></tr><tr><td>A</td><td>8%</td></tr></table>"
     )
     parsed = summarize_table(table)["tables"][0]
     assert parsed["headerBasis"] == "heuristic_first_td_row"
-    assert parsed["representativeRows"][0]["rowIndex"] == 0
+    assert parsed["headerRows"][0]["rowIndex"] == 0
+    assert parsed["representativeRows"][0]["rowIndex"] == 1
+    assert parsed["observedRowCount"] == 2
+    assert parsed["omittedBodyRowCount"] == 0
 
 
 def test_entities_line_breaks_comments_and_scripts() -> None:
@@ -175,7 +178,7 @@ def test_entities_line_breaks_comments_and_scripts() -> None:
     )
     parsed = summarize_table(source)["tables"][0]
     assert parsed["titleRaw"] == "A & B"
-    assert parsed["representativeRows"][0]["cells"][0]["text"] == "A\nB"
+    assert parsed["representativeRows"][0]["cells"][0] == "A\nB"
     assert "not data" not in json.dumps(parsed)
 
 
@@ -731,7 +734,7 @@ def test_markdown_tokens_preserve_pipes_code_and_inline_formatting(
     assert view["issues"] == []
     assert view["parseComplete"] is True
     cells = view["tables"][0]["representativeRows"][0]["cells"]
-    assert [cell["text"] for cell in cells] == expected
+    assert cells == expected
     rendered = _render_table_text(source["text"])
     assert "<table>" in rendered
     assert "onclick" not in rendered
@@ -750,7 +753,7 @@ def test_markdown_alignment_uses_token_attributes_with_safe_css_classes() -> Non
     source["text"]["format"] = "text/markdown"
     view = summarize_table(source)
     cells = view["tables"][0]["headerRows"][0]["cells"]
-    assert [cell["alignment"] for cell in cells] == ["left", "center", "right"]
+    assert cells == ["Left", "Center", "Right"]
     rendered = _render_table_text(source["text"])
     assert '<th class="align-left">Left</th>' in rendered
     assert '<td class="align-center">B</td>' in rendered

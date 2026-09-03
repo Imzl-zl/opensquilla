@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import re
 from collections.abc import Mapping
 from html.parser import HTMLParser
 from typing import Any
@@ -28,6 +29,93 @@ else:  # pragma: no cover
         summarize_table,
         table_quality_view,
     )
+
+
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff\U00020000-\U000323af]")
+_LABELS = {
+    "en": {
+        "references": "References",
+        "notes": "Source Notes",
+        "parsed": "Parsed table",
+        "original": "Original PDF crop",
+        "image_alt": "Original PDF table crop",
+        "text_version": ", text version",
+        "unsafe_html": ("Parsed HTML cannot be safely displayed; consult the original PDF crop."),
+        "oversize_text": ("Parsed text exceeds the display limit; consult the original PDF crop."),
+        "quality_note": (
+            "Some tables have not been fully checked against the original PDF images. "
+            "Text recognition or extraction may omit content; the included tables "
+            "may not cover every table in the source."
+        ),
+    },
+    "zh-CN": {
+        "references": "\u53c2\u8003\u6587\u732e",
+        "notes": "\u8d44\u6599\u8bf4\u660e",
+        "parsed": "\u8868\u683c\u6587\u5b57",
+        "original": "\u539f\u59cb PDF \u622a\u56fe",
+        "image_alt": "\u539f\u59cb PDF \u8868\u683c\u622a\u56fe",
+        "text_version": "\uff0c\u6587\u5b57\u7248",
+        "unsafe_html": (
+            "\u8868\u683c\u6587\u5b57\u65e0\u6cd5\u5b89\u5168\u663e\u793a\uff1b"
+            "\u8bf7\u67e5\u770b\u539f\u59cb PDF \u622a\u56fe\u3002"
+        ),
+        "oversize_text": (
+            "\u8868\u683c\u6587\u5b57\u8d85\u51fa\u663e\u793a\u8303\u56f4\uff1b"
+            "\u8bf7\u67e5\u770b\u539f\u59cb PDF \u622a\u56fe\u3002"
+        ),
+        "quality_note": (
+            "\u90e8\u5206\u8868\u683c\u5c1a\u672a\u5b8c\u6210"
+            "\u5b8c\u6574\u539f\u56fe\u6838\u5bf9\uff1b"
+            "\u6587\u5b57\u8bc6\u522b\u6216\u63d0\u53d6\u53ef\u80fd\u6709\u9057\u6f0f\uff0c"
+            "\u6536\u5f55\u8868\u683c\u4e0d\u4ee3\u8868\u539f\u6587\u5168\u90e8\u8868\u683c\u3002"
+        ),
+    },
+}
+_WARNINGS_ZH = {
+    "The extracted table has a known content omission.": (
+        "\u5df2\u77e5\u8868\u683c\u63d0\u53d6\u6709\u5185\u5bb9\u9057\u6f0f\u3002"
+    ),
+    "The extracted table does not match the original PDF crop.": (
+        "\u63d0\u53d6\u7684\u8868\u683c\u4e0e\u539f\u59cb PDF \u622a\u56fe\u4e0d\u4e00\u81f4\u3002"
+    ),
+    "The table visual check failed; source completeness remains unknown.": (
+        "\u8868\u683c\u539f\u56fe\u6838\u5bf9\u672a\u6210\u529f\uff0c"
+        "\u5c1a\u4e0d\u80fd\u786e\u8ba4\u5185\u5bb9\u5b8c\u6574\u3002"
+    ),
+    "The year column is missing.": "\u8868\u683c\u7f3a\u5c11\u5e74\u4efd\u5217\u3002",
+    "Annual totals mismatch the crop.": (
+        "\u5e74\u5ea6\u5408\u8ba1\u4e0e\u539f\u59cb\u622a\u56fe\u4e0d\u4e00\u81f4\u3002"
+    ),
+}
+
+
+def _report_language(state: Mapping[str, Any]) -> str:
+    language = state.get("language")
+    if language is not None:
+        if not isinstance(language, str) or language not in _LABELS:
+            raise ValueError("unsupported_report_language")
+        return language
+    texts = [str(state.get(key) or "") for key in ("title", "subtitle")]
+    texts.extend(
+        str(item.get(key) or "")
+        for item in state["report"]["items"]
+        for key in ("text", "caption", "section")
+    )
+    return "zh-CN" if any(_CJK.search(text) for text in texts) else "en"
+
+
+def _warning_text(warning: str, language: str) -> str:
+    if language == "en":
+        return warning
+    if warning in _WARNINGS_ZH:
+        return _WARNINGS_ZH[warning]
+    missing_year = re.fullmatch(r"Missing year column (.+)\.", warning)
+    if missing_year:
+        return "\u7f3a\u5c11\u5e74\u4efd\u5217\uff1a" + missing_year[1] + "\u3002"
+    if _CJK.search(warning):
+        return warning
+    # Preserve unrecognized findings verbatim; do not invent a translation.
+    return "\u6838\u9a8c\u63d0\u793a\uff08\u539f\u6587\uff09\uff1a" + warning
 
 
 class _TableSanitizer(HTMLParser):
@@ -113,7 +201,7 @@ class _TableSanitizer(HTMLParser):
             self.parts.append(html.escape(data))
 
 
-def _render_table_text(text_payload: Mapping[str, Any]) -> str:
+def _render_table_text(text_payload: Mapping[str, Any], *, language: str = "en") -> str:
     content = str(text_payload.get("content") or "")
     fmt = str(text_payload.get("format") or "").lower()
     is_markdown = fmt in {"md", "markdown", "text/markdown", "text/x-markdown"}
@@ -121,8 +209,7 @@ def _render_table_text(text_payload: Mapping[str, Any]) -> str:
         inspection = summarize_table({"text": text_payload})
         if any(issue != "outside_table_text" for issue in inspection["issues"]):
             return (
-                '<p class="table-warning">Parsed HTML cannot be safely displayed; '
-                "consult the original PDF crop.</p>"
+                '<p class="table-warning">' + html.escape(_LABELS[language]["unsafe_html"]) + "</p>"
             )
         parser = _TableSanitizer()
         parser.feed(content)
@@ -132,8 +219,7 @@ def _render_table_text(text_payload: Mapping[str, Any]) -> str:
             return rendered
     if len(content) > MAX_PARSE_CHARS:
         return (
-            '<p class="table-warning">Parsed text exceeds the display limit; '
-            "consult the original PDF crop.</p>"
+            '<p class="table-warning">' + html.escape(_LABELS[language]["oversize_text"]) + "</p>"
         )
     markdown = _markdown_table(content)
     if markdown is not None:
@@ -167,15 +253,20 @@ def _page(record: Mapping[str, Any]) -> tuple[int | None, int | None]:
     return start, end
 
 
-def _page_label(start: int | None, end: int | None) -> str:
+def _page_label(start: int | None, end: int | None, *, language: str = "en") -> str:
     if start is None:
         return ""
+    if language == "zh-CN":
+        pages = str(start) if end is None or end == start else f"{start}-{end}"
+        return f"\uff0c\u7b2c {pages} \u9875"
     if end is None or end == start:
         return f", p. {start}"
     return f", pp. {start}-{end}"
 
 
 def render_html_report(state: Mapping[str, Any]) -> str:
+    language = _report_language(state)
+    labels = _LABELS[language]
     ledger = state["ledger"]
     evidence = ledger["evidence"]
     files = ledger["files"]
@@ -185,7 +276,7 @@ def render_html_report(state: Mapping[str, Any]) -> str:
     references = bibliography["references"]
 
     def evidence_citations(evidence_ids: list[str]) -> str:
-        labels: list[str] = []
+        citation_labels: list[str] = []
         seen: set[str] = set()
         for evidence_id in evidence_ids:
             record = evidence[evidence_id]
@@ -193,16 +284,16 @@ def render_html_report(state: Mapping[str, Any]) -> str:
             number = reference_numbers[file_id]
             start, end = _page(record)
             suffix = (
-                _page_label(start, end)
+                _page_label(start, end, language=language)
                 if source_format(files[file_id]) == "PDF"
-                else ", text version"
+                else labels["text_version"]
             )
             label = f"[{number}{suffix}]"
             if label in seen:
                 continue
             seen.add(label)
-            labels.append(f'<span class="citation">{label}</span>')
-        return " ".join(labels)
+            citation_labels.append(f'<span class="citation">{label}</span>')
+        return " ".join(citation_labels)
 
     sections: dict[str, list[str]] = {}
     section_order: list[str] = []
@@ -223,25 +314,28 @@ def render_html_report(state: Mapping[str, Any]) -> str:
         file_id = str(table["fileId"])
         number = reference_numbers[file_id]
         start, end = _page(table)
-        citation = f'<span class="citation">[{number}{_page_label(start, end)}]</span>'
-        parsed = _render_table_text(table["text"])
+        page_label = _page_label(start, end, language=language)
+        citation = f'<span class="citation">[{number}{page_label}]</span>'
+        parsed = _render_table_text(table["text"], language=language)
         screenshot = table["screenshot"]
         mime = html.escape(str(screenshot["mediaType"]), quote=True)
         data = html.escape(str(table["screenshotDataBase64"]), quote=True)
         caption = html.escape(str(item["caption"]))
         quality = table_quality_view(table, assessment=assessments.get(item["tableId"]))
-        unknown_table_quality |= quality["sourceCompleteness"] == "unknown"
+        unknown_table_quality |= (
+            quality["sourceCompleteness"] == "unknown" or quality["visualCheck"] == "not_performed"
+        )
         warning_html = "".join(
-            f'<p class="table-warning">{html.escape(warning)}</p>'
+            f'<p class="table-warning">{html.escape(_warning_text(warning, language))}</p>'
             for warning in quality["warnings"]
         )
         sections[section].append(
             '<figure class="table-evidence">'
             f"<figcaption>{caption} {citation}</figcaption>"
-            '<div class="parsed-table"><h3>Parsed table</h3>'
+            f'<div class="parsed-table"><h3>{labels["parsed"]}</h3>'
             f"{parsed}</div>"
-            '<div class="original-table"><h3>Original PDF crop</h3>'
-            f'<img src="data:{mime};base64,{data}" alt="Original PDF table crop"></div>'
+            f'<div class="original-table"><h3>{labels["original"]}</h3>'
+            f'<img src="data:{mime};base64,{data}" alt="{labels["image_alt"]}"></div>'
             f"{warning_html}"
             "</figure>"
         )
@@ -263,15 +357,13 @@ def render_html_report(state: Mapping[str, Any]) -> str:
     subtitle_html = f'<div class="subtitle">{html.escape(str(subtitle))}</div>' if subtitle else ""
     title = html.escape(str(state["title"]))
     quality_note = (
-        '<p class="table-quality-note">Table source and artifact checks do not establish '
-        "visual review or OCR completeness. Tables without a current server assessment "
-        "remain unassessed; extracted inventories do not prove that every PDF table "
-        "was identified.</p>"
+        f'<section class="source-notes"><h2>{labels["notes"]}</h2>'
+        f'<p class="table-quality-note">{labels["quality_note"]}</p></section>'
         if unknown_table_quality
         else ""
     )
     return f"""<!doctype html>
-<html lang="en">
+<html lang="{language}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -313,8 +405,9 @@ pre {{ white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f7f9; padd
 </head>
 <body>
 <header><h1>{title}</h1>{subtitle_html}</header>
-<main>{quality_note}{section_html}</main>
-<section class="references"><h2>References</h2><ol>{reference_html}</ol></section>
+<main>{section_html}</main>
+<section class="references"><h2>{labels["references"]}</h2><ol>{reference_html}</ol></section>
+{quality_note}
 </body>
 </html>
 """

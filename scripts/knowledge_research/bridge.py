@@ -22,6 +22,7 @@ if __package__:
         content_page,
         item_page,
         positive_limit,
+        source_locator,
         strings,
         text,
     )
@@ -42,6 +43,7 @@ else:  # pragma: no cover - exercised by deployment entrypoint smoke tests
         content_page,
         item_page,
         positive_limit,
+        source_locator,
         strings,
         text,
     )
@@ -446,7 +448,12 @@ class KnowledgeResearchBridge:
 
         if kind == "search":
             original = source["results"]
-            items = [self._search_item(nav, row) for row in original]
+            items = [
+                self._search_item(
+                    nav, row, source.get("_evidenceEntries", {}).get(row["evidenceId"])
+                )
+                for row in original
+            ]
             metadata = {
                 key: copy.deepcopy(source[key])
                 for key in (
@@ -507,7 +514,9 @@ class KnowledgeResearchBridge:
             else:
                 payload = item_page(items, start, limit, build, frame_bytes)
         elif kind == "evidence":
-            item = self._search_item(nav, source)
+            item = self._search_item(
+                nav, source, source.get("_evidenceEntries", {}).get(source["evidenceId"])
+            )
 
             def evidence_page(content: str, page: dict[str, Any]) -> dict[str, Any]:
                 return {
@@ -579,28 +588,23 @@ class KnowledgeResearchBridge:
         return result
 
     @staticmethod
-    def _search_item(nav: Navigation, source: Mapping[str, Any]) -> dict[str, Any]:
+    def _search_item(
+        nav: Navigation, source: Mapping[str, Any], entry: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
         evidence_id = source["evidenceId"]
         record = nav.state["ledger"]["evidence"][evidence_id]
         content = record["content"]
-        locator = record.get("locator", {})
-        compact_locator: dict[str, Any] = {
-            key: value for key in ("pageStart", "pageEnd") if type(value := locator.get(key)) is int
-        }
-        if isinstance(locator.get("title"), str):
-            compact_locator["title"] = locator["title"][:300]
-        if isinstance(locator.get("sectionPath"), list):
-            compact_locator["sectionPath"] = [
-                value[:128] for value in locator["sectionPath"][:8] if isinstance(value, str)
-            ]
+        # Old snapshots remain readable without adding metadata learned after their creation.
+        if entry is None:
+            entry = {
+                "fileRef": nav.data["files"][record["fileId"]]["ref"],
+                "evidenceRef": nav.data["evidence"][evidence_id]["ref"],
+                "title": record.get("title", ""),
+                "locator": source_locator(record.get("locator", {})),
+                "contentKind": record.get("contentKind") or "text",
+            }
         return {
-            "fileRef": nav.data["files"][record["fileId"]]["ref"],
-            "evidenceRef": nav.data["evidence"][evidence_id]["ref"],
-            "sourceRevision": record["revision"],
-            "contentSha256": record["contentSha256"],
-            "title": str(record.get("title", ""))[:300],
-            "locator": compact_locator,
-            "contentKind": str(record.get("contentKind") or "text")[:100],
+            **entry,
             "content": content,
             "contentRange": {"start": 0, "end": len(content), "total": len(content)},
             "contentTruncatedForTransport": False,
@@ -698,6 +702,7 @@ class KnowledgeResearchBridge:
             payload = self.store.begin(
                 title=_text_argument(arguments, "title"),
                 subtitle=_optional_text_argument(arguments, "subtitle"),
+                **{key: arguments[key] for key in ("mode", "language") if key in arguments},
             )
         elif name == "researchAddClaim":
             payload = self.store.add_claim(
@@ -721,9 +726,13 @@ class KnowledgeResearchBridge:
                 section=_text_argument(arguments, "section"),
                 table_id=_text_argument(arguments, "tableId"),
                 caption=_text_argument(arguments, "caption"),
+                expected_table_hash=arguments.get("expectedTableHash"),
             )
         elif name == "researchFinalize":
             research_id = _text_argument(arguments, "researchId")
+            pending = self.store.pending_review(research_id)
+            if pending is not None:
+                return _tool_result(pending)
             unavailable = 0
             for file_id in self.store.missing_reference_metadata(research_id):
                 metadata_arguments = {"fileId": file_id, "limit": 1}
@@ -799,26 +808,35 @@ class KnowledgeResearchBridge:
                     ]
                     schema["required"] = list(dict.fromkeys([*required, "researchId"]))
                     if tool["name"] == "searchByIds":
-                        properties["fileRefs"] = _ref_array("D")
-                        properties["scopeRefs"] = _ref_array("S")
-                        schema["oneOf"] = [
-                            {"required": [key]} for key in ("fileIds", "fileRefs", "scopeRefs")
-                        ]
+                        properties.pop("fileIds", None)
+                        properties["fileRefs"] = {
+                            **_ref_array("D"),
+                            "description": (
+                                "Select 1-20 fileRefs returned in this research. Supply exactly "
+                                "one of fileRefs or scopeRefs, never both. Do not invent IDs."
+                            ),
+                        }
+                        properties["scopeRefs"] = {
+                            **_ref_array("S"),
+                            "description": (
+                                "Select returned scopeRefs instead of fileRefs. Supply exactly "
+                                "one of scopeRefs or fileRefs, never both. Do not invent IDs."
+                            ),
+                        }
+                        schema["oneOf"] = [{"required": [key]} for key in ("fileRefs", "scopeRefs")]
                         tool["description"] = (
                             "Search selected files. Over 20 files returns group scopeRefs without "
                             "querying; explicitly search each group."
                         )
                     if tool["name"] in {"getFileDetails", "getTable"}:
+                        properties.pop("fileId", None)
                         properties["fileRef"] = _ref_schema("D")
                         properties["cursor"] = {"type": "string", "minLength": 1, "maxLength": 512}
-                        schema["allOf"] = [
-                            {"oneOf": [{"required": ["fileId"]}, {"required": ["fileRef"]}]}
-                        ]
+                        schema["required"].append("fileRef")
                         if tool["name"] == "getTable":
+                            properties.pop("tableId", None)
                             properties["tableRef"] = _ref_schema("T")
-                            schema["allOf"].append(
-                                {"oneOf": [{"required": ["tableId"]}, {"required": ["tableRef"]}]}
-                            )
+                            schema["required"].append("tableRef")
                         else:
                             properties["limit"] = {"type": "integer", "minimum": 1, "maximum": 20}
                             tool["description"] = (
@@ -832,7 +850,14 @@ class KnowledgeResearchBridge:
 
 def _ref_schema(kind: str) -> dict[str, Any]:
     suffix = "[0-9a-f]{24}" if kind == "S" else "[1-9][0-9]*"
-    return {"type": "string", "pattern": "^[A-Za-z0-9_-]{22}:" + kind + suffix + "$"}
+    return {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{22}:" + kind + suffix + "$",
+        "description": (
+            "Copy an exact reference returned by a tool in this research. "
+            "Never invent an ID or label."
+        ),
+    }
 
 
 def _ref_array(kind: str) -> dict[str, Any]:
@@ -856,6 +881,8 @@ def _research_tools() -> list[dict[str, Any]]:
                 "properties": {
                     "title": {"type": "string", "minLength": 1},
                     "subtitle": {"type": "string", "minLength": 1},
+                    "mode": {"type": "string", "enum": ["standard", "deep"], "default": "standard"},
+                    "language": {"type": "string", "enum": ["zh-CN", "en"]},
                 },
             },
         },
@@ -954,32 +981,38 @@ def _research_tools() -> list[dict[str, Any]]:
             claim_schema = schema if name == "researchAddClaim" else properties["claims"]["items"]
             claim_properties = claim_schema["properties"]
             claim_properties["evidenceRefs"] = {**_ref_array("E"), "maxItems": 200}
+            claim_properties.pop("evidenceIds")
             claim_properties["claimKey"] = {"type": "string", "minLength": 1, "maxLength": 128}
             claim_properties["expectedClaimHash"] = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
             claim_schema["required"] = [
                 key for key in claim_schema["required"] if key != "evidenceIds"
-            ]
-            claim_schema["oneOf"] = [{"required": ["evidenceRefs"]}, {"required": ["evidenceIds"]}]
+            ] + ["evidenceRefs"]
             tool["description"] = (
-                "Atomically add a small batch with evidenceRefs or legacy evidenceIds; "
+                "Atomically add paragraphs with exact returned evidenceRefs, not invented IDs; "
+                "do not submit a References/bibliography section: it is generated automatically. "
                 "batchKey makes committed retries idempotent. To revise a claimKey, supply its "
                 "current expectedClaimHash from researchNavigate view=report."
             )
         elif name == "researchAddTable":
             properties["tableRef"] = _ref_schema("T")
+            properties["expectedTableHash"] = {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$",
+                "description": (
+                    "To revise an already-added table's caption or section, copy its current "
+                    "tableHash from researchNavigate view=report or review. Omit for a new "
+                    "table or an identical retry. A stale hash is rejected."
+                ),
+            }
+            properties.pop("tableId")
             schema["required"].remove("tableId")
-            schema["oneOf"] = [{"required": ["tableRef"]}, {"required": ["tableId"]}]
+            schema["required"].append("tableRef")
             tool["description"] += (
                 " Same table, section and caption replays the existing item; changed metadata "
-                "is rejected."
+                "requires its current expectedTableHash."
             )
         elif name == "researchFinalize":
             properties["expectedClaimKeys"] = {
-                "type": "array",
-                "maxItems": 1000,
-                "items": {"type": "string"},
-            }
-            properties["expectedTableIds"] = {
                 "type": "array",
                 "maxItems": 1000,
                 "items": {"type": "string"},
@@ -1007,7 +1040,7 @@ def _research_tools() -> list[dict[str, Any]]:
                         **common,
                         "view": {
                             "type": "string",
-                            "enum": ["files", "scopes", "evidence", "progress", "report"],
+                            "enum": ["files", "scopes", "evidence", "progress", "report", "review"],
                         },
                         "snapshotRef": {"type": "string", "minLength": 1},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 20},
@@ -1023,12 +1056,10 @@ def _research_tools() -> list[dict[str, Any]]:
                 "inputSchema": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["researchId"],
-                    "oneOf": [{"required": ["evidenceRef"]}, {"required": ["evidenceId"]}],
+                    "required": ["researchId", "evidenceRef"],
                     "properties": {
                         **common,
                         "evidenceRef": _ref_schema("E"),
-                        "evidenceId": {"type": "string", "minLength": 1},
                     },
                 },
             },

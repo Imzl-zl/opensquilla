@@ -387,14 +387,23 @@ def summarize_table(table: JSON, *, source_projection: str | None = None) -> dic
         nonlocal omitted
         cells = row["cells"]
         omitted += max(0, len(cells) - 32)
-        return {
+        view = {
             "rowIndex": row["rowIndex"],
-            "cells": [
-                {**cell, "text": short(cell["text"]), "textTruncated": len(cell["text"]) > 256}
-                for cell in cells[:32]
-            ],
-            "omittedCellCount": max(0, len(cells) - 32),
+            "cells": [short(cell["text"]) for cell in cells[:32]],
         }
+        spans = [
+            [index, cell["rowspan"], cell["colspan"]]
+            for index, cell in enumerate(cells[:32])
+            if cell["rowspan"] != 1 or cell["colspan"] != 1
+        ]
+        truncated = [index for index, cell in enumerate(cells[:32]) if len(cell["text"]) > 256]
+        if spans:
+            view["spans"] = spans
+        if truncated:
+            view["truncatedCellIndexes"] = truncated
+        if len(cells) > 32:
+            view["omittedCellCount"] = len(cells) - 32
+        return view
 
     if parser.outside_context:
         units = [value for value in parser.outside_context if _UNIT.search(value)]
@@ -420,10 +429,9 @@ def summarize_table(table: JSON, *, source_projection: str | None = None) -> dic
         if not headers and rows and len(rows[0]["cells"]) >= 2:
             headers = [rows[0]]
             basis = "heuristic_first_td_row"
-        explicit_header_ids = (
-            {row["rowIndex"] for row in headers} if basis != "heuristic_first_td_row" else set()
-        )
-        body = [row for row in rows if row["rowIndex"] not in explicit_header_ids]
+        # Heuristic headers remain labelled as such, but are shown only once.
+        header_ids = {row["rowIndex"] for row in headers}
+        body = [row for row in rows if row["rowIndex"] not in header_ids]
         indexes = sorted({0, len(body) // 2, len(body) - 1}) if body else []
         units = list(
             dict.fromkeys(
@@ -455,6 +463,14 @@ def summarize_table(table: JSON, *, source_projection: str | None = None) -> dic
                 "omittedBodyRowCount": len(body) - len(indexes),
             }
         )
+        if any(
+            cell["rowspan"] != 1 or cell["colspan"] != 1 for row in rows for cell in row["cells"]
+        ):
+            result["tables"][-1]["spanLayout"] = (
+                "Cells are in source order, not an expanded column grid. "
+                "Spans are [zero-based cell index, rowspan, colspan]. "
+                "Omitted rows may carry spans; use getTable for the full layout."
+            )
         omitted += len(body) - len(indexes)
     result["issues"] = parser.issues
     result["parseComplete"] = not parser.issues and completeness == "complete"
@@ -484,11 +500,21 @@ def _compact_summary(summary: JSON, *, metadata_only: bool = False) -> dict[str,
         table["omittedHeaderRowCount"] += max(0, len(table["headerRows"]) - 2)
         table["headerRows"] = table["headerRows"][:2]
         for row in table["headerRows"]:
-            row["omittedCellCount"] += max(0, len(row["cells"]) - 8)
+            omitted_cells = row.get("omittedCellCount", 0) + max(0, len(row["cells"]) - 8)
+            if omitted_cells:
+                row["omittedCellCount"] = omitted_cells
             row["cells"] = row["cells"][:8]
-            for cell in row["cells"]:
-                cell["textTruncated"] |= len(cell["text"]) > 64
-                cell["text"] = cell["text"][:64]
+            truncated = sorted(
+                {index for index in row.get("truncatedCellIndexes", []) if index < 8}
+                | {index for index, cell in enumerate(row["cells"]) if len(cell) > 64}
+            )
+            row.pop("truncatedCellIndexes", None)
+            if truncated:
+                row["truncatedCellIndexes"] = truncated
+            spans = [span for span in row.pop("spans", []) if span[0] < 8]
+            if spans:
+                row["spans"] = spans
+            row["cells"] = [cell[:64] for cell in row["cells"]]
     return reduced
 
 

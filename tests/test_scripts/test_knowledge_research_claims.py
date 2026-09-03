@@ -84,6 +84,57 @@ def _assert_bytes_unchanged(store: KnowledgeResearchStore, expected: dict[str, b
         assert (store.workspace / path).read_bytes() == payload
 
 
+@pytest.mark.parametrize(
+    "section",
+    [
+        "References",
+        "8. References",
+        "VIII. Bibliography",
+        "\u53c2\u8003\u6587\u732e",
+        "\u516b\u3001\u53c2\u8003\u6587\u732e",
+        "## 8 \u53c2\u8003\u8d44\u6599",
+    ],
+)
+def test_deep_rejects_manual_bibliography_atomically(tmp_path: Path, section: str) -> None:
+    store = _store(tmp_path)
+    rid = store.begin(title="Research", mode="deep")["researchId"]
+    store.record_knowledge_call(
+        research_id=rid, tool_name="search", arguments={"query": "q"}, result=_result()
+    )
+    state_before = store.snapshot(rid)
+    with pytest.raises(ResearchStateError) as exc:
+        store.add_claims(
+            research_id=rid,
+            batch_key="draft",
+            claims=[_claim("analysis"), {**_claim("sources"), "section": section}],
+        )
+    assert exc.value.details["code"] == "RESERVED_REPORT_SECTION"
+    assert exc.value.details["issues"][0]["path"] == "/claims/1/section"
+    assert store.snapshot(rid) == state_before
+    reply = store.add_claims(research_id=rid, batch_key="draft", claims=[_claim("analysis")])
+    assert reply["status"] == "accepted"
+    assert len(store.snapshot(rid)["report"]["items"]) == 1
+
+
+def test_manual_reference_guard_preserves_committed_replay_and_real_analysis(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    rid = _seed(store)
+    old = {**_claim("sources"), "section": "References"}
+    receipt = store.add_claims(research_id=rid, batch_key="old", claims=[old])
+    # Model a previously accepted deep state from the pre-guard sidecar.
+    store.atomic_update(rid, lambda state: state.update(mode="deep"))
+    before = store.snapshot(rid)
+    assert store.add_claims(research_id=rid, batch_key="old", claims=[old]) == receipt
+    assert store.snapshot(rid) == before
+    store.add_claims(
+        research_id=rid,
+        batch_key="analysis",
+        claims=[{**_claim("source-methods"), "section": "Comparison of reference methods"}],
+    )
+
+
 def test_batch_replay_conflict_and_cross_batch_key_deduplication(tmp_path: Path) -> None:
     store = _store(tmp_path)
     rid = _seed(store)

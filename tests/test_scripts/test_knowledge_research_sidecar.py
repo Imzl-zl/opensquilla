@@ -486,8 +486,10 @@ def test_bibliography_pairs_formats_but_preserves_different_issues() -> None:
         Path(files["private-file-0"]["sourcePath"]).parent / "2~aaaabbbb.pdf"
     )
     reference = build_bibliography(state)["references"][1]
-    assert "Market performance and earnings" in reference["title"]
-    assert "2~" not in reference["title"]
+    # A short imported basename does not establish its parent's document lineage.
+    assert reference["title"] == "2"
+    assert reference["titleSelection"]["basis"] == "source_filename_fallback"
+    assert reference["groupingBasis"] == "distinct_source_file"
 
 
 def test_finalize_hydrates_only_cited_metadata_once_without_changing_inventory(

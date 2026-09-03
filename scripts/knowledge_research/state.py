@@ -26,6 +26,7 @@ if __package__:
     )
     from .references import build_bibliography, cited_file_ids
     from .report import render_html_report
+    from .review import review_preparation, review_requirements, table_item_hash
 else:  # pragma: no cover - exercised by deployment entrypoint smoke tests
     from claims import (  # type: ignore[import-not-found,no-redef]
         ResearchStateError,
@@ -39,6 +40,11 @@ else:  # pragma: no cover - exercised by deployment entrypoint smoke tests
         cited_file_ids,
     )
     from report import render_html_report  # type: ignore[import-not-found,no-redef]
+    from review import (  # type: ignore[import-not-found,no-redef]
+        review_preparation,
+        review_requirements,
+        table_item_hash,
+    )
 
 STATE_SCHEMA_VERSION = "opensquilla-knowledge-research-state/1"
 LEDGER_SCHEMA_VERSION = "opensquilla-knowledge-evidence-ledger/1"
@@ -144,7 +150,20 @@ class KnowledgeResearchStore:
         self.output_root = self.workspace / "knowledge-reports"
         self.pdf_renderer = pdf_renderer or _render_pdf
 
-    def begin(self, *, title: str, subtitle: str | None = None) -> dict[str, Any]:
+    def begin(
+        self,
+        *,
+        title: str,
+        subtitle: str | None = None,
+        mode: str = "standard",
+        language: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(mode, str) or mode not in {"standard", "deep"}:
+            raise ResearchStateError("mode must be standard or deep")
+        if language is not None and (
+            not isinstance(language, str) or language not in {"zh-CN", "en"}
+        ):
+            raise ResearchStateError("language must be zh-CN or en")
         clean_title = _string(title, name="title", maximum=300)
         clean_subtitle = (
             _string(subtitle, name="subtitle", maximum=500) if subtitle is not None else None
@@ -162,6 +181,8 @@ class KnowledgeResearchStore:
             "researchId": research_id,
             "title": clean_title,
             "subtitle": clean_subtitle,
+            "mode": mode,
+            "language": language,
             "ledger": {
                 "schemaVersion": LEDGER_SCHEMA_VERSION,
                 "calls": [],
@@ -180,6 +201,13 @@ class KnowledgeResearchStore:
             "researchId": research_id,
             "status": "ready",
             "verificationStatus": "server_authoritative",
+            "mode": mode,
+            "workflow": (
+                "Discover, search within candidate files, draft small batches, compare the "
+                "draft with sources via researchNavigate view=review, then finalize."
+                if mode == "deep"
+                else "Use relevant evidence and disclose limitations."
+            ),
         }
 
     def exists(self, research_id: str) -> bool:
@@ -363,20 +391,36 @@ class KnowledgeResearchStore:
         section: str,
         table_id: str,
         caption: str,
+        expected_table_hash: str | None = None,
     ) -> dict[str, Any]:
         return self.atomic_update(
             research_id,
             lambda state: self._add_table(
-                state, section=section, table_id=table_id, caption=caption
+                state,
+                section=section,
+                table_id=table_id,
+                caption=caption,
+                expected_table_hash=expected_table_hash,
             ),
         )
 
     def _add_table(
-        self, state: dict[str, Any], *, section: str, table_id: str, caption: str
+        self,
+        state: dict[str, Any],
+        *,
+        section: str,
+        table_id: str,
+        caption: str,
+        expected_table_hash: str | None = None,
     ) -> dict[str, Any]:
         clean_section = _string(section, name="section", maximum=200)
         clean_caption = _string(caption, name="caption", maximum=1_000)
         self._reject_internal_ids(clean_section, clean_caption, state=state)
+        if expected_table_hash is not None and (
+            not isinstance(expected_table_hash, str)
+            or _SHA256.fullmatch(expected_table_hash) is None
+        ):
+            raise ResearchStateError("expectedTableHash must be a SHA256 digest")
         for existing in state["report"]["items"]:
             if existing.get("kind") != "table" or existing.get("tableId") != table_id:
                 continue
@@ -385,17 +429,28 @@ class KnowledgeResearchStore:
                 for field, value in (("section", clean_section), ("caption", clean_caption))
                 if existing.get(field) != value
             ]
-            if issues:
+            if issues and expected_table_hash != table_item_hash(existing):
                 raise ResearchStateError(
                     "tableId is already included with different section or caption",
                     details={
                         "code": "TABLE_ITEM_CONFLICT",
                         "committed": False,
                         "tableId": table_id,
+                        "currentTableHash": table_item_hash(existing),
                         "issues": issues,
                     },
                 )
-            return {"status": "accepted", "item": existing["itemId"], "tableCount": 1}
+            if issues:
+                existing.update(section=clean_section, caption=clean_caption)
+                state["report"]["revision"] = int(state["report"].get("revision", 0)) + 1
+                invalidate_finalized(state)
+            return {
+                "status": "accepted",
+                "item": existing["itemId"],
+                "tableCount": 1,
+            }
+        if expected_table_hash is not None:
+            raise ResearchStateError("table has not been added; no caption exists to revise")
         table = state["ledger"]["tables"].get(table_id)
         if not isinstance(table, Mapping) or table.get("verificationStatus") != "verified":
             raise ResearchStateError("table was not verified by an actual getTable response")
@@ -417,7 +472,14 @@ class KnowledgeResearchStore:
         state["report"]["items"].append(item)
         state["report"]["revision"] = int(state["report"].get("revision", 0)) + 1
         invalidate_finalized(state)
-        return {"status": "accepted", "item": item["itemId"], "tableCount": 1}
+        return {
+            "status": "accepted",
+            "item": item["itemId"],
+            "tableCount": 1,
+        }
+
+    def pending_review(self, research_id: str) -> dict[str, Any] | None:
+        return review_requirements(self.snapshot(research_id))
 
     def finalize(
         self,
@@ -453,8 +515,16 @@ class KnowledgeResearchStore:
         for item in items:
             if item.get("kind") == "claim":
                 self._verified_evidence_ids(state, item["evidenceIds"])
+        preparation = review_preparation(state)
+        pending = review_requirements(state)
+        if pending is not None:
+            return pending
         input_hash = sha256_json(
-            {name: state.get(name) for name in ("title", "subtitle", "ledger", "report")}
+            {
+                name: state.get(name)
+                for name in ("title", "subtitle", "ledger", "report", "language", "mode")
+                if name in state
+            }
         )
         previous = state.get("finalized")
         if isinstance(previous, Mapping) and previous.get("inputSha256") == input_hash:
@@ -506,6 +576,7 @@ class KnowledgeResearchStore:
         receipt = {
             "status": "finalized",
             "coverage": coverage,
+            "review": preparation,
             "publicArtifactManifest": {
                 "schemaVersion": PUBLIC_MANIFEST_VERSION,
                 "files": files,
@@ -1261,6 +1332,9 @@ class KnowledgeResearchStore:
             "schemaVersion": PROVENANCE_SCHEMA_VERSION,
             "researchId": state["researchId"],
             "title": state["title"],
+            "mode": state.get("mode", "standard"),
+            "language": state.get("language"),
+            "reviewPreparation": review_preparation(state),
             "ledger": ledger,
             "report": _safe_json(state["report"]),
             "bibliography": build_bibliography(state),

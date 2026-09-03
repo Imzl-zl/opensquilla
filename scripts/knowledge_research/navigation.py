@@ -6,13 +6,24 @@ import base64
 import copy
 import hashlib
 from collections.abc import Callable, Mapping
+from pathlib import PurePosixPath
 from typing import Any, cast
 
 if __package__:
     from .claims import claim_hash
+    from .locator import locator_fragments, locator_transport, source_locator
+    from .references import _clean_title
+    from .review import review_entries, table_item_hash
     from .state import ResearchStateError, sha256_json
 else:  # pragma: no cover - direct bridge entrypoint
     from claims import claim_hash  # type: ignore[import-not-found,no-redef]
+    from locator import (  # type: ignore[import-not-found,no-redef]
+        locator_fragments,
+        locator_transport,
+        source_locator,
+    )
+    from references import _clean_title  # type: ignore[import-not-found,no-redef]
+    from review import review_entries, table_item_hash  # type: ignore[import-not-found,no-redef]
     from state import ResearchStateError, sha256_json  # type: ignore[import-not-found,no-redef]
 
 MAX_FRAME_BYTES = 60 * 1024
@@ -56,6 +67,21 @@ def strings(value: Any, pointer: str, maximum: int = MAX_ITEMS) -> list[str]:
             "INVALID_SELECTOR", f"Expected 1-{maximum} identifiers", pointer=pointer
         )
     return [text(item, f"{pointer}/{index}") for index, item in enumerate(value)]
+
+
+def _has_locator_continuation(value: Any) -> bool:
+    if isinstance(value, list):
+        return any(_has_locator_continuation(item) for item in value)
+    if isinstance(value, Mapping):
+        return any(
+            (
+                key in {"locatorContinuation", "observedLocatorsContinuation"}
+                and isinstance(item, Mapping)
+            )
+            or _has_locator_continuation(item)
+            for key, item in value.items()
+        )
+    return False
 
 
 class Navigation:
@@ -226,8 +252,15 @@ class Navigation:
                     item["evidenceId"],
                     self.state["ledger"]["evidence"][item["evidenceId"]],
                 )
+                self.remember_file_metadata(file_id, item)
                 file_ids.append(file_id)
-            saved = {**copy.deepcopy(dict(payload)), "scopeRef": self.scope(file_ids)}
+            saved = {
+                **copy.deepcopy(dict(payload)),
+                "scopeRef": self.scope(file_ids),
+                "_evidenceEntries": {
+                    row["evidenceId"]: self.evidence_entry(row["evidenceId"]) for row in results
+                },
+            }
             return self.snapshot(
                 "search",
                 saved,
@@ -237,6 +270,7 @@ class Navigation:
         if tool == "getFileDetails":
             file = payload["file"]
             self.file_ref(file["fileId"])
+            self.remember_file_metadata(file["fileId"], file)
             for table in payload["tables"]:
                 self.reference("table", table["tableId"], {**file, "fileId": file["fileId"]})
             return self.snapshot(
@@ -259,7 +293,79 @@ class Navigation:
             raise NavigationError("UNKNOWN_EVIDENCE", "Evidence is not in this research ledger")
         self.file_ref(record["fileId"])
         self.reference("evidence", canonical_id, record)
-        return self.snapshot("evidence", record, [canonical_id], [record["revision"]])
+        return self.snapshot(
+            "evidence",
+            {**record, "_evidenceEntries": {canonical_id: self.evidence_entry(canonical_id)}},
+            [canonical_id],
+            [record["revision"]],
+        )
+
+    def remember_file_metadata(self, file_id: str, source: Mapping[str, Any]) -> None:
+        metadata = self.data.setdefault("fileMetadata", {}).setdefault(file_id, {})
+        for key in ("filename", "mediaType", "fileType", "institution", "publicationDate"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                metadata[key] = value
+        if type(source.get("pageCount")) is int and source["pageCount"] > 0:
+            metadata["pageCount"] = source["pageCount"]
+
+    def file_metadata(self, file_id: str) -> dict[str, Any]:
+        record = self.state["ledger"]["files"][file_id]
+        known = {**record, **self.data.get("fileMetadata", {}).get(file_id, {})}
+        title = _clean_title(str(record.get("title") or ""))
+        filename = PurePosixPath(str(known.get("filename") or "")).name
+        metadata: dict[str, Any] = {"title": title or filename or "Local document"}
+        for key in ("mediaType", "fileType", "pageCount", "institution", "publicationDate"):
+            if known.get(key) not in (None, ""):
+                metadata[key] = known[key]
+        suffix = PurePosixPath(filename).suffix.lower()
+        if "fileType" not in metadata:
+            if known.get("mediaType") == "application/pdf" or suffix == ".pdf":
+                metadata["fileType"] = "PDF"
+            elif known.get("mediaType") in {"text/markdown", "text/x-markdown"} or suffix in {
+                ".md",
+                ".markdown",
+            }:
+                metadata["fileType"] = "Markdown"
+        return metadata
+
+    def evidence_entry(self, evidence_id: str) -> dict[str, Any]:
+        record = self.state["ledger"]["evidence"][evidence_id]
+        metadata = self.file_metadata(record["fileId"])
+        # Omit only an exact duplicate title; pages and complete section paths survive.
+        locator = source_locator(record.get("locator", {}), metadata["title"])
+        entry = {
+            "evidenceRef": self.data["evidence"][evidence_id]["ref"],
+            "fileRef": self.data["files"][record["fileId"]]["ref"],
+            **metadata,
+            "locator": locator,
+            "contentKind": record.get("contentKind") or "text",
+        }
+        for other_id, other in self.state["ledger"]["evidence"].items():
+            if other_id == evidence_id:
+                break
+            if (
+                other_id in self.data["evidence"]
+                and other["fileId"] != record["fileId"]
+                and other["contentSha256"] == record["contentSha256"]
+            ):
+                entry["sameContentAs"] = self.data["evidence"][other_id]["ref"]
+                break
+        for file_id, other in self.data["files"].items():
+            if file_id == record["fileId"]:
+                break
+            if (other["documentId"], other["revision"]) == (
+                record["documentId"],
+                record["revision"],
+            ):
+                entry["relatedSourceFileRef"] = other["ref"]
+                break
+        if "sameContentAs" in entry or "relatedSourceFileRef" in entry:
+            entry["sourceRelationMeaning"] = (
+                "Shared passage or source identity, not independent corroboration; "
+                "files and evidence remain distinct."
+            )
+        return entry
 
     def directory(self, view: str) -> str:
         entries: list[dict[str, Any]] = []
@@ -268,21 +374,33 @@ class Navigation:
         metadata: dict[str, Any] = {}
         if view in {"files", "evidence"}:
             for canonical_id, row in self.data[view].items():
-                entries.append(
-                    {
-                        "fileRef" if view == "files" else "evidenceRef": row["ref"],
-                        "sourceRevision": row["revision"],
-                    }
-                )
+                if view == "files":
+                    record = self.state["ledger"]["files"][canonical_id]
+                    entries.append(
+                        {
+                            "fileRef": row["ref"],
+                            **self.file_metadata(canonical_id),
+                            "observedLocators": [
+                                source_locator(locator, self.file_metadata(canonical_id)["title"])
+                                for locator in record.get("observedLocators", [])
+                            ],
+                        }
+                    )
+                else:
+                    entries.append(self.evidence_entry(canonical_id))
                 ids.append(canonical_id)
                 revisions.append(row["revision"])
         elif view == "scopes":
             for ref, row in self.data["scopes"].items():
-                entries.append(
-                    {"scopeRef": ref, "fileCount": len(row["orderedIds"]), "hash": row["hash"]}
-                )
+                entries.append({"scopeRef": ref, "fileCount": len(row["orderedIds"])})
                 ids.append(ref)
                 revisions.append(row["sourceRevisions"])
+        elif view == "review":
+            reviewed = review_entries(self.state, self.reference, locator_projection=source_locator)
+            entries = reviewed["entries"]
+            metadata = {key: value for key, value in reviewed.items() if key != "entries"}
+            ids = [f"review-{index}" for index in range(len(entries))]
+            revisions = [reviewed["reportHash"]] * len(entries)
         elif view == "report":
             report = self.state["report"]
             metadata["reportRevision"] = report.get("revision", 0)
@@ -297,6 +415,7 @@ class Navigation:
                     entry.update(
                         tableRef=self.reference("table", table_id, table),
                         caption=item["caption"],
+                        tableHash=table_item_hash(item),
                         sourceRevision=table["revision"],
                     )
                     revision = table["revision"]
@@ -338,10 +457,52 @@ class Navigation:
             revisions,
         )
 
+    def _locator_metadata(self, snapshot_ref: str, value: Any) -> Any:
+        if isinstance(value, list):
+            return [self._locator_metadata(snapshot_ref, item) for item in value]
+        if not isinstance(value, Mapping):
+            return value
+        projected = dict(value)
+        for key, item in value.items():
+            if key == "locator" and isinstance(item, Mapping):
+                normalized: Any = source_locator(item)
+            elif key == "observedLocators" and isinstance(item, list):
+                normalized = [source_locator(row) for row in item if isinstance(row, Mapping)]
+            else:
+                projected[key] = self._locator_metadata(snapshot_ref, item)
+                continue
+            preview, encoded = locator_transport(normalized)
+            projected[key] = preview
+            if encoded is None:
+                continue
+            source = self.data["snapshots"][snapshot_ref]
+            fragments = locator_fragments(encoded)
+            metadata_ref = self.snapshot(
+                "locator",
+                {
+                    "sourceSnapshotRef": snapshot_ref,
+                    "metadataField": key,
+                    "ownerRef": value.get("evidenceRef", value.get("fileRef")),
+                    "format": "json",
+                    "offsetUnit": "unicode_code_point",
+                    "entries": fragments,
+                },
+                [f"locator-{index}" for index in range(len(fragments))],
+                [source["hash"]] * len(fragments),
+            )
+            projected[key + "Complete"] = False
+            projected[key + "Continuation"] = {
+                "tool": "researchNavigate",
+                "cursor": self.cursor(metadata_ref, 0),
+                "format": "json",
+            }
+        return projected
+
     def progress(self) -> dict[str, Any]:
-        scoped: set[str] = set()
-        for scope in self.data["scopes"].values():
-            scoped.update(scope["orderedIds"])
+        calls = self.state["ledger"]["calls"]
+        searches = [call for call in calls if call["toolName"] == "search"]
+        scoped = [call for call in calls if call["toolName"] == "searchByIds"]
+        selected = {file_id for call in scoped for file_id in call["arguments"].get("fileIds", [])}
         full_evidence = []
         full_files: set[str] = set()
         for evidence_id, ranges in self.data["coverage"].items():
@@ -350,11 +511,25 @@ class Navigation:
                 full_evidence.append(evidence_id)
                 full_files.add(record["fileId"])
         return {
-            "observedFileCount": sum(row["observed"] for row in self.data["files"].values()),
-            "scopedFileCount": len(scoped),
-            "readFileCount": len(full_files),
-            "readEvidenceCount": len(full_evidence),
-            "readMeaning": "complete_evidence_projection_prepared",
+            "discoveredFileCount": sum(row["observed"] for row in self.data["files"].values()),
+            "searchCallCount": len(searches),
+            "searchSuccessfulCallCount": sum(
+                call["verificationStatus"] == "verified" for call in searches
+            ),
+            "searchByIdsCallCount": len(scoped),
+            "searchByIdsSuccessfulCallCount": sum(
+                call["verificationStatus"] == "verified" for call in scoped
+            ),
+            "searchByIdsSelectedFileCount": len(selected),
+            "callCountMeaning": (
+                "committed_ledger_calls; excludes cache replays, grouping "
+                "and unrecorded uncertain calls"
+            ),
+            "filesWithCompleteEvidenceProjectionCount": len(full_files),
+            "completeEvidenceProjectionCount": len(full_evidence),
+            "projectionMeaning": (
+                "prepared evidence ranges, not whole-file reading or comprehension"
+            ),
             "modelDelivery": "unknown",
             "sessionIsolation": "trusted_host_binding"
             if self.data["callerBinding"]
@@ -438,6 +613,9 @@ class Navigation:
                 "screenshotLocalPath",
                 "screenshotPrivatePath",
                 "url",
+                "revision",
+                "sourceRevision",
+                "contentSha256",
             }:
                 continue
             if key in {"fileId", "evidenceId", "tableId"}:
@@ -459,6 +637,13 @@ class Navigation:
     def wrap_page(self, snapshot_ref: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         snapshot = self.data["snapshots"][snapshot_ref]
         projected: dict[str, Any] = self.public(payload)
+        # Review's own metadata fragments belong to its mandatory page coverage.
+        if snapshot["payload"].get("view") != "review":
+            projected = self._locator_metadata(snapshot_ref, projected)
+        if snapshot["kind"] == "directory" and projected.get("view") == "files":
+            refs = [row["fileRef"] for row in projected["entries"]]
+            if refs:
+                projected["searchScope"] = {"fileRefs": refs}
         page = projected["page"]
         projected.update(
             snapshotRef=snapshot_ref,
@@ -466,6 +651,7 @@ class Navigation:
             modelDelivery="unknown",
             projectionPrepared=True,
             projectionComplete=projected.get("projectionComplete", True)
+            and not _has_locator_continuation(projected)
             and page["start"] == 0
             and page["end"] == page["total"],
             nextCursor=self.cursor(snapshot_ref, page["end"]) if page["hasMore"] else None,

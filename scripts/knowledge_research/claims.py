@@ -9,6 +9,13 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, NoReturn
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_BIBLIOGRAPHY_SECTION = re.compile(
+    r"^(?:#{1,6}\s*)?(?:[0-9IVXLCDM\u4e00\u4e8c\u4e09\u56db\u4e94\u516d\u4e03\u516b\u4e5d\u5341]+"
+    r"\s*[.\u3001\uff0e:\uff1a)]?\s*)?"
+    r"(?:references|bibliography|\u53c2\u8003\u6587\u732e|\u5f15\u7528\u6587\u732e|\u53c2\u8003\u8d44\u6599)"
+    r"\s*[:\uff1a]?\s*$",
+    re.IGNORECASE,
+)
 
 
 class ResearchStateError(ValueError):
@@ -168,6 +175,19 @@ def apply_claim_batch(
         key = item.get("claimKey")
         existing_index = existing.get(key) if key is not None else None
         digest = claim_hash(item)
+        if (
+            state.get("mode") == "deep"
+            and _BIBLIOGRAPHY_SECTION.fullmatch(item["section"])
+            and (existing_index is None or claim_hash(items[existing_index]) != digest)
+        ):
+            _reject(
+                "RESERVED_REPORT_SECTION",
+                "References are generated from substantive claims and tables. Omit manual "
+                "bibliography paragraphs; do not relabel a source list as analysis. "
+                "Resubmit the uncommitted batch with only substantive paragraphs.",
+                f"/claims/{offset}/section",
+                key,
+            )
         if existing_index is None:
             if expected is not None:
                 _reject(

@@ -1,95 +1,142 @@
 ---
 name: knowledge-local-research
-description: Research the local Knowledge corpus and deliver a source-grounded HTML/PDF report with original PDF table crops and machine provenance. Use for local knowledge-base investigation and multi-document synthesis, never internet research.
+description: Research local Knowledge and deliver source-grounded HTML/PDF reports with table crops and provenance. Use for local investigation, deep research, and multi-document synthesis, not internet research.
 ---
 
 # Local Knowledge Research
 
-Use only Knowledge MCP material as factual evidence, not web sources, model
-memory, shell output, or workspace documents. The sidecar owns evidence state,
-citations, table media, rendering, and provenance; do not recreate these jobs.
+Use only Knowledge MCP evidence, not web, model memory, shell output, or workspace
+documents. The researcher analyzes; Knowledge returns Evidence, not an Answer.
+The sidecar owns evidence state, citations, table media, and rendering.
 
 ## Research Loop
 
-1. Call `mcp_researchBegin` and wait for its `researchId` before dependent calls.
-   Copy that ID unchanged into subsequent Knowledge and research calls.
-2. Use materially different `mcp_search` queries for discovery. Full-corpus
-   searches omit `collectionIds`. Search assigns a `scopeRef`; keep returned
-   references instead of reconstructing identifiers or copying long file arrays.
-3. Use `mcp_searchByIds` with exactly one selection: `scopeRefs`, `fileRefs`, or
-   legacy `fileIds`. It searches at most 20 files per call. If a larger selection
-   returns explicit group references, choose relevant groups or a smaller subset;
-   do not assume the original selection was searched or combine scores as one ranking.
-4. Use `mcp_researchNavigate` to inspect bounded results, references, coverage,
-   and continuation state. Use `mcp_researchReadEvidence` to obtain needed canonical
-   evidence text, following returned continuation ranges when it is truncated.
-   Full text stored in the ledger does not mean it was returned or read.
-5. Evaluate support for each important assertion, including units, dates,
-   horizons, scenarios, independent corroboration, and contradictions. Split
-   distinct topics into focused queries. Follow newly discovered questions back
-   to search, scoped search, or evidence reading as appropriate.
+1. Call `mcp_researchBegin` with `mode="deep"` for a deep-research request;
+   short questions use `mode="standard"` (default). Match the user's report language:
+   Chinese `language="zh-CN"`, English `language="en"`. Wait for `researchId` and
+   copy it unchanged into dependent calls. New reports need new research; resume
+   only current unfinished work, not historical reports.
+2. Discover evidence for the user's questions with `mcp_search`, omitting
+   `collectionIds` for full-corpus search. Deep research follows discoveries with
+   `mcp_searchByIds` for context, definitions, assumptions, and opposing evidence.
+   Supply exactly one of `scopeRefs` or `fileRefs`, at most 20 files. Larger
+   selections return groups without searching: explicitly select relevant groups
+   or subsets. Scores across calls are not one ranking.
+3. Read canonical passages and needed continuations with `mcp_researchReadEvidence`.
+   It reads saved excerpts, not whole documents or new context. Use scoped search
+   for absent passages, broader search for missing viewpoints, independent support,
+   and contradictions. Follow these gaps inside known files too; repeated global
+   discovery alone is not deep reading.
 
-Continue while material gaps or useful new evidence remain, including new evidence
-inside an already known file. Stop based on question coverage and evidence gain,
-not a file quota or a fixed number of iterations. Disclose unresolved limitations;
-exhausting a user budget is not proof of research completeness. Never pad citations
-or count duplicate formats and repeated excerpts as independent corroboration.
+Copy returned refs intact, including their research namespace. Page snapshots and
+directories by relevance using `nextCursor`; do not claim unvisited entries were
+read. Stop on question coverage and evidence gain, not quotas for files, citations,
+iterations, or length. Disclose gaps and budget limits. If scoped search fails without a
+useful recovery action, report unfinished research; never loop or downgrade deep.
+
+## Check Sources and Compare
+
+For important assertions, check the original speaker: a quoted institution's view
+is not the publisher's. Verify publication/observation dates, metric definition,
+units/currency, population/market, horizon, and conditions. Preserve old/new direction
+in "to ... from ..." revisions; distinguish daily averages from totals and facts from
+forecasts/targets/scenarios. Metadata and filenames do not validate claims or dates.
+For each numeric assertion, locate the exact original value, unit, year/horizon,
+and originating institution before writing. If flattened chart/table text leaves
+column alignment ambiguous, fetch the table or search for prose; do not guess
+which year a value belongs to. Keep different institutions' factual assertions in
+separate paragraphs unless explicitly comparing them with individual attribution.
+
+Bind the passage supporting the assertion at its source/page, not a related excerpt
+elsewhere. Resolve mismatches by reading/search, never guessed pages or nearby refs.
+Keep factual paragraphs as single-attribution as practical: separate institutions'
+assertions and citations, including under institution-specific headings. Avoid
+paragraph-end citation bundles for unrelated statements. Comparisons cite verified
+inputs and distinguish each source's position from the researcher's inference.
+
+Deep synthesis explains agreements/disagreements, scenarios, drivers and their links
+to outcomes, and what would change the conclusion. Compare compatible dates,
+definitions, and horizons; explain incompatibilities. Seek independent support and
+counterevidence for pivotal conclusions; disclose single-source limits. Duplicate
+formats, excerpts, or citations of one origin are not independent support.
+A bibliography or target list is not substantive comparison.
 
 ## Tables
 
-For useful PDFs, inspect `mcp_getFileDetails`; follow returned continuations where
-needed. Complete enumeration concerns extracted table entries, not proof that every
-table in the PDF was detected. Use `mcp_getTable` for selected tables and inspect
-text/truncation and quality metadata. Never request or copy screenshot base64.
-Original images are limited to available crops of extracted tables, not full PDF
-pages or a complete visual inventory. Missing crops do not establish completeness.
+Inspect useful PDFs with `mcp_getFileDetails`; page relevant extracted-table entries.
+Enumeration does not prove every PDF table was detected. Use `mcp_getTable` for
+selected tables; read needed full-text continuations, headings, units, and footnotes.
+The sidecar supplies available canonical text and original PDF crops to the report,
+not just previews. Do not request/copy base64.
 
-An original crop with a valid hash proves artifact identity, not OCR completeness
-or visual review. Without an actual image-review path, explicitly retain the
-unreviewed status; unknown visual review alone does not block the whole report.
-Do not infer missing cells or call conditional scenarios a
-guaranteed floor. Corroborate important uncertain values with available evidence
-or disclose the gap before using them in a conclusion.
+Crops cover extracted tables, not full pages or a complete visual inventory. Artifact
+integrity proves neither extraction completeness nor visual review. Without actual
+vision inspection retain unreviewed status; that alone need not block a report.
+Missing cells, truncation, or uncertain key values need corroboration or removal from
+conclusions. Never invent values or turn conditional scenarios into guaranteed floors.
 
-## Assembly and Delivery
+## Write and Revise
 
 - Submit substantive paragraphs in reading order with `mcp_researchAddClaims`,
-  preferably 3-5 paragraphs per batch. Give each paragraph a stable `claimKey`
-  and each submission a `batchKey`. Bind only evidence registered in this research,
-  using exact returned `evidenceRefs` or canonical `evidenceIds` as the tool allows.
-- If a paragraph submission times out or its commit status is unknown, retry the
-  original batchKey with the original payload. Do not assume it failed or rename
-  paragraphs to retry. A committed batch key cannot carry
-  different content; revise an accepted paragraph with a new batch key, its same
-  claim key, and the returned current `expectedClaimHash`.
-- For rejection, inspect the error location and the assigned reference mapping.
-  Fix only the rejected batch; never guess a nearby ID. Retrieve more evidence
-  when support is missing, not merely because an identifier was mistyped.
-- Add selected, artifact-verified tables with `mcp_researchAddTable`, which has no
-  batchKey. The same table with identical section/caption replays its original
-  item; different content conflicts. On recovery, inspect already-added tables
-  using the report view of `mcp_researchNavigate` if exposed by its schema. If that
-  view is unavailable, retry the original AddTable arguments, not a changed caption.
-- Call `mcp_researchFinalize` when submitted content is ready, then inspect coverage
-  and warnings against the evidence. For material evidence gaps, unsupported
-  assertions, or known incomplete key tables affecting a conclusion, return to
-  search/reading as needed. Revise submitted paragraphs with the same `claimKey`,
-  current `expectedClaimHash`, and a new `batchKey`, removing unsupported assertions
-  from their text while retaining non-empty, evidence-grounded prose. There is no
-  paragraph-deletion API; do not submit empty text. Finalize again before publishing.
-  Do not merely acknowledge the warning
-  and publish the unsupported conclusion. Unknown visual review alone is not a
-  blanket blocker. Optional expected-item lists check submitted items only, not
-  unsubmitted paragraphs or research completeness.
-- Publish exactly the manifest's `report.html`, `report.pdf`, and `provenance.json`,
-  each using `bundle="none"`. Preserve successful publish receipts; on recovery,
-  retry only files explicitly reported as failed, not ones already successful.
-  If publication status is unknown, query it only when the available tools support
-  that operation. Without a query capability, stop and disclose unknown delivery;
-  do not claim success or repeatedly resend. The three publish calls are not a
-  three-file transaction. Never publish a directory or private ledger.
-- Keep internal IDs, short references, and local paths out of all human-facing
-  report text and the final chat. Do not write custom reports or patch generated
-  files. The final chat confirms only artifacts with successful publish receipts
-  and discloses failed or unknown delivery. Do not claim unobserved visual
-  verification or complete model usage/cost accounting.
+  preferably 3-5 per batch, with stable `claimKey` and `batchKey`. Bind only
+  exact `evidenceRefs` registered in this research.
+- Do not write a References/bibliography section or a paragraph listing document
+  titles: the renderer builds the only bibliography from substantive cited claims
+  and tables. Listing a source is not using its evidence. Each citation must
+  support an actual assertion, not enlarge the reference count.
+- On timeout/unknown claim commit, retry the original batch key and payload.
+  Never rename paragraphs or change committed content to retry. Fix rejected
+  batches using error locations and exact mappings, not guessed refs.
+  Revise accepted text or bindings with the same `claimKey`, a new `batchKey`,
+  and `expectedClaimHash` equal to the current review's `claimHash`.
+- Remove unsupported assertions by revising the paragraph to non-empty,
+  evidence-grounded prose. There is no paragraph-deletion API; do not submit empty
+  text or leave an unsupported conclusion intact merely with a warning.
+- `mcp_researchAddTable` takes `researchId`, `section`, `caption`, and `tableRef`;
+  only `tableRef` selects the table, with no `fileRef` or `batchKey`. Identical
+  payloads replay the result. To correct caption/section, keep `tableRef` and set
+  `expectedTableHash` to report/review's current `tableHash`; otherwise it conflicts.
+  Retry uncertain submissions with original arguments.
+
+## Review, Finalize, Publish
+
+1. Before deep finalize, call
+   `mcp_researchNavigate({researchId, view: "review", limit: 20})` and follow every
+   `nextCursor` to exhaustion. Compare submitted paragraphs against their exact
+   bound originals by `evidenceRefs`, not entry order. Its full sources follow each
+   paragraph, linked by `forClaimItem`, including reused sources. Check each paragraph
+   as its sources arrive and collect concrete mismatches before continuing, rather
+   than treating completed pagination as a successful review. Verify the exact
+   number/year/unit and attribution for each numerical assertion. Read all 2000-character
+   fragments; check sources, comparisons, captions, and question coverage.
+   Use scoped search for missing context.
+2. Collect corrections across the review, apply them in small batches using the
+   revision rules above, then start a fresh review without the old cursor and read
+   the complete current report's materials, not after each individual edit.
+   Some repeated material remains necessary.
+3. Deep mode requires a successful scoped search in this research and complete
+   current review-material projection. A zero-hit success meets the action gate,
+   not an evidence need. These gates prove neither comprehension nor correctness;
+   standard mode does not impose them, but still requires source checks.
+   Do not try finalize before review or downgrade deep to bypass the gates.
+4. Call `mcp_researchFinalize`. `status="needs_review"` returns actionable `checks`,
+   no manifest. After its initial gate, filling missing bibliography metadata may
+   invalidate prior review: check updated source attribution and review current
+   materials before retrying. Stop on repeated unchanged failures, not blind loops.
+   Inspect coverage and warnings; resolve material gaps and incomplete key tables
+   via the steps above. Never substitute an older manifest. Expected-item lists check
+   submitted items, not research completeness.
+5. Only `status="finalized"` permits publication; it is not semantic verification.
+   Publish exactly that result's `publicArtifactManifest` entries: `report.html`,
+   `report.pdf`, and `provenance.json`, each with `bundle="none"`. Never publish
+   directories, drafts, screenshot assets, or private state. Never hand-edit
+   generated or historical reports.
+6. Preserve successful publish receipts; retry only explicitly failed files.
+   For unknown publication status use a supported status query; without one, stop
+   and disclose uncertainty, not success or resend. Publishing is not an atomic
+   three-file transaction. Final chat confirms only successful artifacts
+   and discloses failed/unknown delivery.
+
+Keep internal IDs, refs, paths, and raw provenance out of report prose/final chat.
+Never claim unavailable model usage/cost as complete totals. See workspace
+`TOOLS.md` for metadata and progress meanings, not measures of comprehension.
