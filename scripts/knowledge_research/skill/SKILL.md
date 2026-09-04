@@ -3,7 +3,7 @@ name: knowledge-local-research
 description: Research local Knowledge and deliver source-grounded HTML/PDF reports with table evidence and provenance. Use for local investigation, deep research, and multi-document synthesis, not internet research.
 ---
 
-# Local Knowledge Research 1.2
+# Local Knowledge Research 1.2.1
 
 ## Mission
 
@@ -28,9 +28,9 @@ A deep report must:
   each source adds; duplicate formats of one origin are not independent evidence.
 - Use as many relevant sources as substantively improve the answer, without padding.
   Important discovered candidates must be searched, not merely listed.
-- Read by importance: examine core files from multiple angles and inspect their PDF
-  tables; read complete relevant passages from supporting, qualifying, and opposing
-  sources; use auxiliary sources only for evidence they add.
+- Read by importance before drafting: examine core files from multiple angles and
+  inspect their PDF tables; read complete relevant passages from supporting,
+  qualifying, and opposing sources; use auxiliary sources only for evidence they add.
 - State material unresolved gaps honestly, while keeping internal process details and
   nonmaterial technical warnings out of the report.
 
@@ -80,18 +80,27 @@ limitations, and links to successfully published artifacts.
    corroboration, conflicts, and outlook. Pass exactly one of `scopeRefs` or
    `fileRefs`, at most 20 files per call. Explicitly select returned groups and
    cover important candidates in successive calls. Reformulate zero-hit queries;
-   never downgrade retrieval or change factual sources.
-4. **Read:** Use `mcp_researchReadEvidence` for saved passages and continuations.
-   It neither reads whole documents nor discovers absent context; search again when
-   needed evidence is missing.
-5. **Inspect tables:** Call `mcp_getFileDetails` for every core PDF and other PDFs
-   likely to contain useful numerical evidence; follow relevant `nextCursor` pages.
-   Call `mcp_getTable` for analytically useful tables and read complete headings,
-   units, footnotes, and text. Research Markdown through text chunks.
-6. **Write:** Add only supported paragraphs with `mcp_researchAddClaims`, preferably
-   3-5 at a time in reading order, using stable `claimKey` and `batchKey` values
-   and exact `evidenceRefs`. Add selected tables with `mcp_researchAddTable` using
-   their `tableRef`, section, and informative caption. Do not write references.
+   never downgrade retrieval or change factual sources. Complete meaningful scoped
+   search before writing; a search added only after Finalize rejects the report does
+   not satisfy deep research.
+4. **Read:** Use `mcp_researchReadEvidence` on evidence supporting core conclusions,
+   including continuations where needed. Discovery chunks can start research but
+   must not be the entire reading process. This tool does not discover absent
+   context; search again when needed evidence is missing.
+5. **Inspect tables before writing:** A core PDF is any PDF used for an executive
+   summary, main conclusion, key number, major disagreement, or future scenario.
+   Explicitly call `mcp_getFileDetails` for every core PDF and follow relevant
+   `nextCursor` pages. Automatic metadata preparation during Review does not count
+   as table inspection. Call `mcp_getTable` for each relevant usable table and read
+   complete headings, units, footnotes, and text. A zero-table report is valid only
+   after this explicit inspection finds no relevant usable table. Research Markdown
+   through text chunks.
+6. **Write:** Do not call `mcp_researchAddClaims` until initial scoped search, core
+   evidence reading, and core-PDF table inspection are complete. Then add only
+   supported paragraphs, preferably 3-5 at a time in reading order, using stable
+   `claimKey` and `batchKey` values and exact `evidenceRefs`. Add every selected
+   table with `mcp_researchAddTable` using its `tableRef`, section, and informative
+   caption. Do not write references.
 7. **Close gaps:** Review the emerging argument and return to discovery, scoped
    search, and reading for missing support, unread candidates, disagreements, weak
    causal links, or unsupported scenarios. Revise as evidence changes.
@@ -107,9 +116,13 @@ limitations, and links to successfully published artifacts.
 Before finalize, confirm that material search gaps and unread important candidates
 have been addressed; every factual paragraph has exact evidence; major conclusions
 have independent support or an explicit single-source limit; relevant conflicts and
-future conditions are represented; selected tables are usable and have screenshots;
-source titles are readable; review pages are exhausted; and no internal identifiers
-or process commentary can enter human-facing output.
+future conditions are represented; scoped search and core reading happened before
+drafting; every core PDF received explicit table inspection; each relevant usable
+table was fetched and added; a zero-table report has a genuine inspected basis;
+selected tables have screenshots; source titles are readable; review pages are
+exhausted; and no internal identifiers or process commentary can enter human-facing
+output. Finalize is a delivery gate, not a probe for deciding which research steps
+to perform afterward.
 
 Copy refs and namespaces exactly. Preserve successful publish receipts and retry only
 explicit failures. Consult `TOOLS.md` only when cursor snapshots, grouping, current
