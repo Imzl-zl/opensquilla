@@ -227,12 +227,13 @@ def test_stock_gateway_properties_and_required_keep_model_selectors_unambiguous(
     assert claim["properties"]["evidenceRefs"]["maxItems"] == 200
     scope = schemas["searchByIds"]["properties"]
     assert "fileIds" not in scope
-    for name in ("fileRefs", "scopeRefs"):
-        assert scope[name]["minItems"] == 1 and scope[name]["maxItems"] == 20
-        assert "exactly one" in scope[name]["description"]
-        assert (
-            "fileRefs" in scope[name]["description"] and "scopeRefs" in scope[name]["description"]
-        )
+    assert not {"fileRefs", "scopeRefs"} & scope.keys()
+    assert "selection" in schemas["searchByIds"]["required"]
+    selection = scope["selection"]
+    assert selection["required"] == ["kind", "refs"]
+    assert selection["additionalProperties"] is False
+    assert selection["properties"]["kind"]["enum"] == ["files", "scopes"]
+    assert selection["properties"]["refs"]["maxItems"] == 20
     assert "expectedTableIds" not in schemas["researchFinalize"]["properties"]
     assert (
         schemas["researchAddTable"]["properties"]["expectedTableHash"]["pattern"]
@@ -241,7 +242,7 @@ def test_stock_gateway_properties_and_required_keep_model_selectors_unambiguous(
     assert "expectedTableHash" not in schemas["researchAddTable"]["required"]
     assert "review" in schemas["researchNavigate"]["properties"]["view"]["enum"]
     assert schemas["researchBegin"]["properties"]["mode"]["default"] == "standard"
-    assert schemas["researchBegin"]["properties"]["language"]["enum"] == ["zh-CN", "en"]
+    assert schemas["researchBegin"]["properties"]["language"]["enum"] == ["zh-CN", "en", None]
 
 
 def test_begin_forwards_only_explicit_mode_and_language(
@@ -312,7 +313,7 @@ def test_readable_directories_keep_known_metadata_and_executable_page_scope(tmp_
     entry = files["entries"][0]
     assert entry["title"] == hit["title"] and entry["fileType"] == "PDF"
     assert entry["observedLocators"] == [hit["locator"]]
-    assert files["searchScope"] == {"fileRefs": [hit["fileRef"]]}
+    assert files["searchScope"] == {"selection": {"kind": "files", "refs": [hit["fileRef"]]}}
     assert "institution" not in entry and "publicationDate" not in entry
     last, _ = invoke(bridge, "researchNavigate", {"researchId": rid, "cursor": files["nextCursor"]})
     assert "fileType" not in last["entries"][0] and "pageCount" not in last["entries"][0]
@@ -1070,3 +1071,140 @@ def test_inventory_and_table_cursors_use_original_tools(tmp_path: Path) -> None:
     )
     assert response["result"]["isError"], stale
     assert store.snapshot(rid) == corrected_state
+
+
+def test_selection_object_routes_files_and_scopes_without_ambiguous_fallback(
+    tmp_path: Path,
+) -> None:
+    bridge, store, upstream, rid = setup(
+        tmp_path,
+        [
+            result(search_payload("q", ["file-one"])),
+            result(search_payload("deep", ["file-one"], scoped=True)),
+            result(search_payload("deep", ["file-one"], scoped=True)),
+        ],
+    )
+    found = discovery(bridge, rid, "q")
+    ref = found["results"][0]["fileRef"]
+    for kind, selected in [("files", ref), ("scopes", found["scopeRef"])]:
+        reply, envelope = invoke(
+            bridge,
+            "searchByIds",
+            {
+                "researchId": rid,
+                "query": "deep",
+                "selection": {"kind": kind, "refs": [selected]},
+                "requestKey": None,
+                "limit": None,
+            },
+        )
+        assert not envelope["result"]["isError"], reply
+        assert upstream.calls[-1]["arguments"]["fileIds"] == ["file-one"]
+    before = store.snapshot(rid)
+    invalid_selections: list[tuple[Any, dict[str, Any]]] = [
+        ({"kind": "files", "refs": [ref]}, {"scopeRefs": [found["scopeRef"]]}),
+        ({"kind": "files", "refs": [ref]}, {"fileRefs": None}),
+        ({"kind": "scopes", "refs": [ref]}, {}),
+        ({"kind": "files", "refs": [found["scopeRef"]]}, {}),
+        ({"kind": "other", "refs": [ref]}, {}),
+        ({"kind": "files", "refs": [ref], "extra": None}, {}),
+        ({"kind": "files", "refs": [ref] * 21}, {}),
+        (None, {}),
+    ]
+    for selection, extra in invalid_selections:
+        reply, _ = invoke(
+            bridge,
+            "searchByIds",
+            {
+                "researchId": rid,
+                "query": "q",
+                "selection": selection,
+                **extra,
+            },
+        )
+        assert "error" in reply
+        assert store.snapshot(rid) == before
+    assert len(upstream.calls) == 3
+
+
+def test_null_optional_pagination_and_claim_hashes_preserve_validation(tmp_path: Path) -> None:
+    bridge, store, _, rid = setup(tmp_path, [result(search_payload("q", ["file-one"]))])
+    hit = discovery(bridge, rid, "q")["results"][0]
+    for name, arguments in [
+        ("researchNavigate", {"view": "progress", "snapshotRef": None, "limit": None}),
+        ("researchReadEvidence", {"evidenceRef": hit["evidenceRef"]}),
+    ]:
+        fresh, envelope = invoke(
+            bridge,
+            name,
+            {
+                "researchId": rid,
+                **arguments,
+                "cursor": None,
+                "requestKey": "nullable-" + name,
+            },
+        )
+        assert not envelope["result"]["isError"], fresh
+        omitted = {k: v for k, v in arguments.items() if v is not None}
+        replay, _ = invoke(
+            bridge,
+            name,
+            {
+                "researchId": rid,
+                **omitted,
+                "requestKey": "nullable-" + name,
+            },
+        )
+        assert replay == fresh
+        before = store.snapshot(rid)
+        invalid, _ = invoke(bridge, name, {"researchId": rid, **omitted, "cursor": "0"})
+        assert "error" in invalid
+        assert store.snapshot(rid) == before
+    claim = {
+        "section": "Findings",
+        "text": "Supported passage.",
+        "evidenceRefs": [hit["evidenceRef"]],
+        "claimKey": "fresh",
+        "expectedClaimHash": None,
+    }
+    added, envelope = invoke(
+        bridge, "researchAddClaims", {"researchId": rid, "batchKey": None, "claims": [claim]}
+    )
+    assert not envelope["result"]["isError"], added
+    before = store.snapshot(rid)
+    stale, _ = invoke(
+        bridge,
+        "researchAddClaims",
+        {
+            "researchId": rid,
+            "claims": [{**claim, "text": "Changed.", "expectedClaimHash": "0" * 64}],
+        },
+    )
+    assert "error" in stale
+    assert store.snapshot(rid) == before
+    for required in ["section", "text", "evidenceRefs"]:
+        invalid, _ = invoke(
+            bridge, "researchAddClaims", {"researchId": rid, "claims": [{**claim, required: None}]}
+        )
+        assert "error" in invalid
+        assert store.snapshot(rid) == before
+
+
+def test_nullable_schema_survives_gateway_export(tmp_path: Path) -> None:
+    from opensquilla.provider.types import ToolInputSchema
+
+    bridge, _, _, _ = setup(tmp_path)
+    response = bridge.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    assert response is not None
+    schemas = {}
+    for tool in response["result"]["tools"]:
+        original = tool["inputSchema"]
+        schemas[tool["name"]] = ToolInputSchema(
+            type="object", properties=original["properties"], required=original["required"]
+        ).model_dump()
+    assert schemas["searchByIds"]["properties"]["selection"]["required"] == ["kind", "refs"]
+    assert schemas["researchReadEvidence"]["properties"]["cursor"]["type"] == ["string", "null"]
+    assert schemas["researchReadEvidence"]["properties"]["evidenceRef"]["type"] == "string"
+    assert schemas["researchAddClaims"]["properties"]["claims"]["items"]["properties"][
+        "expectedClaimHash"
+    ]["type"] == ["string", "null"]

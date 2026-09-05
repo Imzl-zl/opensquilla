@@ -3,7 +3,7 @@ name: knowledge-local-research
 description: Research local Knowledge and deliver evidence-grounded analytical HTML/PDF reports with original table exhibits and provenance. Use for local investigation, financial research, and multi-document synthesis; not internet research.
 ---
 
-# Local Knowledge Research 2.1
+# Local Knowledge Research 2.2
 
 ## Research mandate
 
@@ -31,8 +31,8 @@ or successful tool calls do not establish research depth.
    an unexamined candidate that matters; avoid dumping many broad result sets
    before examining any of them. Investigate different explanations, not just paraphrases of one thesis.
    Five chunks per file is a per-call bound, not a total article limit.
-3. **Deepen important files.** Use `mcp_searchByIds` with exactly one of `scopeRefs`
-   or `fileRefs`, at most 20 files per call. Explicitly select returned groups and
+3. **Deepen important files.** Use `mcp_searchByIds` with `selection={"kind":"files","refs":[fileRef,...]}`
+   or `selection={"kind":"scopes","refs":[scopeRef,...]}`, at most 20 refs per call. Explicitly select returned groups and
    cover important candidates in successive calls. Ask separate questions about
    definitions, numbers, mechanisms, qualifications, and contrary evidence.
    Reformulate empty queries; never downgrade retrieval or change factual sources.
@@ -147,6 +147,9 @@ deduplication and honest coverage percentages. Do not author or pad it. Check th
 titles are readable; coverage is not comprehension or a target to inflate.
 Chat, HTML, and PDF contain no internal IDs/refs, private paths, tool narration, or
 raw provenance. Final chat gives the answer, material limits, and successful links.
+For unused optional parameters use `null` or omit them. First-page cursors and new-item
+hashes are `null`; never invent `start`, `0`, a snapshot, or a hash.
+
 Consult `TOOLS.md` for schemas, grouped scopes, cursors, hashes, retries, and recovery.
 Preserve successful receipts; never hand-edit generated reports or claim unobserved
 token/cost totals. Successful delivery is not proof of financial correctness.

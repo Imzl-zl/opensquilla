@@ -46,3 +46,9 @@ rules. These notes explain tool outputs, not additional research quotas.
   Optional expected-item lists cover submitted items only.
 - Tool receipts cannot observe model failures before execution or complete provider
   token/cost accounting. Do not fill missing usage with zero or call it a billed total.
+
+Scoped search uses one required object: `selection={"kind":"files","refs":[fileRef,...]}`
+or `selection={"kind":"scopes","refs":[scopeRef,...]}`. Copy returned references; do not
+supply separate fileRefs/scopeRefs arguments. An oversized scope returns groups to select.
+Unused optional fields may be omitted or null. Use null for first-page cursors and
+new-item hashes; continuation cursors and revision hashes must be exact returned values.

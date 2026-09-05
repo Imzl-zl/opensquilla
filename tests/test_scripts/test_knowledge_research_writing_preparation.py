@@ -97,7 +97,9 @@ def test_first_deep_write_blocks_atomically_and_recovers_with_same_batch_key(
         "EVIDENCE_READ_REQUIRED",
         "PDF_TABLE_INSPECTION_REQUIRED",
     }
-    assert checks[0]["suggestedSelection"] == {"fileRefs": [found["results"][0]["fileRef"]]}
+    assert checks[0]["suggestedSelection"] == {
+        "selection": {"kind": "files", "refs": [found["results"][0]["fileRef"]]}
+    }
     assert store.snapshot(rid) == before
     assert state_path.read_bytes() == original_bytes
     assert not store.output_root.exists()

@@ -222,6 +222,7 @@ class KnowledgeResearchBridge:
             return _rpc_error(request_id, -32602, "tool name and arguments are required")
         if name not in _LOCAL_TOOLS | _LEDGER_TOOLS:
             raise NavigationError("UNKNOWN_TOOL", "Unknown research tool")
+        arguments = _omit_optional_nulls(name, arguments)
         if name == "researchBegin":
             result = self._call_local(name, arguments)
             payload, _ = recover_structured_content(result)
@@ -890,21 +891,30 @@ class KnowledgeResearchBridge:
                     schema["required"] = list(dict.fromkeys([*required, "researchId"]))
                     if tool["name"] == "searchByIds":
                         properties.pop("fileIds", None)
-                        properties["fileRefs"] = {
-                            **_ref_array("D"),
+                        properties["selection"] = {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["kind", "refs"],
+                            "properties": {
+                                "kind": {"type": "string", "enum": ["files", "scopes"]},
+                                "refs": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "maxItems": 20,
+                                    "items": {"type": "string", "minLength": 1},
+                                    "description": (
+                                        "Exact returned fileRefs for kind=files, or "
+                                        "scopeRefs for kind=scopes. Never invent references."
+                                    ),
+                                },
+                            },
                             "description": (
-                                "Select 1-20 fileRefs returned in this research. Supply exactly "
-                                "one of fileRefs or scopeRefs, never both. Do not invent IDs."
+                                "One explicit selection; choose files or scopes "
+                                "and copy the matching returned refs."
                             ),
                         }
-                        properties["scopeRefs"] = {
-                            **_ref_array("S"),
-                            "description": (
-                                "Select returned scopeRefs instead of fileRefs. Supply exactly "
-                                "one of scopeRefs or fileRefs, never both. Do not invent IDs."
-                            ),
-                        }
-                        schema["oneOf"] = [{"required": [key]} for key in ("fileRefs", "scopeRefs")]
+                        schema.pop("oneOf", None)
+                        schema["required"].append("selection")
                         tool["description"] = (
                             "Search selected files. Over 20 files returns group scopeRefs without "
                             "querying; explicitly search each group."
@@ -926,7 +936,62 @@ class KnowledgeResearchBridge:
                             )
                 tools.append(tool)
         tools.extend(_research_tools())
+        for tool in tools:
+            if tool.get("name") in _LOCAL_TOOLS | _LEDGER_TOOLS:
+                _nullable_optionals(tool["inputSchema"])
         return tools
+
+
+def _nullable_optionals(schema: dict[str, Any]) -> None:
+    """Keep optional parameters representable when a provider emits every property."""
+    for key, prop in schema.get("properties", {}).items():
+        _nullable_optionals(prop)
+        if key in schema.get("required", []):
+            continue
+        kind = prop.get("type")
+        if isinstance(kind, str):
+            prop["type"] = [kind, "null"]
+        if "enum" in prop and None not in prop["enum"]:
+            prop["enum"].append(None)
+        prop["description"] = (
+            prop.get("description", "")
+            + " Optional: use null when unused. For a first page or new item use null; "
+            "copy an actual returned cursor, snapshot or current hash only when needed."
+        ).strip()
+    if isinstance(schema.get("items"), dict):
+        _nullable_optionals(schema["items"])
+
+
+def _omit_optional_nulls(name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Null means omitted only for known optional fields, before retry fingerprinting."""
+    optional = {
+        "search": {"requestKey", "limit", "collectionIds"},
+        "searchByIds": {"requestKey", "limit"},
+        "getFileDetails": {"requestKey", "limit", "cursor"},
+        "getTable": {"requestKey", "cursor", "includeScreenshot"},
+        "researchNavigate": {"requestKey", "limit", "cursor", "snapshotRef", "view"},
+        "researchReadEvidence": {"requestKey", "cursor"},
+        "researchBegin": {"subtitle", "mode", "language"},
+        "researchAddClaim": {"batchKey", "claimKey", "expectedClaimHash"},
+        "researchAddClaims": {"batchKey"},
+        "researchAddTable": {"expectedTableHash"},
+        "researchFinalize": {"expectedClaimKeys", "expectedTableRefs"},
+    }.get(name, set())
+    result = copy.deepcopy(
+        {k: v for k, v in arguments.items() if v is not None or k not in optional}
+    )
+    if name == "researchAddClaims" and isinstance(result.get("claims"), list):
+        result["claims"] = [
+            {
+                k: v
+                for k, v in claim.items()
+                if v is not None or k not in {"claimKey", "expectedClaimHash"}
+            }
+            if isinstance(claim, Mapping)
+            else claim
+            for claim in result["claims"]
+        ]
+    return result
 
 
 def _ref_schema(kind: str) -> dict[str, Any]:

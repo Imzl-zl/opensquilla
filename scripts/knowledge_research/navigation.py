@@ -196,8 +196,20 @@ class Navigation:
         return ref
 
     def selected_files(self, arguments: Mapping[str, Any]) -> list[str]:
-        name = choose(arguments, ("fileIds", "fileRefs", "scopeRefs"))
-        values = strings(arguments[name], f"/{name}")
+        name = choose(arguments, ("selection", "fileIds", "fileRefs", "scopeRefs"))
+        if name == "selection":
+            selection = arguments[name]
+            if not isinstance(selection, Mapping) or set(selection) != {"kind", "refs"}:
+                raise NavigationError(
+                    "INVALID_SELECTOR", "selection requires exactly kind and refs"
+                )
+            kind = selection["kind"]
+            if kind not in ("files", "scopes"):
+                raise NavigationError("INVALID_SELECTOR", "selection.kind must be files or scopes")
+            values = strings(selection["refs"], "/selection/refs")
+            name = "fileRefs" if kind == "files" else "scopeRefs"
+        else:
+            values = strings(arguments[name], f"/{name}")
         if name == "fileIds":
             return list(dict.fromkeys(values))
         if name == "fileRefs":
@@ -656,7 +668,7 @@ class Navigation:
         if snapshot["kind"] == "directory" and projected.get("view") == "files":
             refs = [row["fileRef"] for row in projected["entries"]]
             if refs:
-                projected["searchScope"] = {"fileRefs": refs}
+                projected["searchScope"] = {"selection": {"kind": "files", "refs": refs}}
         page = projected["page"]
         projected.update(
             snapshotRef=snapshot_ref,

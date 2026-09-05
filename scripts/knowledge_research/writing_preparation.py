@@ -25,8 +25,8 @@ def scoped_search_check() -> dict[str, Any]:
         "code": "SCOPED_SEARCH_REQUIRED",
         "tool": "searchByIds",
         "message": (
-            "Deep research has not searched within any candidate file. Search selected "
-            "scopeRefs or fileRefs for the proposed argument's context, assumptions or "
+            "Deep research has not searched within any candidate file. Use selection "
+            "with returned scopes or files for context, assumptions or "
             "counterevidence. A verified empty-result search counts; grouping does not."
         ),
     }
@@ -83,7 +83,7 @@ def require_first_write_preparation(
             if key in navigation.get("files", {})
         ]
         if file_refs:
-            check["suggestedSelection"] = {"fileRefs": file_refs[:20]}
+            check["suggestedSelection"] = {"selection": {"kind": "files", "refs": file_refs[:20]}}
         checks.append(check)
 
     for evidence_id in evidence_ids:
