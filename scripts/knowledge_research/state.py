@@ -28,6 +28,7 @@ if __package__:
     from .references import build_bibliography, cited_file_ids
     from .report import render_html_report
     from .review import review_preparation, review_requirements, table_item_hash
+    from .writing_preparation import require_first_write_preparation
 else:  # pragma: no cover - exercised by deployment entrypoint smoke tests
     from claims import (  # type: ignore[import-not-found,no-redef]
         ResearchStateError,
@@ -48,6 +49,9 @@ else:  # pragma: no cover - exercised by deployment entrypoint smoke tests
         review_preparation,
         review_requirements,
         table_item_hash,
+    )
+    from writing_preparation import (  # type: ignore[import-not-found,no-redef]
+        require_first_write_preparation,
     )
 
 STATE_SCHEMA_VERSION = "opensquilla-knowledge-research-state/1"
@@ -387,6 +391,7 @@ class KnowledgeResearchStore:
                 claims,
                 batch_key=batch_key,
                 reject_text=lambda text: self._reject_internal_ids(text, state=state),
+                before_commit=lambda prepared: require_first_write_preparation(state, prepared),
             ),
         )
 

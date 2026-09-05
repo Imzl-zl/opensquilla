@@ -81,6 +81,12 @@ def test_numeric_gate_requires_correction_and_new_review(tmp_path: Path) -> None
     common = {"researchId": begin["researchId"]}
     found, _ = invoke(bridge, "search", {**common, "query": "q"})
     invoke(bridge, "searchByIds", {**common, "query": "scope", "scopeRefs": [found["scopeRef"]]})
+    invoke(
+        bridge,
+        "researchReadEvidence",
+        {**common, "evidenceRef": found["results"][0]["evidenceRef"]},
+    )
+    invoke(bridge, "getFileDetails", {**common, "fileRef": found["results"][0]["fileRef"]})
     claim = {
         "claimKey": "forecast",
         "section": "Forecast",

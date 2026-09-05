@@ -3,7 +3,7 @@ name: knowledge-local-research
 description: Research local Knowledge and deliver evidence-grounded analytical HTML/PDF reports with original table exhibits and provenance. Use for local investigation, financial research, and multi-document synthesis; not internet research.
 ---
 
-# Local Knowledge Research 2.0
+# Local Knowledge Research 2.1
 
 ## Research mandate
 
@@ -26,8 +26,10 @@ or successful tool calls do not establish research depth.
    dates actually covered by sources. An old forecast is not a current fact; an
    upload date is not a publication date.
 2. **Discover iteratively.** Call `mcp_search` without `collectionIds`. Use focused
-   queries, then follow concepts, institutions, disagreements, and gaps revealed by
-   reading. Investigate different explanations, not just paraphrases of one thesis.
+   queries with modest result pages, then follow concepts, institutions,
+   disagreements, and gaps revealed by reading. Expand a result page when it has
+   an unexamined candidate that matters; avoid dumping many broad result sets
+   before examining any of them. Investigate different explanations, not just paraphrases of one thesis.
    Five chunks per file is a per-call bound, not a total article limit.
 3. **Deepen important files.** Use `mcp_searchByIds` with exactly one of `scopeRefs`
    or `fileRefs`, at most 20 files per call. Explicitly select returned groups and
@@ -68,8 +70,9 @@ judgment; do not search indefinitely or manufacture precision.
   quarterly figures are not interchangeable. Without comparable inputs, explain
   mechanisms qualitatively rather than invent a numerical decomposition.
 - Attribute forecasts to their author, publication date, and horizon. Explain
-  disagreements in assumptions or timing; do not average incompatible targets or
-  call a conditional downside scenario a guaranteed floor.
+  disagreements in assumptions or timing. Do not present different forecast
+  vintages or metrics as one simultaneous consensus range, average incompatible
+  targets, or call a conditional downside scenario a guaranteed floor.
 - Test the strongest alternative explanation. State what supports your view, what
   weakens it, and what would make you revise it. Future scenarios connect
   **condition → mechanism → possible outcome → observable signal**. Do not invent
@@ -86,13 +89,18 @@ independent sources agree or disagree instead of stitching summaries. Duplicate
 formats of one source do not count as independent confirmation.
 
 Complete initial scoped reading, core evidence reading, and PDF inspection before
-`mcp_researchAddClaims`. Submit supported paragraphs in manageable batches, normally
-3–5, with stable `claimKey`/`batchKey` and exact `evidenceRefs`. Split paragraphs
+`mcp_researchAddClaims`. Submit supported paragraphs in small, complete batches, normally
+1–2 at a time. Emit one write call, then wait for its receipt before the next.
+This limits native JSON failure exposure without shortening the research or prose. Use stable
+`claimKey`/`batchKey` and exact `evidenceRefs`. Split paragraphs
 when different facts need different sources. A topical match is not support:
 the reference must contain the stated entity, number, period, and qualification.
 Never repair a false claim by swapping in an unrelated valid reference. Replay an
 identical request with the same batch key; a revision keeps its claim key, supplies
-the current hash, and uses a new batch key.
+the current hash, and uses a new batch key. If the writing entrance returns
+`RESEARCH_PREPARATION_REQUIRED`, follow its missing scoped-reading, evidence continuation, and
+PDF-inventory actions before replaying the unchanged uncommitted batch. These are
+minimum access checks; they do not replace investigating the wider argument.
 
 Write plain prose: the renderer supplies headings and citations, not Markdown
 tables, bold syntax, or hand-authored HTML. Add each useful exhibit through
@@ -105,8 +113,8 @@ Keep every nonredundant exhibit that materially improves understanding.
 Every published table needs usable complete text and an original PDF crop. Crop
 availability does not prove visual inspection: claim to have checked an image
 only if it was delivered to your vision input. Unseen but available original crops
-can still accompany verified usable text; visual status stays unknown. Omit unusable tables and use
-reliable text where possible. Qualify or remove a conclusion whose only support
+can still accompany verified usable text; visual status stays unknown. Omit
+unusable tables and use reliable text where possible. Qualify or remove a conclusion whose only support
 is unusable. Never draw replacement source tables or invent cells.
 
 ## Challenge, revise, and deliver

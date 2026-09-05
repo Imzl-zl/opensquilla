@@ -12,6 +12,7 @@ if __package__:
     from .numeric_checks import numeric_scale_checks
     from .references import _clean_title, source_format
     from .table_views import _source_text, table_quality_view
+    from .writing_preparation import scoped_search_check, scoped_search_count
 else:  # pragma: no cover - standalone bridge
     from claims import (  # type: ignore[import-not-found,no-redef]
         canonical_json,
@@ -24,6 +25,10 @@ else:  # pragma: no cover - standalone bridge
     from table_views import (  # type: ignore[import-not-found,no-redef]
         _source_text,
         table_quality_view,
+    )
+    from writing_preparation import (  # type: ignore[import-not-found,no-redef]
+        scoped_search_check,
+        scoped_search_count,
     )
 
 FRAGMENT_CHARS = 2_000
@@ -324,10 +329,7 @@ def review_preparation(state: Mapping[str, Any]) -> dict[str, Any]:
     pending = sum(
         item_review_hash(state, item) not in prepared.get(item["itemId"], set()) for item in items
     )
-    scoped_calls = sum(
-        call.get("toolName") == "searchByIds" and call.get("verificationStatus") == "verified"
-        for call in state["ledger"]["calls"]
-    )
+    scoped_calls = scoped_search_count(state)
     return {
         "reportHash": digest,
         "comparisonPrepared": bool(items) and pending == 0,
@@ -344,17 +346,7 @@ def review_requirements(state: Mapping[str, Any]) -> dict[str, Any] | None:
     preparation = review_preparation(state)
     pending: list[dict[str, Any]] = numeric_scale_checks(state)
     if not preparation["scopedSearchCallCount"]:
-        pending.append(
-            {
-                "code": "SCOPED_SEARCH_REQUIRED",
-                "tool": "searchByIds",
-                "message": (
-                    "Deep research has not searched within any candidate file. "
-                    "Use a relevant scopeRefs or fileRefs selection. A completed "
-                    "empty-result search counts; a grouping response does not."
-                ),
-            }
-        )
+        pending.append(scoped_search_check())
     if not preparation["comparisonPrepared"]:
         pending.append(
             {

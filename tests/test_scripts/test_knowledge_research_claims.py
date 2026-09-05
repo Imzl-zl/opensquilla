@@ -11,7 +11,9 @@ from typing import Any
 import pytest
 
 from scripts.knowledge_research import state as state_module
+from scripts.knowledge_research.bridge import KnowledgeResearchBridge
 from scripts.knowledge_research.state import KnowledgeResearchStore, ResearchStateError
+from tests.test_scripts.test_knowledge_research_navigation import Upstream, invoke
 
 EVIDENCE = "ev4_11111111111111111111111111111111"
 FILE = "fixture-file-001"
@@ -98,8 +100,19 @@ def _assert_bytes_unchanged(store: KnowledgeResearchStore, expected: dict[str, b
 def test_deep_rejects_manual_bibliography_atomically(tmp_path: Path, section: str) -> None:
     store = _store(tmp_path)
     rid = store.begin(title="Research", mode="deep")["researchId"]
-    store.record_knowledge_call(
-        research_id=rid, tool_name="search", arguments={"query": "q"}, result=_result()
+    scoped = _result()
+    scoped["structuredContent"]["selectionStrategy"] = "pure_score"
+    bridge = KnowledgeResearchBridge(Upstream([{"result": _result()}, {"result": scoped}]), store)
+    found, _ = invoke(bridge, "search", {"researchId": rid, "query": "q"})
+    invoke(
+        bridge,
+        "searchByIds",
+        {"researchId": rid, "query": "qualifications", "scopeRefs": [found["scopeRef"]]},
+    )
+    invoke(
+        bridge,
+        "researchReadEvidence",
+        {"researchId": rid, "evidenceRef": found["results"][0]["evidenceRef"]},
     )
     state_before = store.snapshot(rid)
     with pytest.raises(ResearchStateError) as exc:

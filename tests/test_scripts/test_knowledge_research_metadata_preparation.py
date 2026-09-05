@@ -53,7 +53,9 @@ def seed(
     source = search_payload("q", list(files), scoped=True)
     upstream = Upstream([result(source)])
     bridge = KnowledgeResearchBridge(upstream, store)
-    begin, _ = invoke(bridge, "researchBegin", {"title": "Research", "mode": mode})
+    # Model an already stored draft: these tests exercise review-time metadata
+    # recovery, including legacy drafts created before first-write preparation.
+    begin, _ = invoke(bridge, "researchBegin", {"title": "Research", "mode": "standard"})
     rid = begin["researchId"]
     found, response = invoke(
         bridge, "searchByIds", {"researchId": rid, "query": "q", "fileIds": list(files)}
@@ -72,6 +74,8 @@ def seed(
             for index, file_id in enumerate(cited)
         ],
     )
+    if mode != "standard":
+        store.atomic_update(rid, lambda state: state.update(mode=mode))
     return bridge, store, upstream, rid
 
 

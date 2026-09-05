@@ -82,6 +82,7 @@ def apply_claim_batch(
     *,
     batch_key: str | None,
     reject_text: Callable[[str], None],
+    before_commit: Callable[[Sequence[Mapping[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
     """Prepare all changes before mutating state; the caller owns persistence."""
 
@@ -220,6 +221,9 @@ def apply_claim_batch(
                 items[existing_index] = item
                 updated += 1
         prepared.append(item)
+
+    if (inserted or updated) and before_commit is not None:
+        before_commit(prepared)
 
     revision = int(state["report"].get("revision", 0))
     if inserted or updated:

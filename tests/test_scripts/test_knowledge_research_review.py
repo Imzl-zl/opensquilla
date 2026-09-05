@@ -30,7 +30,9 @@ def test_deep_requires_scoped_call_and_current_complete_comparison(tmp_path: Pat
     bridge, store, _, _ = setup(
         tmp_path, [result(source), result(scoped), result(_source_details(source))]
     )
-    begin, _ = invoke(bridge, "researchBegin", {"title": "Research", "mode": "deep"})
+    # Model a preexisting draft so the finalization gate still catches missing
+    # scoped research independently of the new first-write preparation gate.
+    begin, _ = invoke(bridge, "researchBegin", {"title": "Research", "mode": "standard"})
     rid = begin["researchId"]
     common = {"researchId": rid}
     search, _ = invoke(bridge, "search", {**common, "query": "query"})
@@ -42,6 +44,7 @@ def test_deep_requires_scoped_call_and_current_complete_comparison(tmp_path: Pat
         "evidenceRefs": [hit["evidenceRef"]],
     }
     invoke(bridge, "researchAddClaims", {**common, "batchKey": "one", "claims": [claim]})
+    store.atomic_update(rid, lambda state: state.update(mode="deep"))
     pending = store.finalize(research_id=rid)
     assert {check["code"] for check in pending["checks"]} == {
         "SCOPED_SEARCH_REQUIRED",
@@ -249,9 +252,11 @@ def test_metadata_completion_precedes_review_without_an_extra_full_pass(tmp_path
     source["results"][0]["title"] = "[page 7]"
     details = _source_details(source)
     bridge, store, upstream, _ = setup(tmp_path, [result(source), result(details)])
-    rid = store.begin(title="Deep report", mode="deep")["researchId"]
+    # Metadata/review must also complete for a legacy draft already on disk.
+    rid = store.begin(title="Deep report", mode="standard")["researchId"]
     invoke(bridge, "searchByIds", {"researchId": rid, "query": "q", "fileIds": ["file-a"]})
     _submit_fact(store, rid, source)
+    store.atomic_update(rid, lambda state: state.update(mode="deep"))
     first, _ = invoke(bridge, "researchNavigate", {"researchId": rid, "view": "review"})
     assert review_preparation(store.snapshot(rid))["comparisonPrepared"]
     assert not store.output_root.exists()

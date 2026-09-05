@@ -23,7 +23,9 @@ EVIDENCE = "ev4_11111111111111111111111111111111"
 
 
 def _seed(store: KnowledgeResearchStore, *, mode: str = "standard") -> str:
-    rid = store.begin(title="Research", mode=mode, language="zh-CN")["researchId"]
+    # A deep fixture represents an already stored draft from before the writing
+    # gate; these tests exercise finalization/coverage ordering, not first writes.
+    rid = store.begin(title="Research", mode="standard", language="zh-CN")["researchId"]
     store.record_knowledge_call(
         research_id=rid,
         tool_name="search",
@@ -69,6 +71,8 @@ def _seed(store: KnowledgeResearchStore, *, mode: str = "standard") -> str:
             }
         ],
     )
+    if mode != "standard":
+        store.atomic_update(rid, lambda state: state.update(mode=mode))
     return str(rid)
 
 
