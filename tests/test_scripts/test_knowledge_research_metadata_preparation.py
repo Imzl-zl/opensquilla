@@ -75,6 +75,25 @@ def seed(
     return bridge, store, upstream, rid
 
 
+@pytest.mark.parametrize("bad_title", ["\ufeff", "\u200b\u2060", "<p>&#xfeff;</p>"])
+def test_invisible_details_title_preserves_readable_search_title(
+    tmp_path: Path, bad_title: str
+) -> None:
+    bridge, store, upstream, rid = seed(tmp_path)
+    before = store.snapshot(rid)
+    original = before["ledger"]["files"]["file-a"]["title"]
+    evidence_before = copy.deepcopy(before["ledger"]["evidence"])
+    payload = details()
+    payload["file"]["title"] = bad_title
+    upstream.responses.append(result(payload))
+    _, response = invoke(bridge, "getFileDetails", {"researchId": rid, "fileId": "file-a"})
+    assert not response["result"]["isError"]
+    after = store.snapshot(rid)
+    assert after["ledger"]["files"]["file-a"]["title"] == original
+    assert after["ledger"]["files"]["file-a"]["filename"] == payload["file"]["filename"]
+    assert after["ledger"]["evidence"] == evidence_before
+
+
 def navigate(bridge: KnowledgeResearchBridge, rid: str, **arguments: Any) -> dict[str, Any]:
     payload, response = invoke(bridge, "researchNavigate", {"researchId": rid, **arguments})
     assert not response["result"]["isError"], payload

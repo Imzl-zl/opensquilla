@@ -317,7 +317,9 @@ def render_html_report(state: Mapping[str, Any]) -> str:
             if label in seen:
                 continue
             seen.add(label)
-            citation_labels.append(f'<span class="citation">{label}</span>')
+            citation_labels.append(
+                f'<span class="citation"><a href="#ref-{number}">{label}</a></span>'
+            )
         return " ".join(citation_labels)
 
     sections: dict[str, list[str]] = {}
@@ -340,7 +342,9 @@ def render_html_report(state: Mapping[str, Any]) -> str:
         number = reference_numbers[file_id]
         start, end = _page(table)
         page_label = _page_label(start, end, language=language)
-        citation = f'<span class="citation">[{number}{page_label}]</span>'
+        citation = (
+            f'<span class="citation"><a href="#ref-{number}">[{number}{page_label}]</a></span>'
+        )
         parsed = _render_table_text(table["text"], language=language)
         screenshot = table["screenshot"]
         mime = html.escape(str(screenshot["mediaType"]), quote=True)
@@ -370,7 +374,7 @@ def render_html_report(state: Mapping[str, Any]) -> str:
         for section in section_order
     )
     reference_html = "".join(
-        "<li>"
+        f'<li id="ref-{reference["number"]}">'
         + html.escape(str(reference["title"]))
         + ' <span class="filename">['
         + " + ".join(dict.fromkeys(member["format"] for member in reference["members"]))
@@ -395,39 +399,70 @@ def render_html_report(state: Mapping[str, Any]) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
 <style>
-@page {{ size: A4; margin: 18mm 16mm 20mm; @bottom-right {{ content: counter(page); }} }}
-:root {{ color-scheme: light; font-family: Arial, "Noto Sans CJK SC", sans-serif; color: #20252b; }}
-body {{ max-width: 980px; margin: 0 auto; padding: 36px 28px 64px;
-  line-height: 1.68; background: #fff; }}
-header {{ border-bottom: 3px solid #183153; padding-bottom: 18px; margin-bottom: 30px; }}
-h1 {{ margin: 0; font-size: 32px; line-height: 1.25; letter-spacing: 0; }}
-.subtitle {{ margin-top: 8px; color: #59636e; font-size: 15px; }}
-h2 {{ margin: 34px 0 14px; font-size: 22px; letter-spacing: 0; color: #183153; }}
-h3 {{ margin: 0 0 10px; font-size: 14px; letter-spacing: 0; color: #4b5563; }}
-p {{ margin: 0 0 14px; }}
-.citation {{ white-space: nowrap; color: #075985; font-size: .88em; font-weight: 600; }}
+@page {{
+  size: A4; margin: 18mm 16mm 20mm;
+  @bottom-right {{ content: counter(page) " / " counter(pages);
+    font-family: Arial, "Noto Sans CJK SC", sans-serif; font-size: 9pt; color: #66717c; }}
+}}
+:root {{ color-scheme: light; font-family: Arial, "Noto Sans CJK SC", sans-serif; color: #202a35; }}
+body {{ max-width: 860px; margin: 0 auto; padding: 40px 28px 64px;
+  font-size: 16px; line-height: 1.8; background: #fff; }}
+header {{ border-bottom: 2px solid #183153; padding-bottom: 20px; margin-bottom: 28px; }}
+h1 {{ margin: 0; font-size: 32px; line-height: 1.4; letter-spacing: 0; }}
+.subtitle {{ margin-top: 12px; color: #59636e; font-size: 14px; line-height: 1.65; }}
+h2 {{ margin: 34px 0 14px; padding-bottom: 7px; border-bottom: 1px solid #d9e0e6;
+  font-size: 22px; line-height: 1.45; letter-spacing: 0; color: #183153; }}
+h3 {{ margin: 0 0 10px; font-size: 13px; letter-spacing: 0; color: #59636e; }}
+p {{ margin: 0 0 16px; orphans: 3; widows: 3; }}
+main > section:first-child > h2 {{ margin-top: 0; }}
+h1, h2, h3, figcaption {{ break-after: avoid; }}
+.citation {{ white-space: nowrap; color: #315779; font-size: .85em; font-weight: 400; }}
+.citation a {{ color: inherit; text-decoration: none; }}
+.citation a:hover, .citation a:focus-visible {{ text-decoration: underline; }}
 .table-evidence {{ margin: 24px 0 30px; break-inside: avoid; }}
-figcaption {{ font-weight: 700; margin-bottom: 12px; }}
+figcaption {{ font-weight: 700; font-size: .95em; line-height: 1.65; margin-bottom: 12px; }}
 .parsed-table, .original-table {{ margin-top: 14px; overflow-x: auto; }}
-table {{ border-collapse: collapse; width: 100%; font-size: 12px; }}
-th, td {{ border: 1px solid #aab2bb; padding: 6px 8px; text-align: left; vertical-align: top; }}
-th {{ background: #eef2f5; }}
+table {{ border-collapse: collapse; width: 100%; font-size: 13px;
+  line-height: 1.55; font-variant-numeric: tabular-nums; }}
+th, td {{ border: 1px solid #c9d1d9; padding: 7px 9px; text-align: left; vertical-align: top; }}
+th {{ background: #eef2f5; color: #183153; }}
 .align-left {{ text-align: left; }}
 .align-center {{ text-align: center; }}
 .align-right {{ text-align: right; }}
-img {{ display: block; max-width: 100%; height: auto; border: 1px solid #b8c0c8; }}
+img {{ display: block; max-width: 100%; width: auto; height: auto;
+  box-sizing: border-box; border: 1px solid #c9d1d9; }}
 pre {{ white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f7f9; padding: 12px; }}
-.references {{ margin-top: 42px; border-top: 2px solid #183153; padding-top: 18px; }}
+.references {{ margin-top: 40px; border-top: 2px solid #183153; padding-top: 12px; }}
+.references h2 {{ margin-top: 0; border-bottom: 0; }}
 .references ol {{ padding-left: 24px; }}
-.references li {{ margin: 0 0 9px; overflow-wrap: anywhere; }}
+.references li {{ margin: 0 0 10px; padding-left: 3px; font-size: 14px; line-height: 1.65;
+  overflow-wrap: anywhere; break-inside: avoid; scroll-margin-top: 24px; }}
+.references li:target {{ background: #eef2f5; }}
 .filename {{ color: #66717c; }}
 .reading-coverage {{ display: inline-block; margin-left: 10px;
   white-space: nowrap; color: #66717c; }}
 .table-quality-note, .table-warning {{ font-size: 13px; color: #7a341b; }}
+@media screen and (max-width: 600px) {{
+  body {{ padding: 24px 18px 40px; }}
+  h1 {{ font-size: 27px; }}
+  h2 {{ font-size: 20px; }}
+}}
 @media print {{
-  body {{ max-width: none; padding: 0; }}
+  body {{ max-width: none; padding: 0; font-size: 11pt; line-height: 1.74; }}
+  header {{ padding-bottom: 5mm; margin-bottom: 7mm; break-inside: avoid; }}
+  h1 {{ font-size: 23pt; line-height: 1.4; }}
+  .subtitle {{ font-size: 10pt; margin-top: 3mm; }}
+  h2 {{ font-size: 15pt; margin-top: 8mm; margin-bottom: 3.5mm; padding-bottom: 2mm; }}
+  p {{ margin-bottom: 3.5mm; }}
+  .table-evidence {{ margin: 5mm 0 6mm; }}
+  figcaption {{ font-size: 10pt; margin-bottom: 2.5mm; }}
   .parsed-table {{ display: none; }}
+  .original-table {{ margin-top: 0; overflow: visible; }}
   .original-table h3 {{ display: none; }}
+  .original-table img {{ max-height: 210mm; object-fit: contain; }}
+  .references {{ margin-top: 9mm; padding-top: 4mm; }}
+  .references li {{ font-size: 9.5pt; margin-bottom: 2.5mm; }}
+  .table-quality-note, .table-warning {{ font-size: 9pt; }}
 }}
 </style>
 </head>

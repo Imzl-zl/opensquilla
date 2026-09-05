@@ -457,6 +457,9 @@ def test_server_assessment_scope_binding_and_known_omission() -> None:
         "<!-- Generated locally by pdf-md-splitter",
         "Generated locally by pdf-md-splitter.",
         "[page 1]",
+        "\ufeff",
+        "\ufeff \u200b\u2060",
+        "<p>&#xfeff;</p>",
     ],
 )
 def test_converter_and_placeholder_titles_fall_back_without_pollution(title: str) -> None:
@@ -481,6 +484,18 @@ def test_financial_title_characters_are_not_filename_cleanup(title: str) -> None
     state = _references(["<!-- hidden -->" + title])
     label = build_bibliography(state)["references"][0]["title"]
     assert title in label
+
+
+def test_truncated_title_expands_only_from_its_verified_document_package() -> None:
+    state = _references(["2026-07-05 Korea Weekly Kickstart Market perf"])
+    before = copy.deepcopy(state)
+    label = build_bibliography(state)["references"][0]["title"]
+    assert label == "2026-07-05 Korea Weekly Kickstart Market performance and earnings"
+    assert state == before
+    state["ledger"]["files"]["file-0"]["title"] = "A distinct earnings interpretation"
+    assert (
+        "A distinct earnings interpretation" in build_bibliography(state)["references"][0]["title"]
+    )
 
 
 def test_title_selection_is_stable_but_identity_is_independent() -> None:

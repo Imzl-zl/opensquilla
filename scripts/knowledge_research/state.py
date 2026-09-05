@@ -24,6 +24,7 @@ if __package__:
         invalidate_finalized,
         sha256_json,
     )
+    from .references import _clean_title as clean_source_title
     from .references import build_bibliography, cited_file_ids
     from .report import render_html_report
     from .review import review_preparation, review_requirements, table_item_hash
@@ -34,6 +35,9 @@ else:  # pragma: no cover - exercised by deployment entrypoint smoke tests
         canonical_json,
         invalidate_finalized,
         sha256_json,
+    )
+    from references import (  # type: ignore[import-not-found,no-redef]
+        _clean_title as clean_source_title,
     )
     from references import (  # type: ignore[import-not-found,no-redef]
         build_bibliography,
@@ -874,7 +878,12 @@ class KnowledgeResearchStore:
         file_record = {
             "fileId": file_id,
             "documentId": document_id,
-            "title": file_payload.get("title")
+            "title": clean_source_title(str(file_payload.get("title") or ""))
+            or (
+                clean_source_title(str(existing_file.get("title") or ""))
+                if isinstance(existing_file, Mapping)
+                else ""
+            )
             or file_payload.get("filename")
             or "Untitled local document",
             "filename": file_payload.get("filename"),

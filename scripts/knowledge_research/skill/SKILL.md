@@ -1,131 +1,144 @@
 ---
 name: knowledge-local-research
-description: Research local Knowledge and deliver source-grounded HTML/PDF reports with table evidence and provenance. Use for local investigation, deep research, and multi-document synthesis, not internet research.
+description: Research local Knowledge and deliver evidence-grounded analytical HTML/PDF reports with original table exhibits and provenance. Use for local investigation, financial research, and multi-document synthesis; not internet research.
 ---
 
-# Local Knowledge Research 1.2.1
+# Local Knowledge Research 2.0
 
-## Mission
+## Research mandate
 
-Use Knowledge MCP as the only factual source. Knowledge returns Evidence; the Agent
-researches, compares sources, and writes; the sidecar owns evidence state, citations,
-table media, rendering, and provenance. Quality takes priority over speed.
+Use Knowledge MCP as the only factual source. Knowledge supplies Evidence; you
+select, investigate, compare, and explain. The sidecar owns evidence records,
+citations, table media, rendering, and provenance. Quality takes priority over speed.
+Use `mode="deep"` for research, analysis, and reports; `standard` only for an
+explicitly quick, narrow fact lookup. Follow the user's language and question.
 
-Default to `mode="deep"` for research, analysis, or report requests. Use
-`mode="standard"` only when the user explicitly wants a quick, narrow fact lookup.
+Deliver a reasoned answer: what the evidence establishes, why it matters, the
+strongest competing explanation, and what would change the judgment. Distinguish
+source statements, your synthesis, and unresolved questions. A long bibliography
+or successful tool calls do not establish research depth.
 
-## Required Outcome
+## Investigate before drafting
 
-A deep report must:
+1. **Frame and begin.** Identify the question, relevant period, and competing
+   explanations. Call `mcp_researchBegin` and preserve its `researchId`. New report,
+   new research; resume only unfinished work. Distinguish the report date from the
+   dates actually covered by sources. An old forecast is not a current fact; an
+   upload date is not a publication date.
+2. **Discover iteratively.** Call `mcp_search` without `collectionIds`. Use focused
+   queries, then follow concepts, institutions, disagreements, and gaps revealed by
+   reading. Investigate different explanations, not just paraphrases of one thesis.
+   Five chunks per file is a per-call bound, not a total article limit.
+3. **Deepen important files.** Use `mcp_searchByIds` with exactly one of `scopeRefs`
+   or `fileRefs`, at most 20 files per call. Explicitly select returned groups and
+   cover important candidates in successive calls. Ask separate questions about
+   definitions, numbers, mechanisms, qualifications, and contrary evidence.
+   Reformulate empty queries; never downgrade retrieval or change factual sources.
+4. **Read the argument's evidence.** Use `mcp_researchReadEvidence` for core
+   evidence, following continuations. It reads saved evidence, not absent upstream
+   context: search again for missing context. Core files deserve multiple angles;
+   supporting and opposing files require complete relevant passages. A discovered
+   but unread file is unexamined, not proof that information is unavailable.
+5. **Inspect core PDF tables.** Before writing, explicitly call
+   `mcp_getFileDetails` for PDFs supporting the summary, key numbers, main judgments,
+   disagreements, or scenarios. Follow relevant `nextCursor` pages. Review's
+   automatic metadata lookup is not table inspection. Call `mcp_getTable` on useful
+   exhibits; read full headings, units, periods, forecast markers, and footnotes.
+   Markdown uses text chunks. Zero tables requires actual inspection finding no
+   relevant usable tables; do not drop useful evidence to avoid this step.
 
-- Answer the user's question with substantive conclusions, not a retrieval log or
-  stitched document summaries.
-- Connect evidence into key facts, driver chains, disagreements, and conditional
-  outlooks when relevant. Distinguish source statements from Agent synthesis.
-- Ground every factual paragraph and key number in exact nearby evidence after
-  checking source, date, definition, unit, currency, horizon, and conditions.
-- Seek independent support and counterevidence for major conclusions. Explain what
-  each source adds; duplicate formats of one origin are not independent evidence.
-- Use as many relevant sources as substantively improve the answer, without padding.
-  Important discovered candidates must be searched, not merely listed.
-- Read by importance before drafting: examine core files from multiple angles and
-  inspect their PDF tables; read complete relevant passages from supporting,
-  qualifying, and opposing sources; use auxiliary sources only for evidence they add.
-- State material unresolved gaps honestly, while keeping internal process details and
-  nonmaterial technical warnings out of the report.
+Keep a compact working map of questions, evidence, competing views, and open gaps.
+Return to discovery and scoped reading when new facts change that map. Continue
+while an unread important candidate or targeted query could materially change the
+conclusion, mechanism, disagreement, or scenario. Stop at substantive evidence
+saturation, without fixed search, file, citation, word, or table quotas. If focused
+rechecks no longer resolve a material gap, preserve that limit and narrow the
+judgment; do not search indefinitely or manufacture precision.
 
-Research is iterative. Continue while another targeted query or unread important
-candidate could materially change a conclusion, disagreement, causal chain, or
-scenario. Do not optimize for fixed counts of searches, files, words, citations, or
-tables. Stop on material evidence saturation, not the first plausible answer.
+## Financial reasoning, when relevant
 
-## Deliverables
+- Verify each important number as **entity, metric, original value, unit/currency,
+  data period, actual/estimate status, and source** together. Preserve original
+  units when clearer. Verify scale before converting: `1 KRW bn = 10 亿韩元`;
+  `1,000 KRW bn = 1 万亿韩元`. Do not turn aggregate profit into EPS, turnover into
+  net flow, or percentage points into percent.
+- Separate price performance, earnings changes, and valuation changes. Establish
+  comparable dates and definitions before attributing a return to a driver.
+  Forward versus trailing earnings, index versus company data, and full-year versus
+  quarterly figures are not interchangeable. Without comparable inputs, explain
+  mechanisms qualitatively rather than invent a numerical decomposition.
+- Attribute forecasts to their author, publication date, and horizon. Explain
+  disagreements in assumptions or timing; do not average incompatible targets or
+  call a conditional downside scenario a guaranteed floor.
+- Test the strongest alternative explanation. State what supports your view, what
+  weakens it, and what would make you revise it. Future scenarios connect
+  **condition → mechanism → possible outcome → observable signal**. Do not invent
+  probabilities, target prices, current quotes, or precise triggers.
 
-Use human-readable inline citations. The sidecar builds the only bibliography from
-sources actually used by claims or tables, deduplicates it, and adds honest reading
-coverage percentages. Never author, inflate, or explain that bibliography manually;
-ensure each entry has a readable title rather than a bare file type.
+## Write a report worth reading
 
-Publish only the finalized manifest's three artifacts:
+Lead with a direct, qualified judgment and the evidence's time boundary. Develop
+the decisive facts and mechanisms, then material disagreements and conditional
+outlooks. Choose sections that serve this question, not a generic chapter list.
+Use informative titles and one coherent, checkable argument per paragraph:
+**claim → specific support → interpretation → boundary**, as needed. Explain how
+independent sources agree or disagree instead of stitching summaries. Duplicate
+formats of one source do not count as independent confirmation.
 
-- `report.html`: self-contained prose, citations, complete parsed tables, and
-  original PDF table screenshots.
-- `report.pdf`: A4 prose and citations; table sections show only original PDF
-  screenshots, not redrawn tables.
-- `provenance.json`: exact machine provenance, internal IDs, bindings, and hashes.
+Complete initial scoped reading, core evidence reading, and PDF inspection before
+`mcp_researchAddClaims`. Submit supported paragraphs in manageable batches, normally
+3–5, with stable `claimKey`/`batchKey` and exact `evidenceRefs`. Split paragraphs
+when different facts need different sources. A topical match is not support:
+the reference must contain the stated entity, number, period, and qualification.
+Never repair a false claim by swapping in an unrelated valid reference. Replay an
+identical request with the same batch key; a revision keeps its claim key, supplies
+the current hash, and uses a new batch key.
 
-Every published table must have usable complete text and its original PDF crop. Omit
-a table if either is missing or too ambiguous for its intended claim. Continue with
-reliable prose evidence when possible; qualify or remove a core conclusion if that
-table was its only support.
+Write plain prose: the renderer supplies headings and citations, not Markdown
+tables, bold syntax, or hand-authored HTML. Add each useful exhibit through
+`mcp_researchAddTable` in the section whose argument it supports. Its caption
+identifies the comparison, period/units, and analytical significance. Table-only
+numbers belong in that sourced caption unless text evidence separately supports a
+prose claim. Explain what the table cannot establish; do not use it as decoration.
+Keep every nonredundant exhibit that materially improves understanding.
 
-Apply a core-strict, local-best-effort gate. Do not publish when the core question
-lacks reliable evidence, a key assertion remains unsupported, or artifact integrity
-fails. Do not block a sound report for a secondary gap, missing nonessential table,
-or noncritical metadata issue. Disclose only limitations that affect interpretation.
+Every published table needs usable complete text and an original PDF crop. Crop
+availability does not prove visual inspection: claim to have checked an image
+only if it was delivered to your vision input. Unseen but available original crops
+can still accompany verified usable text; visual status stays unknown. Omit unusable tables and use
+reliable text where possible. Qualify or remove a conclusion whose only support
+is unusable. Never draw replacement source tables or invent cells.
 
-Chat, HTML, and PDF must contain no internal IDs, refs, private paths, raw provenance,
-tool narration, or review state. Final chat gives a concise conclusion, material
-limitations, and links to successfully published artifacts.
+## Challenge, revise, and deliver
 
-## Recommended Tool Flow
+Challenge the draft: does each main judgment have specific support, did you read
+the strongest contrary source, and would further targeted reading change the
+answer? Fill material gaps. Do not confuse a finished draft with finished research
+or add a token scoped search only after a failed Finalize.
 
-1. **Begin:** Call `mcp_researchBegin`, match the user's language, and preserve its
-   `researchId`. Start a new research for a new report; resume only current
-   unfinished work.
-2. **Discover:** Use `mcp_search` without `collectionIds`. Read returned chunks,
-   then vary queries using learned concepts, entities, dates, terminology, viewpoints,
-   and material gaps. Its five-chunks-per-file limit is not a total article limit.
-3. **Deepen:** Use `mcp_searchByIds` for context, numbers, definitions, assumptions,
-   corroboration, conflicts, and outlook. Pass exactly one of `scopeRefs` or
-   `fileRefs`, at most 20 files per call. Explicitly select returned groups and
-   cover important candidates in successive calls. Reformulate zero-hit queries;
-   never downgrade retrieval or change factual sources. Complete meaningful scoped
-   search before writing; a search added only after Finalize rejects the report does
-   not satisfy deep research.
-4. **Read:** Use `mcp_researchReadEvidence` on evidence supporting core conclusions,
-   including continuations where needed. Discovery chunks can start research but
-   must not be the entire reading process. This tool does not discover absent
-   context; search again when needed evidence is missing.
-5. **Inspect tables before writing:** A core PDF is any PDF used for an executive
-   summary, main conclusion, key number, major disagreement, or future scenario.
-   Explicitly call `mcp_getFileDetails` for every core PDF and follow relevant
-   `nextCursor` pages. Automatic metadata preparation during Review does not count
-   as table inspection. Call `mcp_getTable` for each relevant usable table and read
-   complete headings, units, footnotes, and text. A zero-table report is valid only
-   after this explicit inspection finds no relevant usable table. Research Markdown
-   through text chunks.
-6. **Write:** Do not call `mcp_researchAddClaims` until initial scoped search, core
-   evidence reading, and core-PDF table inspection are complete. Then add only
-   supported paragraphs, preferably 3-5 at a time in reading order, using stable
-   `claimKey` and `batchKey` values and exact `evidenceRefs`. Add every selected
-   table with `mcp_researchAddTable` using its `tableRef`, section, and informative
-   caption. Do not write references.
-7. **Close gaps:** Review the emerging argument and return to discovery, scoped
-   search, and reading for missing support, unread candidates, disagreements, weak
-   causal links, or unsupported scenarios. Revise as evidence changes.
-8. **Review and deliver:** Start a fresh `mcp_researchNavigate` review, exhaust every
-   `nextCursor`, and compare pending claims and tables with bound sources. Correct
-   mismatches and review changed groups again. Then call `mcp_researchFinalize`;
-   resolve `needs_review` by correcting or narrowing affected content. Publish only
-   `status="finalized"`, and exactly its three manifest entries with
-   `bundle="none"`.
+Create a fresh `mcp_researchNavigate(view="review")`; follow all pending pages.
+For each claim/source group, compare the actual wording with bound evidence,
+especially entity, direction, date, horizon, numeric scale, and conditions.
+Correct the paragraph or caption using its current hash, then review changed
+groups again. Reading pages is not a semantic certificate. Preserve supported
+detail when correcting errors; do not shrink the report merely to pass checks.
 
-## Finalize Gate
+Call `mcp_researchFinalize` only after this work. Resolve `needs_review` through
+correction or justified qualification, never by dropping integrity expectations
+or changing mode. Core conclusions without evidence and broken artifacts block
+publication; secondary gaps and nonessential missing tables do not. Explain only
+limitations affecting interpretation, not routine tool warnings.
 
-Before finalize, confirm that material search gaps and unread important candidates
-have been addressed; every factual paragraph has exact evidence; major conclusions
-have independent support or an explicit single-source limit; relevant conflicts and
-future conditions are represented; scoped search and core reading happened before
-drafting; every core PDF received explicit table inspection; each relevant usable
-table was fetched and added; a zero-table report has a genuine inspected basis;
-selected tables have screenshots; source titles are readable; review pages are
-exhausted; and no internal identifiers or process commentary can enter human-facing
-output. Finalize is a delivery gate, not a probe for deciding which research steps
-to perform afterward.
+Publish exactly the finalized manifest's three artifacts, with `bundle="none"`:
+- `report.html`: self-contained prose, citations, full parsed tables, original crops.
+- `report.pdf`: A4 prose and citations, with original crops for table exhibits.
+- `provenance.json`: machine evidence, internal IDs, bindings, and hashes.
 
-Copy refs and namespaces exactly. Preserve successful publish receipts and retry only
-explicit failures. Consult `TOOLS.md` only when cursor snapshots, grouping, current
-hashes, idempotent retries, progress meanings, or publication recovery arise. Never
-hand-edit generated reports, use web or model memory as evidence, or claim unavailable
-token and cost totals.
+The sidecar generates the only bibliography from sources actually used, including
+deduplication and honest coverage percentages. Do not author or pad it. Check that
+titles are readable; coverage is not comprehension or a target to inflate.
+Chat, HTML, and PDF contain no internal IDs/refs, private paths, tool narration, or
+raw provenance. Final chat gives the answer, material limits, and successful links.
+Consult `TOOLS.md` for schemas, grouped scopes, cursors, hashes, retries, and recovery.
+Preserve successful receipts; never hand-edit generated reports or claim unobserved
+token/cost totals. Successful delivery is not proof of financial correctness.

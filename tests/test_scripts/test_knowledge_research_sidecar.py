@@ -470,6 +470,9 @@ def test_bibliography_pairs_formats_but_preserves_different_issues() -> None:
     assert "[2, text version]" in html
     assert "[1, p. 1]" not in html
     assert html.count('<span class="citation">') == 3
+    assert html.count('href="#ref-1"') == 2
+    assert html.count('href="#ref-2"') == 1
+    assert html.count('id="ref-1"') == html.count('id="ref-2"') == 1
     assert "private-file-" not in html
     assert build_bibliography(copy.deepcopy(state)) == bibliography
 

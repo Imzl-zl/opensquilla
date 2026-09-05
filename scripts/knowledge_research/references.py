@@ -61,7 +61,8 @@ def _clean_title(value: str) -> str:
     parser.close()
     lines = [line.strip() for line in "".join(parser.parts).splitlines()]
     cleaned = " ".join(" ".join(line.split()) for line in lines if not _CONVERTER.fullmatch(line))
-    cleaned = cleaned.strip()
+    # BOM/zero-width transport artifacts are not visible bibliographic titles.
+    cleaned = cleaned.translate(dict.fromkeys(map(ord, "\ufeff\u200b\u2060"))).strip()
     return "" if _PLACEHOLDER.fullmatch(cleaned) else cleaned
 
 
@@ -119,7 +120,7 @@ def _package(record: Mapping[str, Any]) -> tuple[str, str] | None:
 def _label(record: Mapping[str, Any]) -> str:
     path = PurePosixPath(str(record.get("sourcePath") or ""))
     filename = str(record.get("filename") or path.name)
-    stem = _clean(PurePosixPath(filename).stem)
+    stem = _clean_title(_clean(PurePosixPath(filename).stem))
     package = _package(record)
     if package and package[1] == "source_package_variants":
         stem = _clean(path.parent.name)
@@ -128,6 +129,15 @@ def _label(record: Mapping[str, Any]) -> str:
     date = stem[:10] if _DATE.match(stem) else ""
     if not title:
         title = stem or "Local document"
+    elif (
+        package
+        and package[1] == "source_package_variants"
+        and len(title) >= 20
+        and len(stem) > len(title)
+        and stem.casefold().startswith(title.casefold())
+    ):
+        # Expand only an exact truncated prefix from its verified document package.
+        title = stem
     elif title.isupper() and len(title) < 70 and _SERIES.search(title):
         # A series title is not an issue title. Append a verified section only
         # when the source filename did not already provide the issue headline.
