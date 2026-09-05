@@ -37,6 +37,7 @@ DEFAULTS = {
     "html-coder",
     "html-to-pdf",
     "http-fetch",
+    "knowledge-local-research",
     "latex-compile",
     "memory",
     "meta-kid-project-planner",

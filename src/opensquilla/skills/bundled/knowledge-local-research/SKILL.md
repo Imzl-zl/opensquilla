@@ -3,7 +3,7 @@ name: knowledge-local-research
 description: Research local Knowledge and deliver evidence-grounded analytical HTML/PDF reports with original table exhibits and provenance. Use for local investigation, financial research, and multi-document synthesis; not internet research.
 ---
 
-# Local Knowledge Research 2.3
+# Local Knowledge Research 2.4
 
 ## Research mandate
 
@@ -158,7 +158,12 @@ For unused optional parameters use `null` or omit them. First-page cursors and n
 hashes are `null`; never invent `start`, `0`, a snapshot, or a hash.
 
 For `publish_artifact` with `bundle="none"`, omit `bundle_root` or use `null`;
-a directory or empty string is invalid. Confirm each published receipt before claiming delivery.
+a directory or empty string is invalid. Submit all three manifest files as three
+tool calls in the same assistant tool-call batch. The Gateway ends the turn after
+a batch publishes any artifact, including an already-published receipt; separate
+batches would leave the remaining files unpublished. Do all review and preparation
+before this delivery batch. If resuming partial delivery, publish every remaining
+file together. Count only successful receipts as delivered.
 
 Consult `TOOLS.md` for schemas, grouped scopes, cursors, hashes, retries, and recovery.
 Preserve successful receipts; never hand-edit generated reports or claim unobserved
