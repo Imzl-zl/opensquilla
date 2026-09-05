@@ -275,9 +275,10 @@ async def _require_plan_run_ready_for_publish(ctx: ToolContext) -> None:
             ),
         },
         "bundle_root": {
-            "type": "string",
+            "type": ["string", "null"],
             "description": (
-                "Dedicated workspace subdirectory to snapshot when bundle=directory."
+                "Dedicated workspace subdirectory to snapshot when bundle=directory. "
+                "Use null when bundle=none or bundle=auto."
             ),
         },
     },

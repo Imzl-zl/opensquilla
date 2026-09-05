@@ -3,7 +3,7 @@ name: knowledge-local-research
 description: Research local Knowledge and deliver evidence-grounded analytical HTML/PDF reports with original table exhibits and provenance. Use for local investigation, financial research, and multi-document synthesis; not internet research.
 ---
 
-# Local Knowledge Research 2.2
+# Local Knowledge Research 2.3
 
 ## Research mandate
 
@@ -36,6 +36,10 @@ or successful tool calls do not establish research depth.
    cover important candidates in successive calls. Ask separate questions about
    definitions, numbers, mechanisms, qualifications, and contrary evidence.
    Reformulate empty queries; never downgrade retrieval or change factual sources.
+   Boilerplate or off-topic hits from an important newer or contrary candidate leave
+   an unresolved gap: retry using that file's own clues before closing it. State
+   freshness only for evidence actually reviewed unless a complete relevant
+   inventory supports a wider claim.
 4. **Read the argument's evidence.** Use `mcp_researchReadEvidence` for core
    evidence, following continuations. It reads saved evidence, not absent upstream
    context: search again for missing context. Core files deserve multiple angles;
@@ -63,7 +67,10 @@ judgment; do not search indefinitely or manufacture precision.
   data period, actual/estimate status, and source** together. Preserve original
   units when clearer. Verify scale before converting: `1 KRW bn = 10 亿韩元`;
   `1,000 KRW bn = 1 万亿韩元`. Do not turn aggregate profit into EPS, turnover into
-  net flow, or percentage points into percent.
+  net flow, or percentage points into percent. Carry the exact benchmark/entity,
+  observation date, and forecast horizon into the sentence or caption using the
+  number. Verify these in substantive source text, headings or footnotes; do not
+  inherit them from a filename, report date or adjacent statistic.
 - Separate price performance, earnings changes, and valuation changes. Establish
   comparable dates and definitions before attributing a return to a driver.
   Forward versus trailing earnings, index versus company data, and full-year versus
@@ -149,6 +156,9 @@ Chat, HTML, and PDF contain no internal IDs/refs, private paths, tool narration,
 raw provenance. Final chat gives the answer, material limits, and successful links.
 For unused optional parameters use `null` or omit them. First-page cursors and new-item
 hashes are `null`; never invent `start`, `0`, a snapshot, or a hash.
+
+For `publish_artifact` with `bundle="none"`, omit `bundle_root` or use `null`;
+a directory or empty string is invalid. Confirm each published receipt before claiming delivery.
 
 Consult `TOOLS.md` for schemas, grouped scopes, cursors, hashes, retries, and recovery.
 Preserve successful receipts; never hand-edit generated reports or claim unobserved
