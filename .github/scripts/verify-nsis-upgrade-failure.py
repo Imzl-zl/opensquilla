@@ -329,9 +329,44 @@ def installed_registry() -> list[dict]:
 
 
 def version_info(path: Path) -> dict:
-    command = "$v=(Get-Item -LiteralPath $env:OSQ1441_VERSION_FILE).VersionInfo; @{fileVersion=$v.FileVersion; productVersion=$v.ProductVersion}|ConvertTo-Json -Compress"
-    output = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command], env=dict(os.environ, OSQ1441_VERSION_FILE=str(path)), check=True, capture_output=True, text=True, timeout=30)
-    return json.loads(output.stdout)
+    """Read language-independent PE versions without starting PowerShell."""
+    class VS_FIXEDFILEINFO(ctypes.Structure):
+        _fields_ = [(name, wintypes.DWORD) for name in (
+            'dwSignature', 'dwStrucVersion', 'dwFileVersionMS', 'dwFileVersionLS',
+            'dwProductVersionMS', 'dwProductVersionLS', 'dwFileFlagsMask',
+            'dwFileFlags', 'dwFileOS', 'dwFileType', 'dwFileSubtype',
+            'dwFileDateMS', 'dwFileDateLS',
+        )]
+
+    version = ctypes.WinDLL('version', use_last_error=True)
+    version.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+    version.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+    version.GetFileVersionInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+    version.GetFileVersionInfoW.restype = wintypes.BOOL
+    version.VerQueryValueW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.UINT)]
+    version.VerQueryValueW.restype = wintypes.BOOL
+
+    ignored = wintypes.DWORD()
+    size = version.GetFileVersionInfoSizeW(str(path), ctypes.byref(ignored))
+    if not size:
+        raise ctypes.WinError(ctypes.get_last_error())
+    data = ctypes.create_string_buffer(size)
+    if not version.GetFileVersionInfoW(str(path), 0, size, data):
+        raise ctypes.WinError(ctypes.get_last_error())
+    value = ctypes.c_void_p()
+    length = wintypes.UINT()
+    found = version.VerQueryValueW(data, '\\', ctypes.byref(value), ctypes.byref(length))
+    require(found and value.value and length.value >= ctypes.sizeof(VS_FIXEDFILEINFO), f'Missing fixed PE version information: {path}')
+    fixed = ctypes.cast(value, ctypes.POINTER(VS_FIXEDFILEINFO)).contents
+    require(fixed.dwSignature == 0xFEEF04BD, f'Invalid fixed PE version signature: {path}')
+
+    def dotted(ms: int, ls: int) -> str:
+        return '.'.join(str(part) for part in (ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF))
+
+    return {
+        'fileVersion': dotted(fixed.dwFileVersionMS, fixed.dwFileVersionLS),
+        'productVersion': dotted(fixed.dwProductVersionMS, fixed.dwProductVersionLS),
+    }
 
 
 def version_matches(actual: str, expected: str) -> bool:
