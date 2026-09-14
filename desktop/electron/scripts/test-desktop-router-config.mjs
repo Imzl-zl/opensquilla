@@ -10,6 +10,8 @@ import {
 } from '../dist/desktop-router-config.js'
 import { defaultRouterTiers } from '../dist/desktop-router-profiles.js'
 import { normalizeRouterTiers } from '../dist/router-tier-normalization.js'
+import { prepareDesktopPrimaryProviderChange } from '../dist/desktop-primary-provider-change.js'
+import { parse, stringify } from 'smol-toml'
 
 const defaults = {
   c0: { provider: 'tokenrhythm', model: 'deepseek-v4-flash-0731' },
@@ -58,6 +60,16 @@ for (const options of [{ freshConfig: true }, {}]) {
 const fresh = update(customPayload, null, { freshConfig: true })
 assert.equal(fresh.routerPresetBinding, 'follow_primary')
 assert.equal(fresh.routerTiers.c1.model, defaults.c1.model)
+const recoveredDefaults = defaultRouterTiers('openrouter', 'recommended')
+for (const routerMode of ['recommended', 'disabled']) {
+  const recovered = update({}, fresh, {
+    routerMode, providerChangedWithoutConfig: true, defaultTiers: recoveredDefaults,
+  })
+  assert.equal(recovered.routerMode, routerMode)
+  assert.equal(recovered.routerPresetBinding, 'follow_primary')
+  assert.equal(recovered.routerTiers.c1.provider, 'openrouter')
+  assert.equal(recovered.writeIntent, 'replace')
+}
 
 for (const routerPresetBinding of [undefined, 'follow_primary', 'custom']) {
   const existing = { ...legacy, ...(routerPresetBinding ? { routerPresetBinding } : {}) }
@@ -150,5 +162,75 @@ const normalized = normalizeRouterTiers({ ...defaults, c1: { ...defaults.c1,
 assert.equal(normalized.c1.ensembleSelectionMode, 'custom_b5')
 assert.deepEqual(normalized.c1.extra, { temperature: 0.3 })
 assert.doesNotMatch(routerConfigTomlLines({ ...fresh, routerTiers: normalized }).join('\n'), /supports_image/)
+
+const savedPrimary = {
+  llm: { provider: 'openrouter', model: 'old/model' },
+  squilla_router: {
+    enabled: true, preset_binding: 'follow_primary', default_tier: 'c2',
+    rollout_phase: 'observe', cross_provider_tiers: false, confidence_threshold: 0.8,
+    budget_gate: { limit_usd: 2.5, action: 'cap' },
+    tiers: { c1: { provider: 'openrouter', model: 'old/model' } },
+  },
+  llm_ensemble: { enabled: false, selection_mode: 'custom_b5', proposer_max_retries: 3,
+    candidates: [{ provider: 'openrouter', model: 'custom/a' },
+      { provider: 'openai', model: 'custom/b' }],
+  },
+}
+function switchPrimary(config = savedPrimary, extra = {}) {
+  return prepareDesktopPrimaryProviderChange({
+    existingRaw: stringify(config), provider: 'tokenrhythm', defaultTiers: defaults,
+    requestedRouter: { ...fresh, writeIntent: 'preserve' }, ...extra,
+  })
+}
+for (const enabled of [true, false]) {
+  for (const ensembleEnabled of [true, false]) {
+    const saved = structuredClone(savedPrimary)
+    saved.squilla_router.enabled = enabled
+    saved.squilla_router.tier_profile = 'openrouter'
+    saved.llm_ensemble.enabled = ensembleEnabled
+    const original = structuredClone(saved)
+    const result = switchPrimary(saved)
+    const router = parse(result.routerLines.join('\n')).squilla_router
+    assert.equal(router.enabled, enabled)
+    assert.equal(router.rollout_phase, 'observe')
+    assert.equal(router.default_tier, 'c2')
+    assert.equal(router.preset_binding, 'follow_primary')
+    assert.equal(router.tier_profile, undefined)
+    assert.deepEqual(router.budget_gate, saved.squilla_router.budget_gate)
+    assert.equal(router.confidence_threshold, 0.8)
+    assert.ok(Object.values(router.tiers).every(tier => tier.provider === 'tokenrhythm'))
+    assert.equal(result.router.routerTiers.c1.model, defaults.c1.model)
+    assert.equal(result.router.routerTiers.c3.ensembleEnabled, true)
+    assert.deepEqual(parse(result.ensembleLines.join('\n')).llm_ensemble, saved.llm_ensemble)
+    assert.deepEqual(saved, original)
+    assert.equal(result.modelRoutingMode, ensembleEnabled ? 'llm_ensemble' : enabled ? 'squilla_router' : 'direct')
+  }
+}
+const inlineSaved = 'llm = { provider = "openrouter" }\r\nsquilla_router = { enabled = false, preset_binding = "follow_primary", default_tier = "c2" }\r\n'
+const inlineChanged = switchPrimary(savedPrimary, { existingRaw: inlineSaved })
+assert.equal(parse(inlineChanged.routerLines.join('\n')).squilla_router.enabled, false)
+assert.equal(inlineChanged.router.routerTiers.c1.provider, 'tokenrhythm')
+assert.equal(switchPrimary(savedPrimary, { provider: 'openrouter' }), null)
+const custom = structuredClone(savedPrimary)
+custom.squilla_router.preset_binding = 'custom'
+assert.throws(() => switchPrimary(custom), /Saved Router tiers use another provider/)
+custom.squilla_router.enabled = false
+const customChanged = switchPrimary(custom)
+assert.deepEqual(parse(customChanged.routerLines.join('\n')).squilla_router, custom.squilla_router)
+assert.equal(customChanged.router.routerPresetBinding, 'custom', 'actual file overrides stale credential ownership')
+delete custom.squilla_router.preset_binding
+assert.equal(switchPrimary(custom).router.routerPresetBinding, undefined)
+const explicitReset = switchPrimary(custom, {
+  requestedRouter: { ...fresh, writeIntent: 'replace' },
+})
+assert.equal(explicitReset.router.routerPresetBinding, 'follow_primary')
+assert.equal(parse(explicitReset.routerLines.join('\n')).squilla_router.enabled, false)
+assert.deepEqual(parse(explicitReset.ensembleLines.join('\n')).llm_ensemble, custom.llm_ensemble)
+const crossProvider = structuredClone(savedPrimary)
+crossProvider.squilla_router.preset_binding = 'custom'
+crossProvider.squilla_router.cross_provider_tiers = true
+assert.equal(switchPrimary(crossProvider).router.routerTiers.c1.provider, 'openrouter')
+assert.throws(() => switchPrimary(savedPrimary, { existingRaw: 'api_key = "synthetic-private-value' }),
+  error => !error.message.includes('synthetic-private-value') && /Saved configuration is invalid/.test(error.message))
 
 console.log(JSON.stringify({ ok: true, ownership: true, actualRouterPreserved: true, inlineSerializer: true }))

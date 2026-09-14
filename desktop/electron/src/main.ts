@@ -201,6 +201,7 @@ import {
   type RouterPresetBinding,
 } from './desktop-router-config.js'
 import { defaultRouterTiers, ROUTER_PROFILES } from './desktop-router-profiles.js'
+import type { DesktopPrimaryProviderChange } from './desktop-primary-provider-change.js'
 import {
   DESKTOP_RENDERER_ENTRY,
   DESKTOP_RENDERER_SCHEME,
@@ -2829,9 +2830,9 @@ async function saveDesktopCredential(
     : hasRouterMode
       ? undefined
       : existing?.modelRoutingMode
-  const modelRoutingMode = normalizeModelRoutingMode(rawModelRoutingMode, provider, legacyRouterMode)
-  const routerMode = routerModeForModelRoutingMode(modelRoutingMode, provider)
-  const routerUpdate = resolveDesktopRouterUpdate({
+  let modelRoutingMode = normalizeModelRoutingMode(rawModelRoutingMode, provider, legacyRouterMode)
+  let routerMode = routerModeForModelRoutingMode(modelRoutingMode, provider)
+  let routerUpdate = resolveDesktopRouterUpdate({
     payload,
     existing,
     routerMode,
@@ -2840,17 +2841,35 @@ async function saveDesktopCredential(
     // genuine fresh creation/reset are generated only in this trusted process.
     defaultTiers: defaultRouterTiers(provider, normalizeRouterMode('recommended', provider)),
     freshConfig: completingOnboarding && existing === null && existingConfigRaw === null,
+    providerChangedWithoutConfig: existingConfigRaw === null && existing !== null && existing.provider !== provider,
   })
+  let primaryChange: DesktopPrimaryProviderChange | null = null
+  if (payload.provider !== undefined && existingConfigRaw !== null) {
+    const { prepareDesktopPrimaryProviderChange } = await import('./desktop-primary-provider-change.js')
+    primaryChange = prepareDesktopPrimaryProviderChange({
+      existingRaw: existingConfigRaw,
+      provider,
+      defaultTiers: defaultRouterTiers(provider, normalizeRouterMode('recommended', provider)),
+      requestedRouter: routerUpdate,
+      ...(hasModelRoutingMode || hasRouterMode ? { requestedMode: modelRoutingMode } : {}),
+    })
+    if (primaryChange) {
+      routerUpdate = { ...primaryChange.router, writeIntent: 'preserve' }
+      routerMode = primaryChange.router.routerMode as RouterMode
+      modelRoutingMode = primaryChange.modelRoutingMode
+    }
+  }
+  const providerChanged = primaryChange !== null || (existing !== null && existing.provider !== provider)
   const { routerDefaultTier, routerTiers, routerPresetBinding } = routerUpdate
   const searchProvider = normalizeSearchProvider(payload.searchProvider ?? existing?.searchProvider)
   const searchDefaults = searchProviderDefaults(searchProvider)
   const apiKey = String(payload.apiKey || '').trim()
   const routerModel = routerDefaultModel(routerTiers, routerDefaultTier)
-  const directModel = String(payload.model || existing?.model || defaults.model).trim()
-  const model = routerMode === 'disabled'
+  const directModel = String(payload.model || (!providerChanged && existing?.model) || defaults.model).trim()
+  const model = routerMode === 'disabled' || (primaryChange && routerPresetBinding !== 'follow_primary')
     ? directModel
     : routerModel || directModel
-  const baseUrl = String(payload.baseUrl || existing?.baseUrl || defaults.baseUrl).trim() || defaults.baseUrl
+  const baseUrl = String(payload.baseUrl || (!providerChanged && existing?.baseUrl) || defaults.baseUrl).trim() || defaults.baseUrl
   const searchApiKey = String(payload.searchApiKey || '').trim()
   const resolvedApiKey = apiKey || (existing && provider === existing.provider ? decryptApiKey(existing) : '')
   const resolvedSearchApiKey = searchDefaults.requiresApiKey
@@ -2877,7 +2896,8 @@ async function saveDesktopCredential(
     : null
 
   if (defaults.requiresApiKey && !encryptedApiKey) throw new Error('API key is required.')
-  if (modelRoutingMode === 'llm_ensemble' && !modelRoutingModeAllowed(modelRoutingMode, provider)) {
+  if (modelRoutingMode === 'llm_ensemble' && !modelRoutingModeAllowed(modelRoutingMode, provider)
+    && !(primaryChange && !hasModelRoutingMode && !hasRouterMode)) {
     throw new Error('LLM Ensemble requires OpenRouter or TokenRhythm in desktop onboarding.')
   }
   if (!routerModel && routerMode !== 'disabled') throw new Error('Router tiers require a default model.')
@@ -2938,6 +2958,7 @@ async function saveDesktopCredential(
       configLocale,
       consentOverride,
       routerUpdate.writeIntent,
+      primaryChange,
     )
     await runDesktopTelemetryConsentSideEffect(
       'post_commit',
@@ -3104,7 +3125,7 @@ function foreignConfigSectionLines(raw: string): string[] {
 // NOT emit itself, so RPC-written global scalars (llm_request_timeout_seconds,
 // log_level, workspace_dir, diagnostics_enabled, …) survive a regeneration. These
 // must be re-emitted in the preamble (before any [section]) to stay top-level.
-function foreignConfigPreambleLines(raw: string): string[] {
+function foreignConfigPreambleLines(raw: string, excludedKeys: readonly string[] = []): string[] {
   const out: string[] = []
   const routerLines = desktopRouterPreambleLineIndexes(raw)
   for (const [index, rawLine] of raw.split(/\r?\n/).entries()) {
@@ -3113,7 +3134,7 @@ function foreignConfigPreambleLines(raw: string): string[] {
     const key = rawLine.match(/^\s*(?:([A-Za-z0-9_-]+)|"([A-Za-z0-9_-]+)"|'([A-Za-z0-9_-]+)')\s*=/)
     if (!key) continue // blank line or comment
     const keyName = key[1] || key[2] || key[3] || ''
-    if (DESKTOP_OWNED_CONFIG_PREAMBLE_KEYS.includes(keyName)) continue
+    if (DESKTOP_OWNED_CONFIG_PREAMBLE_KEYS.includes(keyName) || excludedKeys.includes(keyName)) continue
     out.push(rawLine)
   }
   return out
@@ -3173,6 +3194,7 @@ function renderDesktopConfigAfterPreflight(
   defaultLocale: DesktopLocale,
   consentOverride: DesktopTelemetryConsent | null = null,
   routerWriteIntent: DesktopRouterWriteIntent = 'preserve',
+  primaryChange: DesktopPrimaryProviderChange | null = null,
 ): string {
   // Retain the legacy privacy writer as the no-scoped-consent path. The
   // scoped writer extends it only when an explicit v2 decision exists.
@@ -3182,7 +3204,7 @@ function renderDesktopConfigAfterPreflight(
   const preservedControlUiLocale = persistedControlUiDefaultLocale(existingRaw)
   if (existingRaw !== null) {
     preservedForeignSections = foreignConfigSectionLines(existingRaw)
-    preservedForeignPreamble = foreignConfigPreambleLines(existingRaw)
+    preservedForeignPreamble = foreignConfigPreambleLines(existingRaw, primaryChange ? ['llm', 'llm_ensemble'] : [])
   }
   const hasPersistedState = preservedForeignPreamble.some((line) => (
     /^\s*(?:state_dir|"state_dir"|'state_dir')\s*=/.test(line)
@@ -3195,7 +3217,7 @@ function renderDesktopConfigAfterPreflight(
     `search_provider = ${tomlString(credential.searchProvider)}`,
     ...(credential.searchApiKeyEnv ? [`search_api_key_env = ${tomlString(credential.searchApiKeyEnv)}`] : []),
     ...preservedForeignPreamble,
-    ...desktopRouterConfigPreambleLines(credential, existingRaw, routerWriteIntent),
+    ...(primaryChange?.routerPreamble ?? desktopRouterConfigPreambleLines(credential, existingRaw, routerWriteIntent)),
     '',
     '[llm]',
     `provider = ${tomlString(credential.provider)}`,
@@ -3203,8 +3225,8 @@ function renderDesktopConfigAfterPreflight(
     ...(credential.apiKeyEnv ? [`api_key_env = ${tomlString(credential.apiKeyEnv)}`] : []),
     `base_url = ${tomlString(credential.baseUrl)}`,
     '',
-    ...desktopRouterConfigTomlLines(credential, existingRaw, routerWriteIntent),
-    ...ensembleConfigTomlLines(credential),
+    ...(primaryChange?.routerLines ?? desktopRouterConfigTomlLines(credential, existingRaw, routerWriteIntent)),
+    ...(primaryChange?.ensembleLines ?? ensembleConfigTomlLines(credential)),
     ...(consentOverride === null
       && parseDesktopTelemetryConsent(existingRaw).reliability.enabled === null
       && parseDesktopTelemetryConsent(existingRaw).growth.enabled === null
@@ -3230,6 +3252,7 @@ async function applyDesktopSettingsPair(
   defaultLocale = desktopLocale,
   consentOverride: DesktopTelemetryConsent | null = null,
   routerWriteIntent: DesktopRouterWriteIntent = 'preserve',
+  primaryChange: DesktopPrimaryProviderChange | null = null,
 ): Promise<RecoveryProtocolResult> {
   const targetProfileKey = desktopProfileKey(profile)
   if (desktopProfileKey() !== targetProfileKey) {
@@ -3247,6 +3270,9 @@ async function applyDesktopSettingsPair(
     }
     const inspection = await preflightDesktopConfigWrite(profile)
     const expectedConfig = await readOptionalDesktopText(join(profile.home, 'config.toml'))
+    if (primaryChange && expectedConfig !== primaryChange.expectedConfig) {
+      throw new Error('Configuration changed while the provider switch was being prepared; retry.')
+    }
     const currentCredential = await readOptionalDesktopText(profile.credentialPath)
     if (currentCredential !== expectedCredential) {
       throw new Error('Desktop credential changed while settings were being prepared; retry.')
@@ -3259,6 +3285,7 @@ async function applyDesktopSettingsPair(
       defaultLocale,
       consentOverride,
       routerWriteIntent,
+      primaryChange,
     )
     const result = await runRecoveryCli(
       profile,

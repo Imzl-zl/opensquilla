@@ -43,6 +43,7 @@ export function resolveDesktopRouterUpdate(options: {
   routerDefaultTier: DesktopRouterConfig['routerDefaultTier']
   defaultTiers: Record<string, RouterTier>
   freshConfig: boolean
+  providerChangedWithoutConfig?: boolean
 }): DesktopRouterConfig & { writeIntent: DesktopRouterWriteIntent } {
   const { payload, existing, routerMode, defaultTiers } = options
   if (options.freshConfig || payload.routerResetToRecommended === true) {
@@ -66,6 +67,17 @@ export function resolveDesktopRouterUpdate(options: {
     && options.routerDefaultTier !== (existing?.routerDefaultTier ?? 'c1')
   const edited = tiersChanged || defaultChanged
   const binding = edited ? 'custom' : normalizeRouterPresetBinding(existing?.routerPresetBinding)
+  // During config recovery the saved credential is the only available owner.
+  // Ordinary saves reconcile against config.toml in the primary-change module.
+  if (options.providerChangedWithoutConfig && binding === 'follow_primary') {
+    return {
+      routerMode,
+      routerDefaultTier: options.routerDefaultTier,
+      routerTiers: normalizeRouterTiers(undefined, defaultTiers),
+      routerPresetBinding: binding,
+      writeIntent: 'replace',
+    }
+  }
   return {
     routerMode,
     routerDefaultTier: options.routerDefaultTier,

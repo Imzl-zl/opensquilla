@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { _electron as electron } from 'playwright'
 import { desktopRouterConfigTomlLines } from '../dist/desktop-router-config.js'
+import { parse, stringify } from 'smol-toml'
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(scriptDir, '..')
@@ -1436,6 +1437,40 @@ try {
   assert.equal(reset.routerPresetBinding, 'follow_primary')
   assert.equal(reset.routerTiers.c1.model, 'deepseek-v4-pro-0813')
   assert.match(await readFile(routerConfigPath, 'utf8'), /preset_binding = "follow_primary"/)
+
+  // Switching a generated Desktop profile must follow config.toml ownership,
+  // update its primary fallback, and retain the saved custom Ensemble plan.
+  const beforeSwitch = parse(await readFile(routerConfigPath, 'utf8'))
+  beforeSwitch.squilla_router.default_tier = 'c2'
+  beforeSwitch.squilla_router.rollout_phase = 'observe'
+  beforeSwitch.squilla_router.budget_gate = { action: 'cap', limit_usd: 2.5 }
+  beforeSwitch.llm_ensemble = { enabled: false, selection_mode: 'custom_b5',
+    candidates: [{ provider: 'tokenrhythm', model: 'custom/a' },
+      { provider: 'openrouter', model: 'custom/b' }],
+    proposer_max_retries: 3,
+  }
+  await writeFile(routerConfigPath, stringify(beforeSwitch))
+  const switched = await saveDesktop({ provider: 'openrouter', apiKey: 'synthetic-openrouter-key' })
+  const afterSwitch = parse(await readFile(routerConfigPath, 'utf8'))
+  assert.equal(switched.provider, 'openrouter')
+  assert.equal(switched.model, switched.routerTiers.c2.model)
+  assert.equal(switched.baseUrl, 'https://openrouter.ai/api/v1')
+  assert.equal(afterSwitch.llm.model, switched.model)
+  assert.equal(afterSwitch.squilla_router.preset_binding, 'follow_primary')
+  assert.equal(afterSwitch.squilla_router.enabled, true)
+  assert.equal(afterSwitch.squilla_router.rollout_phase, 'observe')
+  assert.deepEqual(afterSwitch.squilla_router.budget_gate, beforeSwitch.squilla_router.budget_gate)
+  assert.ok(Object.values(afterSwitch.squilla_router.tiers).every(tier => tier.provider === 'openrouter'))
+  assert.deepEqual(afterSwitch.llm_ensemble, beforeSwitch.llm_ensemble)
+
+  afterSwitch.squilla_router.preset_binding = 'custom'
+  await writeFile(routerConfigPath, stringify(afterSwitch))
+  const beforeRejectedConfig = await readFile(routerConfigPath, 'utf8')
+  const beforeRejectedCredential = await readFile(routerCredentialPath, 'utf8')
+  await assert.rejects(saveDesktop({ provider: 'tokenrhythm', apiKey: 'synthetic-tokenrhythm-key' }),
+    /Saved Router tiers use another provider/)
+  assert.equal(await readFile(routerConfigPath, 'utf8'), beforeRejectedConfig)
+  assert.equal(await readFile(routerCredentialPath, 'utf8'), beforeRejectedCredential)
 
   console.log(JSON.stringify({
     ok: true,

@@ -77,7 +77,8 @@
     "test:live-html-browser": "node --test scripts/test-live-html-business.mjs"
   },
   "dependencies": {
-    "electron-updater": "^6.6.2"
+    "electron-updater": "^6.6.2",
+    "smol-toml": "1.8.0"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
