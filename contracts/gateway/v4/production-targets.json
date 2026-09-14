@@ -692,6 +692,14 @@
     },
     {
       "kind": "method",
+      "wireName": "models.routing.resetRecommended",
+      "roles": [
+        "params",
+        "result"
+      ]
+    },
+    {
+      "kind": "method",
       "wireName": "onboarding.audio.configure",
       "roles": [
         "result"

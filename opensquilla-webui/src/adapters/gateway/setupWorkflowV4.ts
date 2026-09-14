@@ -42,7 +42,7 @@ const object = (result: unknown, method: string): Record<string, unknown> => {
   return result as Record<string, unknown>
 }
 
-function mapSetupError(error: unknown): SetupWorkflowError {
+export function mapSetupError(error: unknown): SetupWorkflowError {
   if (error instanceof SetupWorkflowError) return error
   const failure = readTransportFailure(error)
   const wireCode = failure.code ?? ''

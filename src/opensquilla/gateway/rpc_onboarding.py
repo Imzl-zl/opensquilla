@@ -74,7 +74,10 @@ def _validation_error(
         yield
     except (ValueError, KeyError) as exc:
         from opensquilla.onboarding.mutations import LlmProfileActivationError
+        from opensquilla.onboarding.router_policy import RouterProviderConflictError
 
+        if isinstance(exc, RouterProviderConflictError) and router_provider_id is None:
+            raise RpcHandlerError("ROUTER_PROVIDER_CONFLICT", str(exc), details=exc.details) from exc
         if (
             router_provider_id is not None
             and isinstance(exc, LlmProfileActivationError)

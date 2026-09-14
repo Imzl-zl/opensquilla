@@ -129,7 +129,7 @@
               v-if="section === 'provider'"
               :panel="providerPanel"
               :dirty="providerDraftDirty"
-              :saving="saveAllPending || providerSavePending || primaryMutationPending"
+              :saving="saveAllPending || providerSavePending || primaryMutationPending || modelStrategyRoutingBusy || providerPanel.busy"
               @update-provider-selected="selectProvider"
               @provider-change="onProviderChange"
               @update-provider-field="updateProviderField"
@@ -152,8 +152,9 @@
             <SetupModelStrategyPanel
               v-else-if="section === 'modelStrategy'"
               :panel="modelStrategyPanel"
-              :routing-mode-busy="modelStrategyRoutingBusy"
+              :routing-mode-busy="modelStrategyRoutingBusy || providerPanel.busy"
               @update-strategy="setModelStrategy"
+              @reset-recommended-router="resetRecommendedRouter"
               @update-fixed-provider="setFixedProvider"
               @update-fixed-model="setFixedModel"
               @update-router-default-tier="setRouterDefaultTier"
@@ -300,6 +301,7 @@ const {
   setMemoryAutoCapture,
   setProviderImageGenerationOptIn,
   setModelStrategy,
+  resetRecommendedRouter,
   setFixedProvider,
   setFixedModel,
   setRouterDefaultTier,

@@ -70,7 +70,7 @@ describe('shared primary provider transition', () => {
       await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).not.toBeNull())
       await nextTick()
       await vi.waitFor(() => expect(document.activeElement?.textContent).toBe('取消'))
-      expect(document.querySelector('[role="dialog"]')?.textContent).toContain('使用推荐路由会替换原 tiers')
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain('替换已保存和未保存的 Router 分层编辑')
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
       await expect(pending).resolves.toBeNull()
       expect(submit).toHaveBeenCalledTimes(1)

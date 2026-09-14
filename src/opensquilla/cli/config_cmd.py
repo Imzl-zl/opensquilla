@@ -87,6 +87,9 @@ def config_set(
         )
 
         reconcile_model_routing_write(updated, {key}, previous=cfg)
+        from opensquilla.onboarding.router_policy import validate_router_reactivation
+
+        validate_router_reactivation(cfg, updated, explicit_paths={key})
         persist = persist_config(updated, path=config_path, restart_required=True)
         console.print(f"[{ACCENT_MARKUP}]Config:[/] {persist.path}")
         if persist.backup_path:

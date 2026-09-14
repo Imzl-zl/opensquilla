@@ -24,6 +24,7 @@ PLATFORM_CONFIGURATION_CONTRACT_METHODS: Final = (
     "providers.status",
     "models.routing.get",
     "models.routing.set",
+    "models.routing.resetRecommended",
 )
 
 

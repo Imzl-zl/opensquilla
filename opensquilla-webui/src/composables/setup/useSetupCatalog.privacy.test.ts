@@ -185,6 +185,8 @@ async function mountCatalog() {
     list: async () => ({ models: [], errors: [] }),
     status: async () => ({ activeProvider: null, providerResolution: {}, providers: [], count: 0 }),
     get: async () => ({ mode: 'direct' }),
+    get resetRecommendedSupported() { return hasRpcMethod('models.routing.resetRecommended') === true },
+    resetRecommended: async (command: Record<string, unknown>) => await rpcCall('models.routing.resetRecommended', command),
     setRouting: async (mode: string) => await rpcCall('models.routing.set', { mode }),
     credentials: { reveal: async () => ({}), clear: async () => ({}) },
   } as unknown as import('@/modules/providerConfiguration').ProviderConfiguration)
@@ -1726,13 +1728,13 @@ describe('useSetupCatalog model strategy IA', () => {
     api.setEnsembleMinSuccessful(1)
     expect(api.sectionDirty('modelStrategy')).toBe(false)
     expect(pushToast).toHaveBeenCalledWith(
-      expect.stringContaining('routing write failed'),
+      expect.stringContaining('save result is unknown'),
       { tone: 'danger' },
     )
     app.unmount()
   })
 
-  it('preserves Ensemble lineup edits made while the mode write is pending', async () => {
+  it('preserves existing Ensemble edits and locks changes while the mode write is pending', async () => {
     let resolveRouting!: (value: Record<string, unknown>) => void
     const routingRequest = new Promise<Record<string, unknown>>(resolve => {
       resolveRouting = resolve
@@ -1753,11 +1755,12 @@ describe('useSetupCatalog model strategy IA', () => {
     })
     const { api, app } = await mountCatalog()
 
+    api.addEnsembleCandidate('openrouter', 'user/pending-model', 'proposer')
     const mutation = api.setModelStrategy('ensemble')
     await vi.waitFor(() => {
       expect(rpcCall).toHaveBeenCalledWith('models.routing.set', { mode: 'ensemble' })
     })
-    api.addEnsembleCandidate('openrouter', 'user/pending-model', 'proposer')
+    api.addEnsembleCandidate('openrouter', 'racing/edit', 'proposer')
     resolveRouting({
       mode: 'ensemble',
       selection_mode: 'custom_b5',
@@ -1780,7 +1783,7 @@ describe('useSetupCatalog model strategy IA', () => {
     app.unmount()
   })
 
-  it('preserves Ensemble lineup edits when a pending mode write fails', async () => {
+  it('preserves existing Ensemble edits and locks changes when a pending mode write fails', async () => {
     let rejectRouting!: (error: Error) => void
     const routingRequest = new Promise<Record<string, unknown>>((_resolve, reject) => {
       rejectRouting = reject
@@ -1801,11 +1804,12 @@ describe('useSetupCatalog model strategy IA', () => {
     })
     const { api, app } = await mountCatalog()
 
+    api.addEnsembleCandidate('openrouter', 'user/pending-model', 'proposer')
     const mutation = api.setModelStrategy('ensemble')
     await vi.waitFor(() => {
       expect(rpcCall).toHaveBeenCalledWith('models.routing.set', { mode: 'ensemble' })
     })
-    api.addEnsembleCandidate('openrouter', 'user/pending-model', 'proposer')
+    api.addEnsembleCandidate('openrouter', 'racing/edit', 'proposer')
     rejectRouting(new Error('routing write failed'))
     await mutation
 
@@ -1815,7 +1819,7 @@ describe('useSetupCatalog model strategy IA', () => {
     ]))
     expect(api.sectionDirty('modelStrategy')).toBe(true)
     expect(pushToast).toHaveBeenCalledWith(
-      expect.stringContaining('routing write failed'),
+      expect.stringContaining('save result is unknown'),
       { tone: 'danger' },
     )
     app.unmount()
@@ -5360,7 +5364,7 @@ describe('useSetupCatalog configured provider management', () => {
     app.unmount()
   })
 
-  it('turns the Router off instead of surfacing router_provider_conflict when active removal would leave a foreign tier', async () => {
+  it('keeps active-profile removal atomic without changing its deletion contract', async () => {
     const status = {
       ...statusWithDeepSeek(),
       llmProfileStatus: statusWithDeepSeek().llmProfileStatus.map(profile => (
@@ -5373,10 +5377,7 @@ describe('useSetupCatalog configured provider management', () => {
       if (method === 'onboarding.catalog') return { providers }
       if (method === 'onboarding.status') return status
       if (method === 'channels.status') return { channels: [] }
-      // A custom Router whose tiers still name the *current* primary (openai).
-      // Removing openai promotes deepseek, which the backend would reject with
-      // router_provider_conflict while cross-provider routing is off. The client
-      // must mirror activateProvider and send routerAction: 'disable' instead.
+      // The server validates first and supplies the only permitted conflict actions.
       if (method === 'config.get') {
         return {
           ...configWithProfiles('deepseek'),
@@ -5392,7 +5393,9 @@ describe('useSetupCatalog configured provider management', () => {
       if (method === 'onboarding.models.discover') {
         return { ok: true, source: 'none', models: [] }
       }
-      if (method === 'onboarding.llmProfile.active.remove') return { changed: true }
+      if (method === 'onboarding.llmProfile.active.remove') {
+        return { changed: true }
+      }
       throw new Error(`Unexpected RPC method: ${method}`)
     })
     const { api, app } = await mountCatalog()
@@ -5402,11 +5405,8 @@ describe('useSetupCatalog configured provider management', () => {
     expect(rpcCall).toHaveBeenCalledWith('onboarding.llmProfile.active.remove', {
       providerId: 'openai',
       replacementProviderId: 'deepseek',
-      routerAction: 'disable',
     })
-    expect(pushToast).toHaveBeenCalledWith(
-      'OpenAI was removed. Model Routing was turned off because its saved tiers use another provider.',
-    )
+    expect(confirmChoiceAction).not.toHaveBeenCalled()
     app.unmount()
   })
 
@@ -6883,6 +6883,103 @@ describe('useSetupCatalog image-generation onboarding intent', () => {
 
     expect(api.capabilitiesPanel.value.form.imageProvider).toBe('tokenrhythm')
     expect(api.sectionDirty('capabilities')).toBe(true)
+    app.unmount()
+  })
+})
+
+
+describe('recommended Router reset and activation safety', () => {
+  it('requires explicit reset support and leaves ordinary single-mode operations available', async () => {
+    hasRpcMethod.mockImplementation(method => method !== 'models.routing.resetRecommended')
+    const { api, app } = await primaryTransitionScenario()
+    expect(api.modelStrategyPanel.value.routingSummary?.resetDisabledReason).toContain('Upgrade')
+    expect(await api.resetRecommendedRouter()).toBe(false)
+    await api.setModelStrategy('single')
+    expect(rpcCall).toHaveBeenCalledWith('models.routing.set', { mode: 'direct' })
+    await api.setModelStrategy('router')
+    expect(rpcCall).not.toHaveBeenCalledWith('models.routing.set', { mode: 'router' })
+    app.unmount()
+  })
+
+  it('holds shared locks through reset confirmation and submits the saved provider without changing mode', async () => {
+    const { api, app, saved } = await primaryTransitionScenario(false, (method) => {
+      if (method === 'models.routing.resetRecommended') {
+        saved.squilla_router.tiers.c0.model = 'recommended-reset'
+        saved.squilla_router.preset_binding = 'follow_primary'
+        return { mode: 'router' }
+      }
+      return { changed: true }
+    })
+    api.updateTierField('c0', 'model', 'unsaved-tier')
+    api.setEnsembleMinSuccessful(2)
+    let resolveConfirm!: (value: boolean) => void
+    confirmAction.mockImplementationOnce(() => new Promise(resolve => { resolveConfirm = resolve }))
+    const pending = api.resetRecommendedRouter()
+    expect(api.providerPanel.value.busy).toBe(true)
+    expect(await api.saveProvider()).toBe(false)
+    await api.setModelStrategy('single')
+    api.updateTierField('c0', 'model', 'racing-edit')
+    expect(api.modelStrategyPanel.value.router.tierRows[0]?.model).toBe('unsaved-tier')
+    resolveConfirm(true)
+    expect(await pending).toBe(true)
+    expect(rpcCall).toHaveBeenCalledWith('models.routing.resetRecommended', { providerId: 'openrouter', activateRouter: false })
+    expect(rpcCall).not.toHaveBeenCalledWith('models.routing.set', { mode: 'direct' })
+    expect(api.modelStrategyPanel.value.ensemble.minSuccessfulProposers).toBe(2)
+    expect(api.modelStrategyPanel.value.routingSummary?.hasUnsavedChanges).toBe(true)
+    expect(api.providerPanel.value.busy).toBe(false)
+    app.unmount()
+  })
+
+  it.each(['cancel', 'primary'] as const)('uses only the typed mode conflict choice: %s', async choice => {
+    confirmChoiceAction.mockResolvedValueOnce(choice)
+    const { api, app, saved } = await primaryTransitionScenario(false, method => {
+      if (method === 'models.routing.set') throw routerConflictForPrimary()
+      if (method === 'models.routing.resetRecommended') {
+        saved.squilla_router.enabled = true
+        return { mode: 'router' }
+      }
+      return { changed: true }
+    })
+    saved.squilla_router.enabled = false
+    await api.loadData()
+    api.updateTierField('c0', 'model', 'retained-tier')
+    await api.setModelStrategy('router')
+    if (choice === 'cancel') {
+      expect(api.modelStrategyPanel.value.activeStrategy).toBe('single')
+      expect(api.modelStrategyPanel.value.router.tierRows[0]?.model).toBe('retained-tier')
+      expect(rpcCall).not.toHaveBeenCalledWith('models.routing.resetRecommended', expect.anything())
+    } else {
+      expect(rpcCall).toHaveBeenCalledWith('models.routing.resetRecommended', { providerId: 'openrouter', activateRouter: true })
+    }
+    app.unmount()
+  })
+
+  it('does not authorize conflict actions from prose or replay an uncertain reset', async () => {
+    const { api, app, saved } = await primaryTransitionScenario(false, method => {
+      if (method === 'models.routing.set' || method === 'models.routing.resetRecommended') throw new Error('router_provider_conflict use_recommended')
+      return {}
+    })
+    saved.squilla_router.enabled = false
+    await api.loadData()
+    await api.setModelStrategy('router')
+    expect(confirmChoiceAction).not.toHaveBeenCalled()
+    await api.resetRecommendedRouter()
+    expect(rpcCall.mock.calls.filter(([method]) => method === 'models.routing.resetRecommended')).toHaveLength(1)
+    expect(pushToast).toHaveBeenCalledWith(expect.stringContaining('save result is unknown'), { tone: 'danger' })
+    app.unmount()
+  })
+
+  it('keeps an explicit unready saved primary editable without reporting completed setup', async () => {
+    const { api, app } = await primaryTransitionScenario(true)
+    const original = rpcCall.getMockImplementation()!
+    rpcCall.mockImplementation(async (method, params) => method === 'config.effective'
+      ? { fields: { 'llm.provider': { source: 'config' } } } : original(method, params))
+    await api.loadData()
+    expect(api.providerPanel.value.hasConfiguredPrimaryProvider).toBe(true)
+    expect(api.providerPanel.value.primaryReady).toBe(false)
+    expect(api.providerPanel.value.configuredProviders[0]?.ready).toBe(false)
+    expect(api.sectionStatus('provider').tone).toBe('is-warn')
+    expect(api.providerPanel.value.providerSelected).toBe('openrouter')
     app.unmount()
   })
 })

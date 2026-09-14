@@ -599,10 +599,7 @@ export function useSetupRouterForm() {
           ? 'recommended'
           : 'custom'
     const body = buildRouterPayload(mode, routerDefaultTier.value, tierValues.value)
-    if (hasMixedTierProviders.value) {
-      body.crossProviderTiers = true
-      body.tierProviderMismatch = 'veto'
-    } else if (crossProviderTiers.value) {
+    if (crossProviderTiers.value) {
       body.crossProviderTiers = true
       body.tierProviderMismatch = tierProviderMismatch.value
     }

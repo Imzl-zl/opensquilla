@@ -45,7 +45,8 @@ import { GATEWAY_ACCESS_KEY } from '@/modules/gatewayAccess'
 import { useToasts } from '@/composables/useToasts'
 import { TELEMETRY_NOTICE_VERSION_BY_SCOPE } from '@/telemetry/protocol'
 import { useConfirm } from '@/composables/useConfirm'
-import { submitPrimaryProviderTransition } from '@/composables/setup/primaryProviderTransition'
+import { chooseRouterConflictAction, submitPrimaryProviderTransition } from '@/composables/setup/primaryProviderTransition'
+import { savedRouterActivationSafe } from '@/composables/setup/savedRouterSafety'
 import {
   isSetupCapabilityUnsupported,
   setupSaveFailedMessage as saveFailedMessage,
@@ -64,7 +65,7 @@ import {
   type ConfigurePrimaryProvider,
   type SetupWorkflow,
 } from '@/modules/setupWorkflow'
-import { PROVIDER_CONFIGURATION_KEY, type ProviderConfiguration } from '@/modules/providerConfiguration'
+import { PROVIDER_CONFIGURATION_KEY, ProviderConfigurationError, type ProviderConfiguration } from '@/modules/providerConfiguration'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -508,6 +509,7 @@ const saveAllPending = ref(false)
 const providerSavePending = ref(false)
 const primaryMutationPending = ref(false)
 const modelStrategyRoutingBusy = ref(false)
+const routerResetPending = ref(false)
 // The reactive flag drives UI feedback; this synchronous guard closes the
 // same-microtask double-click window before the first save RPC can yield.
 let saveAllRequestPending = false
@@ -811,6 +813,7 @@ async function loadData(options: {
   preserveProviderDraft?: boolean
   preserveDirtySectionDrafts?: boolean
   forceResetModelStrategy?: boolean
+  forceResetRouter?: boolean
   resetProviderConnection?: boolean
   throwOnError?: boolean
 } = {}) {
@@ -832,7 +835,7 @@ async function loadData(options: {
           behavior: behaviorForm.isDirty.value,
           privacy: privacyDirty.value,
           memoryCapture: promotedForm.captureDirty.value,
-          router: !options.forceResetModelStrategy && routerForm.isDirty.value,
+          router: !options.forceResetModelStrategy && !options.forceResetRouter && routerForm.isDirty.value,
           ensemble: !options.forceResetModelStrategy && ensembleForm.isDirty.value,
           fixedModel: !options.forceResetModelStrategy && (
             modelStrategyForm.fixedProviderDirty.value
@@ -889,6 +892,7 @@ async function loadData(options: {
         })
       }
       if (!preserve?.router) {
+        const retainedVisual = options.forceResetRouter ? routerForm.visualModePatches() : {}
         const binding = String(
           routerDetail.routerBinding
           || config.value.squilla_router?.preset_binding
@@ -904,6 +908,9 @@ async function loadData(options: {
           preserve?.ensemble ? config.value.llm_ensemble?.enabled === true : ensembleForm.enabled.value,
           c3TierEnsembleStatus(routerDetail),
         )
+        if ('squilla_router.visual_mode' in retainedVisual) {
+          routerForm.setRouterVisualMode(String(retainedVisual['squilla_router.visual_mode']))
+        }
         if (preserve?.ensemble) {
           // Saved provider-role metadata describes saved Ensemble settings.
           // Reapply its retained draft as a context change after the Router rebase.
@@ -962,6 +969,7 @@ const hasConfiguredPrimaryProvider = computed(() => {
   )
 })
 const hasSavedProvider = hasConfiguredPrimaryProvider
+const primaryReady = computed(() => hasSavedProvider.value && status.value.llmConfigured === true)
 // Lazy: routerPanel is declared below; this computed is only evaluated from
 // user-triggered strategy switches, long after setup completes.
 const modelStrategyTierCandidates = computed(() => ensembleTierCandidates.value)
@@ -1030,11 +1038,11 @@ const configuredProviders = computed<ConfiguredProviderView[]>(() => {
       providerId: active,
       label: providerCatalogLabel(active),
       active: true,
-      ready: activeCredential.available === true || status.value.llmConfigured === true,
+      ready: primaryReady.value,
       credentialSource: String(activeCredential.source || status.value.llmSource || 'none'),
       credentialEnv: String(activeCredential.envKey || ''),
       endpointSource: '',
-      reason: (activeCredential.available === true || status.value.llmConfigured === true)
+      reason: primaryReady.value
         ? ''
         : String(status.value.llmSource || ''),
       primaryEligible: false,
@@ -1085,7 +1093,7 @@ const configuredProviders = computed<ConfiguredProviderView[]>(() => {
       providerId: id,
       label: providerCatalogLabel(id),
       active: id === active,
-      ready: profile.ready === true,
+      ready: id === active ? primaryReady.value : profile.ready === true,
       credentialSource: profileCredentialUiSource(profile.credentialSource, profile.ready === true),
       credentialEnv: String(profile.credentialEnv || existing?.credentialEnv || ''),
       endpointSource: String(profile.endpointSource || ''),
@@ -1810,6 +1818,22 @@ const routerBinding = computed<'follow_primary' | 'custom' | 'legacy'>(() => {
   return 'legacy'
 })
 const ensembleEnabled = computed(() => config.value.llm_ensemble?.enabled === true)
+const resetRecommendedSupported = computed(() => providerConfiguration.resetRecommendedSupported === true)
+const routingSummary = computed(() => ({
+  providerId: hasSavedProvider.value ? currentProvider.value : '',
+  providerLabel: hasSavedProvider.value ? providerCatalogLabel(currentProvider.value) : '',
+  enabled: modelRouterEnabled.value,
+  binding: routerBinding.value,
+  crossProviderEnabled: config.value.squilla_router?.cross_provider_tiers === true,
+  hasForeignTierProviders: Object.entries(config.value.squilla_router?.tiers || {}).some(([name, tier]) => (
+    name !== 'image' && Boolean(tier.provider) && normalizeProviderId(tier.provider) !== normalizeProviderId(currentProvider.value)
+  )),
+  hasUnsavedChanges: modelStrategyForm.isDirty.value,
+  resetPending: routerResetPending.value,
+  resetDisabledReason: !hasSavedProvider.value ? t('setup.router.chooseProviderFirst')
+    : !resetRecommendedSupported.value ? t('setup.modelStrategy.resetUpgradeHint')
+      : providerInteractionLocked() ? t('setup.modelStrategy.operationPending') : '',
+}))
 function routerConflictsWithTarget(value: string): boolean {
   const target = normalizeProviderId(value)
   if (
@@ -1877,6 +1901,8 @@ const providerPanel = computed(() => {
   const panel = providerFormPanel.value
   return {
     ...panel,
+    busy: providerInteractionLocked(),
+    primaryReady: primaryReady.value,
     // Once a primary provider exists, llm.model is owned by Model Routing.
     // Keep the legacy Model Service field as a synchronized secondary view so
     // older operator habits still work without creating a second draft.
@@ -2035,6 +2061,7 @@ const fixedModelCatalog = computed<DiscoveredModelCatalog>(() => {
 })
 
 const modelStrategyPanel = modelStrategyForm.createPanel({
+  routingSummary,
   hasSavedProvider,
   profileSaveSupported,
   providerLabel: providerSummary,
@@ -2239,7 +2266,7 @@ function sectionStatus(sectionId: string): { label: string; tone: string } {
     return { label: t('setup.connection.disconnected'), tone: 'is-warn' }
   }
   if (sectionId === 'provider') {
-    if (providerEnvMissing.value) return { label: t('setup.readiness.needsAction'), tone: 'is-warn' }
+    if (status.value.llmConfigured === false || providerEnvMissing.value) return { label: t('setup.readiness.needsAction'), tone: 'is-warn' }
     return detailStepStatus((status.value.sectionDetails || {}).llm || (status.value.sectionDetails || {}).provider)
   }
   // General/Security/Advanced are always-valid preference toggles, not
@@ -2440,6 +2467,8 @@ function providerProbeFieldLabel(field: FieldSpec): string {
 function providerInteractionLocked(): boolean {
   return (
     providerSavePending.value
+    || modelStrategyRoutingBusy.value
+    || routerResetPending.value
     || primaryMutationPending.value
     || providerActivationRequestPending
     || providerActivation.value.phase === 'activating'
@@ -2556,7 +2585,7 @@ function isRpcMethodUnavailableError(err: unknown): boolean {
 }
 
 function primaryMutationResultUncertain(error: unknown): boolean {
-  return !(error instanceof SetupWorkflowError) || error.code === 'unavailable'
+  return !(error instanceof SetupWorkflowError || error instanceof ProviderConfigurationError) || error.code === 'unavailable'
 }
 
 async function reportPrimaryMutationFailure(error: unknown) {
@@ -2663,6 +2692,19 @@ async function probeConfiguredProvider(value: string) {
   }
 }
 
+function acceptPrimaryRouterAction(action?: string) {
+  if (action === 'disable') {
+    routerForm.setRouterMode('disabled')
+    routerForm.acceptRoutingModeChange()
+  }
+}
+
+function pushPrimaryRouterOutcome(action: string | undefined, previousBinding: string) {
+  pushToast(t(action === 'disable' ? 'setup.provider.routerOutcomeDisabled'
+    : action === 'use_recommended' || previousBinding === 'follow_primary' ? 'setup.provider.routerOutcomeSynchronized'
+      : 'setup.provider.routerOutcomePreserved'))
+}
+
 async function activateProvider(value: string) {
   if (providerInteractionLocked()) return
   const providerId = normalizeProviderId(value)
@@ -2670,6 +2712,8 @@ async function activateProvider(value: string) {
   if (!providerId || !row?.primaryEligible || row.active) return
   providerActivationRequestPending = true
   primaryMutationPending.value = true
+  let acknowledged = false
+  const previousBinding = routerBinding.value
   try {
     providerActivation.value = {
       providerId,
@@ -2682,17 +2726,15 @@ async function activateProvider(value: string) {
       const transition = await submitPrimaryProviderTransition({
         providerId,
         imageGenerationIntent: 'preserve',
-      }, command => setupWorkflow.profile.activateProfile(command))
+      }, command => setupWorkflow.profile.activateProfile(command), providerCatalogLabel)
       if (!transition) return
-      await loadData({ preserveDirtySectionDrafts: true })
-      pushToast(t(
-        transition.routerAction === 'disable'
-          ? 'setup.toast.providerActivatedRouterDisabled'
-          : 'setup.toast.providerActivated',
-        { provider: providerCatalogLabel(providerId) },
-      ))
+      acknowledged = true
+      acceptPrimaryRouterAction(transition.routerAction)
+      await loadData({ preserveDirtySectionDrafts: true, forceResetRouter: transition.routerAction === 'use_recommended', throwOnError: true })
+      pushPrimaryRouterOutcome(transition.routerAction, previousBinding)
     } catch (err) {
-      await reportPrimaryMutationFailure(err)
+      if (acknowledged) pushToast(t('setup.modelStrategy.savedRefreshFailed'), { tone: 'danger' })
+      else await reportPrimaryMutationFailure(err)
     }
   } finally {
     providerActivation.value = {
@@ -2770,12 +2812,14 @@ function currentFormModelValue(): string {
 }
 
 function setFixedModel(value: string) {
+  if (providerInteractionLocked()) return
   providerOwnsFixedModelDraft.value = false
   providerFixedModelDraftSnapshot.value = null
   updateFixedModel(value)
 }
 
 function setFixedProvider(value: string) {
+  if (providerInteractionLocked()) return
   const provider = normalizeProviderId(value)
   if (!provider || !configuredProviderIds.value.has(provider)) return
   if (provider === modelStrategyForm.fixedProvider.value) return
@@ -2970,6 +3014,8 @@ async function removeProviderProfile(providerId: string) {
     return
   }
   const imageUsedProfileCredential = imageGenerationUsesProfileCredential(provider)
+  primaryMutationPending.value = true
+  try {
   if (!(await confirmProviderDraftDiscard())) return
   const baseConfirmationBody = row.active
     ? t('setup.provider.removeActiveConfirmBody', {
@@ -2985,21 +3031,14 @@ async function removeProviderProfile(providerId: string) {
     primaryLabel: t('setup.provider.removeConfirmPrimary'),
   })
   if (!ok) return
-  let routerAction: 'disable' | undefined
   try {
     if (row.active && replacement) {
-      // Removing the active provider promotes the replacement through the same
-      // primary-swap path as activateProvider. A custom/legacy Router whose
-      // tiers still name another provider cannot be executed safely after that
-      // swap while cross-provider routing is off, so the backend would reject
-      // the removal with an untranslated router_provider_conflict. Detect the
-      // conflict up front and mirror activateProvider: keep the saved tiers,
-      // turn the Router off, and let the operator re-enable it deliberately.
-      routerAction = routerConflictsWithTarget(replacement.providerId) ? 'disable' : undefined
+      // Removing the active profile keeps the existing removal contract. The
+      // replacement is promoted atomically by the Gateway; router conflict
+      // policy belongs to explicit primary changes, not delete semantics.
       await setupWorkflow.profile.removeActiveProfile({
         providerId: provider,
         replacementProviderId: replacement.providerId,
-        ...(routerAction ? { routerAction } : {}),
         ...imageGenerationIntentPayload(replacement.providerId, {
           respectProviderEditorChoice: false,
         }),
@@ -3007,7 +3046,7 @@ async function removeProviderProfile(providerId: string) {
     } else {
       await setupWorkflow.profile.removeProfile(provider)
     }
-    await loadData()
+    await loadData({ preserveDirtySectionDrafts: true, throwOnError: true })
     const providerLabel = providerCatalogLabel(provider)
     const effectiveImage = status.value.imageGenerationState?.effective
     const imageRouteRetained = normalizeProviderId(effectiveImage?.providerId) === provider
@@ -3031,9 +3070,7 @@ async function removeProviderProfile(providerId: string) {
       }), { tone: 'warn' })
     } else {
       pushToast(t(
-        routerAction === 'disable'
-          ? 'setup.toast.providerRemovedRouterDisabled'
-          : 'setup.toast.providerProfileRemoved',
+        'setup.toast.providerProfileRemoved',
         { provider: providerLabel },
       ))
     }
@@ -3045,6 +3082,9 @@ async function removeProviderProfile(providerId: string) {
     if (row.active) {
       await loadData({ preserveFormDrafts: true })
     }
+  }
+  } finally {
+    primaryMutationPending.value = false
   }
 }
 
@@ -3065,6 +3105,7 @@ function envRecoveryCommand(section: string): string {
 }
 
 function setRouterMode(value: string) {
+  if (providerInteractionLocked()) return
   routerForm.setRouterMode(value)
 }
 
@@ -3075,50 +3116,101 @@ function routingModeForStrategy(strategy: ModelStrategy): 'direct' | 'router' | 
 }
 
 async function setModelStrategy(strategy: ModelStrategy) {
-  if (modelStrategyRoutingBusy.value || strategy === modelStrategyForm.activeStrategy.value) return
+  if (providerInteractionLocked() || strategy === modelStrategyForm.activeStrategy.value) return
+  const providerId = currentProvider.value
+  const routerDetail = status.value.sectionDetails?.router || {}
+  if (strategy === 'router' && !resetRecommendedSupported.value && !savedRouterActivationSafe(
+    providerId, config.value.squilla_router?.cross_provider_tiers,
+    config.value.squilla_router?.tiers,
+    routerDetail.routerProviderRoles || routerDetail.router_provider_roles,
+    ensembleEnabled.value,
+  )) {
+    pushToast(t('setup.modelStrategy.activationUpgradeHint'), { tone: 'danger' })
+    return
+  }
   const routerRoutingState = routerForm.captureRoutingModeState()
   const ensembleRoutingState = ensembleForm.captureRoutingModeState()
-
-  // Keep the panel responsive while the mode transition is in flight. The
-  // dedicated routing RPC is authoritative for this global, new-session
-  // default; detailed tier and ensemble drafts still use their existing save
-  // endpoints below.
-  modelStrategyForm.setStrategy(strategy)
-  // Activation may provision a useful local preview. The Gateway owns the
-  // actual first-use lineup, so retain the pre-switch detail draft until its
-  // response identifies what was persisted.
-  ensembleForm.restoreRoutingModeDetails(ensembleRoutingState)
-  routerForm.setEnsembleContext(
-    ensembleForm.selectionMode.value,
-    ensembleForm.enabled.value,
-  )
-  modelStrategyRoutingBusy.value = true
-  try {
-    const response = await providerConfiguration.setRouting(routingModeForStrategy(strategy))
-    ensembleForm.acceptRoutingModeChange(ensembleRoutingState, response)
-    routerForm.setEnsembleContext(
-      ensembleForm.selectionMode.value,
-      ensembleForm.enabled.value,
-    )
-    routerForm.acceptRoutingModeChange()
-  } catch (err) {
+  const restoreMode = () => {
     ensembleForm.restoreRoutingModeState(ensembleRoutingState)
     routerForm.restoreRoutingModeState(routerRoutingState)
-    routerForm.setEnsembleContext(
-      ensembleForm.selectionMode.value,
-      ensembleForm.enabled.value,
-    )
-    pushToast(saveFailedMessage(err), { tone: 'danger' })
+  }
+  modelStrategyRoutingBusy.value = true
+  let acknowledged = false
+  try {
+    modelStrategyForm.setStrategy(strategy)
+    ensembleForm.restoreRoutingModeDetails(ensembleRoutingState)
+    routerForm.setEnsembleContext(ensembleForm.selectionMode.value, ensembleForm.enabled.value)
+    let response
+    let replacedRouter = false
+    try {
+      response = await providerConfiguration.setRouting(routingModeForStrategy(strategy))
+    } catch (error) {
+      if (strategy !== 'router') throw error
+      const action = await chooseRouterConflictAction(error, providerCatalogLabel, resetRecommendedSupported.value)
+      if (!action || action === 'disable') {
+        restoreMode()
+        return
+      }
+      // Only the advertised atomic endpoint may resolve an enable conflict.
+      response = await providerConfiguration.resetRecommended!({ providerId, activateRouter: true })
+      replacedRouter = true
+    }
+    acknowledged = true
+    ensembleForm.acceptRoutingModeChange(ensembleRoutingState, response)
+    routerForm.setEnsembleContext(ensembleForm.selectionMode.value, ensembleForm.enabled.value)
+    routerForm.acceptRoutingModeChange()
+    await loadData(replacedRouter
+      ? { preserveProviderDraft: true, preserveDirtySectionDrafts: true, forceResetRouter: true, throwOnError: true }
+      : { preserveFormDrafts: true, throwOnError: true })
+  } catch (err) {
+    if (!acknowledged) restoreMode()
+    if (acknowledged) pushToast(t('setup.modelStrategy.savedRefreshFailed'), { tone: 'danger' })
+    else if (primaryMutationResultUncertain(err)) {
+      // Observe, never replay, a request whose result is unknown.
+      try { await loadData({ preserveFormDrafts: true, throwOnError: true }) } catch { /* Keep drafts and stale snapshot. */ }
+      pushToast(t('setup.modelStrategy.resultUncertain'), { tone: 'danger' })
+    } else pushToast(saveFailedMessage(err), { tone: 'danger' })
   } finally {
     modelStrategyRoutingBusy.value = false
   }
 }
 
+async function resetRecommendedRouter(): Promise<boolean> {
+  if (routingSummary.value.resetDisabledReason) return false
+  const providerId = currentProvider.value
+  routerResetPending.value = true
+  let acknowledged = false
+  try {
+    if (!await confirm({
+      title: t('setup.modelStrategy.resetTitle', { provider: providerCatalogLabel(providerId) }),
+      body: t('setup.modelStrategy.resetBody', { provider: providerCatalogLabel(providerId) }),
+      primaryLabel: t('setup.modelStrategy.resetConfirm'),
+      primaryClass: 'btn--primary',
+    })) return false
+    await providerConfiguration.resetRecommended!({ providerId, activateRouter: false })
+    acknowledged = true
+    await loadData({ preserveProviderDraft: true, preserveDirtySectionDrafts: true, forceResetRouter: true, throwOnError: true })
+    pushToast(t('setup.modelStrategy.resetSaved', { provider: providerCatalogLabel(providerId) }))
+    return true
+  } catch (error) {
+    if (acknowledged) pushToast(t('setup.modelStrategy.savedRefreshFailed'), { tone: 'danger' })
+    else if (primaryMutationResultUncertain(error)) {
+      try { await loadData({ preserveFormDrafts: true, throwOnError: true }) } catch { /* Preserve drafts. */ }
+      pushToast(t('setup.modelStrategy.resultUncertain'), { tone: 'danger' })
+    } else pushToast(saveFailedMessage(error), { tone: 'danger' })
+    return false
+  } finally {
+    routerResetPending.value = false
+  }
+}
+
 function setRouterDefaultTier(value: string) {
+  if (providerInteractionLocked()) return
   routerForm.setRouterDefaultTier(value)
 }
 
 function setRouterVisualMode(value: string) {
+  if (providerInteractionLocked()) return
   routerForm.setRouterVisualMode(value)
 }
 
@@ -3127,6 +3219,7 @@ function updateTierField(
   key: 'provider' | 'model' | 'thinkingLevel' | 'ensembleEnabled' | 'ensembleSelectionMode',
   value: string | boolean,
 ) {
+  if (providerInteractionLocked()) return
   routerForm.updateTierField(name, key, value)
   if (key === 'provider') {
     void discoverTierProviderModels(String(value || ''))
@@ -3138,70 +3231,86 @@ function updateTierField(
 // ---------------------------------------------------------------------------
 
 function setEnsembleEnabled(value: boolean) {
+  if (providerInteractionLocked()) return
   ensembleForm.setEnabled(value)
   routerForm.setEnsembleContext(ensembleForm.selectionMode.value, ensembleForm.enabled.value)
 }
 
 function setEnsembleSelectionMode(value: string) {
+  if (providerInteractionLocked()) return
   ensembleForm.setSelectionMode(value)
   routerForm.setEnsembleContext(ensembleForm.selectionMode.value, ensembleForm.enabled.value)
 }
 
 function addEnsembleModelOption(value: string) {
+  if (providerInteractionLocked()) return
   ensembleForm.addModelOption(value)
 }
 
 function removeEnsembleModelOption(value: string) {
+  if (providerInteractionLocked()) return
   ensembleForm.removeModelOption(value)
 }
 
 function addEnsembleCandidate(provider: string, model: string, role: EnsembleCandidateRole = 'proposer') {
+  if (providerInteractionLocked()) return
   ensembleForm.addCandidate(provider, model, role)
 }
 
 function removeEnsembleCandidate(candidate: EnsembleCandidateView) {
+  if (providerInteractionLocked()) return
   ensembleForm.removeCandidate(candidate)
 }
 
 function replaceEnsembleCandidate(candidate: EnsembleCandidateView, provider: string, model: string) {
+  if (providerInteractionLocked()) return
   ensembleForm.replaceCandidate(candidate, provider, model)
 }
 
 function setEnsembleAggregator(provider: string, model: string) {
+  if (providerInteractionLocked()) return
   ensembleForm.setAggregator(provider, model)
 }
 
 function importEnsembleTierCandidates() {
+  if (providerInteractionLocked()) return
   ensembleForm.importTierCandidates(modelStrategyTierCandidates.value)
 }
 
 function discoverModelStrategyProviderModels(provider: string) {
+  if (providerInteractionLocked()) return
   void discoverTierProviderModels(provider)
 }
 
 function migrateEnsembleLegacy() {
+  if (providerInteractionLocked()) return
   ensembleForm.migrateLegacyToCustom(ensembleTierCandidates.value, currentProvider.value)
   routerForm.setEnsembleContext(ensembleForm.selectionMode.value, ensembleForm.enabled.value)
 }
 
 function resetEnsembleCandidates() {
+  if (providerInteractionLocked()) return
   ensembleForm.resetModelOptions()
 }
 
 function setEnsembleScheme(scheme: 'preset' | 'custom') {
+  if (providerInteractionLocked()) return
   ensembleForm.setScheme(scheme, staticB5ModeForProvider(currentProvider.value))
   routerForm.setEnsembleContext(ensembleForm.selectionMode.value, ensembleForm.enabled.value)
 }
 
 function setEnsembleMinSuccessful(value: number) {
+  if (providerInteractionLocked()) return
   ensembleForm.setMinSuccessfulProposers(value)
 }
 
 function setEnsembleAllFailedPolicy(value: string) {
+  if (providerInteractionLocked()) return
   ensembleForm.setAllFailedPolicy(value)
 }
 
 function setEnsembleProposerMaxRetries(value: number) {
+  if (providerInteractionLocked()) return
   ensembleForm.setProposerMaxRetries(value)
 }
 
@@ -3612,7 +3721,13 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
     pushToast(t('setup.toast.chooseProvider'), { tone: 'danger' })
     return false
   }
-  const activateProfile = options.activate === true && !editingPrimaryProvider.value && hasConfiguredPrimaryProvider.value
+  // A saved identity with an unavailable primary is still a first usable
+  // configuration. The primary action is labelled “Save and start using” in
+  // that state, so route it through the same atomic upsert+activate RPC as the
+  // explicit secondary “save and make active” action.
+  const activateProfile = !editingPrimaryProvider.value
+    && hasConfiguredPrimaryProvider.value
+    && (options.activate === true || primaryReady.value === false)
   if (activateProfile && !profileUpsertAndActivateSupported.value) {
     pushToast(t('setup.provider.saveActivateUpgradeHint'), { tone: 'danger' })
     return false
@@ -3629,13 +3744,18 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
     pushToast(t('setup.provider.currentSettingsNotTested'), { tone: 'danger' })
     return false
   }
+  let primaryAcknowledged = false
+  let refreshStarted = false
+  let resolvedRouterAction: 'use_recommended' | 'disable' | undefined
+  const previousBinding = routerBinding.value
   const providerOwnedFixedModelDraft = providerOwnsFixedModelDraft.value
   const providerModelDraftWasSubmitted = options.includeProviderModelDraft === true
   const reloadProviderData = async (
     preserveDirtySectionDrafts = false,
     forceResetModelStrategy = false,
   ) => {
-    await loadData({ preserveDirtySectionDrafts, forceResetModelStrategy })
+    refreshStarted = true
+    await loadData({ preserveDirtySectionDrafts, forceResetModelStrategy, forceResetRouter: resolvedRouterAction === 'use_recommended', throwOnError: true })
     if (providerOwnedFixedModelDraft && !replacesPrimaryOnLegacyGateway) {
       providerOwnsFixedModelDraft.value = false
       providerFixedModelDraftSnapshot.value = null
@@ -3696,11 +3816,14 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
         const transition = await submitPrimaryProviderTransition({
           ...payload,
           ...imageGenerationIntentPayload(selectedProviderId),
-        }, command => setupWorkflow.profile.upsertAndActivateProfile(command))
+        }, command => setupWorkflow.profile.upsertAndActivateProfile(command), providerCatalogLabel)
         if (!transition) return false
+        resolvedRouterAction = transition.routerAction
+        acceptPrimaryRouterAction(resolvedRouterAction)
       } else {
         await setupWorkflow.profile.upsertProfile(payload)
       }
+      primaryAcknowledged = true
       if (options.reload !== false) {
         // Saving a routing-only profile refreshes its persisted status without
         // discarding drafts in any other Settings section. Provider-owned
@@ -3711,9 +3834,13 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
         // is held, so restore the saved profile through the internal helper.
         applyConfiguredProviderSelection(selectedProviderId)
       }
-      pushToast(t(activateProfile ? 'setup.toast.providerSavedAndActivated' : 'setup.toast.providerProfileSaved', {
-        provider: providerCatalogLabel(selectedProviderId),
-      }))
+      if (activateProfile) {
+        pushPrimaryRouterOutcome(resolvedRouterAction, previousBinding)
+      } else {
+        pushToast(t('setup.toast.providerProfileSaved', {
+          provider: providerCatalogLabel(selectedProviderId),
+        }))
+      }
       return true
     }
     // Older gateways expose only one active provider and do not implement
@@ -3721,8 +3848,11 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
     // replace-primary flow: the legacy configure RPC atomically swaps the
     // provider, credential, endpoint, and default model after verification.
     const payload = providerConfigurePayload(options.includeProviderModelDraft === true)
-    const transition = await submitPrimaryProviderTransition(payload, command => setupWorkflow.provider.configurePrimary(command))
+    const transition = await submitPrimaryProviderTransition(payload, command => setupWorkflow.provider.configurePrimary(command), providerCatalogLabel)
     if (!transition) return false
+    primaryAcknowledged = true
+    resolvedRouterAction = transition.routerAction
+    acceptPrimaryRouterAction(resolvedRouterAction)
     const restart = await patchConfig(providerPatches)
     // The per-model context-window override rides the deep-merge patch form. Key
     // it on the CURRENT canonical model draft rather than payload.model (which
@@ -3739,10 +3869,15 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
       pushToast(t('setup.toast.envNotVisibleGateway', { envKey: providerEnvKey.value }), { tone: 'danger' })
       return true
     }
-    pushToast(restart ? t('setup.toast.providerSavedRestart') : t('setup.toast.providerSaved'))
+    pushPrimaryRouterOutcome(resolvedRouterAction, previousBinding)
+    if (!resolvedRouterAction) {
+      pushToast(restart ? t('setup.toast.providerSavedRestart') : t('setup.toast.providerSaved'))
+    }
     return true
   } catch (err) {
-    await reportPrimaryMutationFailure(err)
+    if (primaryAcknowledged) {
+      pushToast(t(refreshStarted ? 'setup.modelStrategy.savedRefreshFailed' : 'setup.provider.primarySavedAdditionalFailed'), { tone: 'danger' })
+    } else await reportPrimaryMutationFailure(err)
     return false
   } finally {
     providerSavePending.value = false
@@ -3849,6 +3984,8 @@ async function saveRouter() {
     pushToast(t('setup.toast.chooseProviderRouter'), { tone: 'danger' })
     return
   }
+  if (providerInteractionLocked()) return
+  primaryMutationPending.value = true
   try {
     if (routerForm.routingDirty.value) {
       await setupWorkflow.capability.configureRouter(routerForm.payload())
@@ -3858,10 +3995,14 @@ async function saveRouter() {
     await loadData()
   } catch (err) {
     pushToast(saveFailedMessage(err), { tone: 'danger' })
+  } finally {
+    primaryMutationPending.value = false
   }
 }
 
 async function saveEnsemble() {
+  if (providerInteractionLocked()) return
+  primaryMutationPending.value = true
   try {
     // Partial payload: only the keys the user actually changed; the gateway
     // keeps current values for everything omitted. No restart — the turn
@@ -3874,6 +4015,8 @@ async function saveEnsemble() {
     await loadData()
   } catch (err) {
     pushToast(saveFailedMessage(err), { tone: 'danger' })
+  } finally {
+    primaryMutationPending.value = false
   }
 }
 
@@ -3976,7 +4119,7 @@ async function saveModelStrategy(options: SaveOptions & {
         primaryActivationAttempted = true
         const transition = await submitPrimaryProviderTransition({
           providerId, model: fixedModel, imageGenerationIntent: 'preserve',
-        }, command => setupWorkflow.profile.activateProfile(command))
+        }, command => setupWorkflow.profile.activateProfile(command), providerCatalogLabel)
         if (!transition) {
           if (savedAny) await refreshPartialSave()
           return false
@@ -3996,7 +4139,7 @@ async function saveModelStrategy(options: SaveOptions & {
       savedAny = true
     }
 
-    if (savedAny && options.reload !== false) await loadData()
+    if (savedAny && options.reload !== false) await loadData({ preserveProviderDraft: true, preserveDirtySectionDrafts: true, forceResetModelStrategy: true, throwOnError: true })
     return savedAny
   } catch (err) {
     if (savedAny) await refreshPartialSave(primaryActivationAttempted && primaryMutationResultUncertain(err))
@@ -4150,6 +4293,7 @@ async function copyConfigPath() {
     privacyPanel,
     memoryPanel,
     modelStrategyPanel,
+    resetRecommendedRouter,
     routerPanel,
     ensemblePanel,
     capabilitiesPanel,

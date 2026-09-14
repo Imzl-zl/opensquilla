@@ -711,6 +711,7 @@ async def test_models_routing_set_persist_failure_never_reconciles_live_runtime(
 ) -> None:
     config = GatewayConfig(
         config_path=str(tmp_path / "routing-failure.toml"),
+        llm={"provider": "openrouter", "model": "test-model"},
         llm_ensemble={"enabled": False},
         squilla_router={"enabled": False, "rollout_phase": "observe"},
     )
@@ -905,6 +906,7 @@ async def test_onboarding_ensemble_configure_broadcasts_one_canonical_change(
 ) -> None:
     config = GatewayConfig(
         config_path=str(tmp_path / "ensemble.toml"),
+        llm={"provider": "openrouter", "model": "test-model"},
         llm_ensemble={"enabled": False, "selection_mode": "router_dynamic"},
         squilla_router={"enabled": False, "rollout_phase": "observe"},
     )
@@ -1121,6 +1123,7 @@ async def test_legacy_safe_patch_ensemble_enable_repairs_router_dependency_once(
 ) -> None:
     config = GatewayConfig(
         config_path=str(tmp_path / "legacy-safe.toml"),
+        llm={"provider": "openrouter", "model": "test-model"},
         llm_ensemble={"enabled": False, "selection_mode": "router_dynamic"},
         squilla_router={"enabled": False, "rollout_phase": "observe"},
     )
