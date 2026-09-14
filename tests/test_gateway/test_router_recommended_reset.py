@@ -275,7 +275,10 @@ async def test_pure_tier_changes_publish_existing_routing_event(source, tmp_path
 
     subscriber = MagicMock()
     subscriber.principal = Principal(
-        role="operator", scopes=frozenset({READ_SCOPE}), is_owner=False, authenticated=True,
+        role="operator",
+        scopes=frozenset({READ_SCOPE}),
+        is_owner=False,
+        authenticated=True,
     )
     subscriber.send_event = send_event
     registry = MagicMock()
@@ -318,12 +321,21 @@ async def test_reset_transaction_prepares_then_persists_once_before_install():
     port = MagicMock()
     port.active_config.return_value = config
     port.persist_candidate.side_effect = lambda *_args, **_kwargs: operations.append("persist")
-    port.install_candidate.side_effect = lambda candidate: (operations.append("install"), candidate)[1]
+    port.install_candidate.side_effect = lambda candidate: (
+        operations.append("install"),
+        candidate,
+    )[1]
     runtime = MagicMock()
-    runtime.prepare_reconciliation.side_effect = lambda _candidate: operations.append("prepare-runtime")
+    runtime.prepare_reconciliation.side_effect = lambda _candidate: operations.append(
+        "prepare-runtime"
+    )
     runtime.reconcile = AsyncMock(side_effect=lambda *_args: operations.append("reconcile"))
-    runtime.publish_changed = AsyncMock(side_effect=lambda *_args, **_kwargs: operations.append("publish"))
-    await ModelRouting(port, GatewayModelRoutingPolicyPort(), runtime).reset_recommended("tokenrhythm")
+    runtime.publish_changed = AsyncMock(
+        side_effect=lambda *_args, **_kwargs: operations.append("publish")
+    )
+    await ModelRouting(port, GatewayModelRoutingPolicyPort(), runtime).reset_recommended(
+        "tokenrhythm"
+    )
     assert operations == ["prepare-runtime", "persist", "install", "reconcile", "publish"]
     port.persist_candidate.assert_called_once()
 
@@ -331,10 +343,17 @@ async def test_reset_transaction_prepares_then_persists_once_before_install():
 async def test_guest_cannot_reset_recommended(tmp_path):
     from types import SimpleNamespace
 
-    ctx = RpcContext(conn_id="guest", config=legacy_config(config_path=str(tmp_path / "guest.toml")))
+    ctx = RpcContext(
+        conn_id="guest", config=legacy_config(config_path=str(tmp_path / "guest.toml"))
+    )
     ctx.principal = SimpleNamespace(role="guest", capabilities=("guest",), scopes=frozenset())
-    result = await get_dispatcher().dispatch("guest", "models.routing.resetRecommended", {
-        "providerId": "tokenrhythm",
-    }, ctx)
+    result = await get_dispatcher().dispatch(
+        "guest",
+        "models.routing.resetRecommended",
+        {
+            "providerId": "tokenrhythm",
+        },
+        ctx,
+    )
     assert result.error is not None
     assert not (tmp_path / "guest.toml").exists()

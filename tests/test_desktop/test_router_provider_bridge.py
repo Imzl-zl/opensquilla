@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import itertools
+import json
 import os
 import shutil
 import subprocess
@@ -12,6 +14,10 @@ import pytest
 
 from opensquilla.gateway.config import GatewayConfig
 from opensquilla.onboarding.mutations import LlmProfileActivationError, upsert_llm_provider
+from opensquilla.onboarding.router_policy import (
+    RouterProviderConflictError,
+    validate_router_candidate,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -105,3 +111,82 @@ def test_disabled_legacy_desktop_router_does_not_block_provider_save(desktop_rou
     result = upsert_llm_provider(source, provider_id="tokenrhythm", api_key="synthetic-bridge-key")
     assert result.config.llm.provider == "tokenrhythm"
     assert not result.config.squilla_router.enabled
+
+
+def test_desktop_primary_change_matches_gateway_execution_dependencies(desktop_router_toml):
+    # Exercise compiled production TypeScript against the Gateway policy, with
+    # synthetic saved tables and no credentials, provider calls, or disk writes.
+    cases = []
+    expected = []
+    modes = (None, "custom_b5", "static_tokenrhythm_b5", "static_openrouter_b5", "router_dynamic")
+    for mode, enabled, c3_enabled, legacy_tier, foreign_tier in itertools.product(
+        modes, (False, True), (None, False, True), (None, "c0", "c3"), ("c0", "c3")
+    ):
+        tiers = {
+            tier: {"provider": "tokenrhythm", "model": f"synthetic-{tier}"}
+            for tier in ("c0", "c1", "c2", "c3")
+        }
+        tiers[foreign_tier]["provider"] = "openrouter"
+        if c3_enabled is not None:
+            tiers["c3"]["ensemble_enabled"] = c3_enabled
+        if legacy_tier is not None:
+            tiers[legacy_tier]["ensemble_selection_mode"] = "router_dynamic"
+        ensemble = {
+            "enabled": enabled,
+            "candidates": [
+                {"provider": "tokenrhythm", "model": "synthetic-a"},
+                {"provider": "tokenrhythm", "model": "synthetic-b"},
+            ],
+        }
+        if mode is not None:
+            ensemble["selection_mode"] = mode
+        case = {
+            "llm": {"provider": "openrouter", "model": "synthetic-primary"},
+            "squilla_router": {
+                "enabled": True, "preset_binding": "custom",
+                "cross_provider_tiers": False, "tiers": tiers,
+            },
+            "llm_ensemble": ensemble,
+        }
+        candidate = GatewayConfig.model_validate(case)
+        candidate.llm.provider = "tokenrhythm"
+        try:
+            validate_router_candidate(candidate)
+        except RouterProviderConflictError:
+            expected.append(False)
+        else:
+            expected.append(True)
+        cases.append(case)
+
+    script = """
+import { readFileSync } from 'node:fs';
+import { stringify } from './desktop/electron/node_modules/smol-toml/dist/index.js';
+import { prepareDesktopPrimaryProviderChange }
+  from './desktop/electron/dist/desktop-primary-provider-change.js';
+const cases = JSON.parse(readFileSync(0, 'utf8'));
+const results = cases.map(config => {
+  try {
+    prepareDesktopPrimaryProviderChange({
+      existingRaw: stringify(config), provider: 'tokenrhythm', defaultTiers: {},
+      requestedRouter: {
+        routerMode: 'custom', routerDefaultTier: 'c1', routerTiers: {},
+        routerPresetBinding: 'custom', writeIntent: 'preserve',
+      },
+    });
+    return true;
+  } catch (error) {
+    if (!error.message.startsWith('Saved Router tiers use another provider.')) throw error;
+    return false;
+  }
+});
+process.stdout.write(JSON.stringify(results));
+"""
+    result = subprocess.run(
+        [shutil.which("node"), "--input-type=module", "-e", script],
+        input=json.dumps(cases), cwd=ROOT, check=True, capture_output=True,
+        text=True, encoding="utf-8", timeout=30,
+    )
+    actual = json.loads(result.stdout)
+    assert len(actual) == len(expected)
+    for case, actual_result, expected_result in zip(cases, actual, expected, strict=True):
+        assert actual_result == expected_result, case

@@ -25,6 +25,27 @@ function table(value: unknown): Record<string, unknown> {
     ? value as Record<string, unknown> : {}
 }
 
+/** Match Gateway tier_provider_role: independent plans own their lineup,
+ * while dynamic plans consume all text tiers, including retained C3 models. */
+function executableTextProviders(
+  tiers: Record<string, RouterTier>, ensemble: Record<string, unknown>,
+): string[] {
+  const rows = Object.entries(tiers).filter(([name]) => /^c[0-3]$/.test(name))
+  // Every implicit provider recommendation is an independent plan. Only an
+  // explicitly stored dynamic mode changes the dependency classification.
+  const mode = String(ensemble.selection_mode ?? 'custom_b5').trim()
+  const independent = ['custom_b5', 'static_openrouter_b5', 'static_tokenrhythm_b5'].includes(mode)
+  const dynamic = rows.some(([name, tier]) => tier.ensembleSelectionMode === 'router_dynamic'
+    && (name !== 'c3' || tier.ensembleEnabled === undefined))
+    || (mode === 'router_dynamic' && (ensemble.enabled === true || tiers.c3?.ensembleEnabled === true))
+  return rows.filter(([name, tier]) => {
+    if (dynamic) return true
+    if (tier.ensembleEnabled === undefined && tier.ensembleSelectionMode) return true
+    if (ensemble.enabled === true && independent) return false
+    return name !== 'c3' || tier.ensembleEnabled !== true
+  }).map(([, tier]) => tier.provider.trim().toLowerCase())
+}
+
 /** Resolve ownership from config.toml; the credential mirror may be stale. */
 export function prepareDesktopPrimaryProviderChange(options: {
   existingRaw: string
@@ -69,9 +90,9 @@ export function prepareDesktopPrimaryProviderChange(options: {
     ),
     ...(binding ? { routerPresetBinding: binding } : {}),
   }
-  if (enabled && ensemble.enabled !== true && saved.cross_provider_tiers !== true
-    && Object.entries(router.routerTiers).some(([name, tier]) => (
-      /^c[0-3]$/.test(name) && tier.provider && tier.provider !== options.provider
+  if (enabled && saved.cross_provider_tiers !== true
+    && executableTextProviders(router.routerTiers, ensemble).some(provider => (
+      provider && provider !== options.provider
     ))) {
     throw new Error('Saved Router tiers use another provider. Disable Router, reset to recommended routes, or resolve the provider change in Model Routing.')
   }
