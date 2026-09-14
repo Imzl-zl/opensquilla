@@ -538,14 +538,15 @@ class Audit:
                     key = (dialog['hwnd'], dialog['birth'])
                     record = observed_dialogs.setdefault(key, dict(dialog, firstObservedSeconds=round(now - started, 3), autoAcknowledged=False))
                     record['lastObservedSeconds'] = round(now - started, 3)
-                    ok_buttons = [control for control in dialog['controls'] if control['class'] == 'Button' and control['id'] == 1]
+                    ok_buttons = [control for control in dialog['controls'] if control['class'] == 'Button' and control['text'].replace('&', '').strip().casefold() == 'ok' and control['id'] > 0]
                     # Acknowledge only this exact expected error, on an observed
                     # installer descendant's own dialog. Other windows are read
                     # and recorded; no arbitrary dialog receives an action.
                     expected_error = any('Failed to uninstall old application files.' in control['text'] and re.search(r':\s*2\s*$', control['text']) is not None for control in dialog['controls'])
-                    if expected_error and ok_buttons and not record['autoAcknowledged'] and now - started - record['firstObservedSeconds'] >= 1:
-                        record['acknowledgmentReason'] = 'Expected uninstall-failed code 2 dialog blocks silent installer before SetErrorLevel 2; explicitly sending IDOK to this owned dialog'
-                        record['autoAcknowledged'] = bool(self.win.u.PostMessageW(dialog['hwnd'], 0x111, 1, ok_buttons[0]['hwnd']))
+                    if expected_error and len(ok_buttons) == 1 and not record['autoAcknowledged'] and now - started - record['firstObservedSeconds'] >= 1:
+                        record['acknowledgmentReason'] = 'Expected uninstall-failed code 2 dialog blocks silent installer before SetErrorLevel 2; explicitly invoking the observed OK control on this owned dialog'
+                        record['acknowledgedControlId'] = ok_buttons[0]['id']
+                        record['autoAcknowledged'] = bool(self.win.u.PostMessageW(dialog['hwnd'], 0x111, ok_buttons[0]['id'], ok_buttons[0]['hwnd']))
                         record['acknowledgedSeconds'] = round(now - started, 3)
                 if child.poll() is not None and not active:
                     quiet_since = quiet_since or now

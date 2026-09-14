@@ -19,7 +19,7 @@ on:
       scenario:
         description: Run all scenarios or one targeted diagnostic case
         type: choice
-        options: [all, baseline, readlock, longpath]
+        options: [all, baseline, faults, readlock, longpath]
         default: all
 permissions:
   contents: read
@@ -132,7 +132,7 @@ jobs:
       max-parallel: 6
       matrix:
         baseline: ${{ fromJSON(inputs.candidate == 'official' && '["0.5.3"]' || '["0.5.3","0.5.4"]') }}
-        scenario: ${{ fromJSON(inputs.scenario == 'baseline' && '["baseline"]' || inputs.scenario == 'readlock' && '["readlock"]' || inputs.scenario == 'longpath' && '["longpath"]' || '["baseline","readlock","longpath"]') }}
+        scenario: ${{ fromJSON(inputs.scenario == 'baseline' && '["baseline"]' || inputs.scenario == 'faults' && '["readlock","longpath"]' || inputs.scenario == 'readlock' && '["readlock"]' || inputs.scenario == 'longpath' && '["longpath"]' || '["baseline","readlock","longpath"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
