@@ -489,6 +489,7 @@ class Audit:
         root_process = {'pid': child.pid, 'parentPid': os.getpid(), 'name': executable.name, 'image': str(executable), 'birth': birth, 'depth': 0}
         known[(child.pid, birth)] = root_process
         quiet_since: float | None = None
+        reported_root_exit_wait = False
         completed = False
         try:
             while True:
@@ -503,7 +504,10 @@ class Audit:
                     for item in snapshot.values():
                         if item['birth'] is None or (item['pid'], item['birth']) in known:
                             continue
-                        parents = [parent for key, parent in known.items() if parent['pid'] == item['parentPid'] and key == (item['parentPid'], snapshot.get(item['parentPid'], {}).get('birth'))]
+                        # Toolhelp retains a child's numeric parent PID after
+                        # that parent exits. A newer process may reuse the PID;
+                        # the older child then cannot belong to that new parent.
+                        parents = [parent for key, parent in known.items() if parent['pid'] == item['parentPid'] and parent['birth'] <= item['birth'] and key == (item['parentPid'], snapshot.get(item['parentPid'], {}).get('birth'))]
                         if parents:
                             value = dict(item, depth=max(parent['depth'] for parent in parents) + 1)
                             known[(item['pid'], item['birth'])] = value
@@ -534,6 +538,9 @@ class Audit:
                         record['faultDestination'] = str(destination)
                         record['faultDestinationLength'] = len(str(destination))
                 active = [item for key, item in known.items() if key == (item['pid'], snapshot.get(item['pid'], {}).get('birth'))]
+                if child.poll() is not None and any(item['pid'] != child.pid for item in active) and not reported_root_exit_wait:
+                    print(json.dumps({'stage': label, 'event': 'root-exited-awaiting-descendants', 'exitCode': child.returncode, 'active': active}), flush=True)
+                    reported_root_exit_wait = True
                 for dialog in self.win.dialogs(active):
                     key = (dialog['hwnd'], dialog['birth'])
                     record = observed_dialogs.setdefault(key, dict(dialog, firstObservedSeconds=round(now - started, 3), autoAcknowledged=False))
@@ -557,6 +564,10 @@ class Audit:
                     quiet_since = None
                 if now - started > self.args.timeout_seconds:
                     operation['timedOut'] = True
+                    print(json.dumps({'stage': label, 'event': 'timeout-active-processes', 'active': active}), flush=True)
+                    operation['processes'] = list(known.values())
+                    operation['dialogs'] = list(observed_dialogs.values())
+                    self.save()
                     # No taskkill /IM or process-name kill. Every handle is
                     # compared against its recorded process-start identity.
                     operation['termination'] = [self.win.stop_exact(item) for item in sorted(active, key=lambda item: item['depth'], reverse=True)]

@@ -21,6 +21,11 @@ on:
         type: choice
         options: [all, baseline, faults, readlock, longpath]
         default: all
+      baseline:
+        description: Filter the official starting version for main candidate cases
+        type: choice
+        options: [all, '0.5.3', '0.5.4']
+        default: all
 permissions:
   contents: read
   actions: read
@@ -131,7 +136,7 @@ jobs:
       fail-fast: false
       max-parallel: 6
       matrix:
-        baseline: ${{ fromJSON(inputs.candidate == 'official' && '["0.5.3"]' || '["0.5.3","0.5.4"]') }}
+        baseline: ${{ fromJSON(inputs.candidate == 'official' && '["0.5.3"]' || inputs.baseline == '0.5.3' && '["0.5.3"]' || inputs.baseline == '0.5.4' && '["0.5.4"]' || '["0.5.3","0.5.4"]') }}
         scenario: ${{ fromJSON(inputs.scenario == 'baseline' && '["baseline"]' || inputs.scenario == 'faults' && '["readlock","longpath"]' || inputs.scenario == 'readlock' && '["readlock"]' || inputs.scenario == 'longpath' && '["longpath"]' || '["baseline","readlock","longpath"]') }}
     steps:
       - uses: actions/checkout@v4
