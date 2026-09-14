@@ -1734,6 +1734,73 @@ describe('useSetupCatalog model strategy IA', () => {
     app.unmount()
   })
 
+  it('opens Ensemble as a draft when the primary preset has no two-model lineup', async () => {
+    const saved = {
+      llm: { provider: 'byteplus', model: 'seed-2-0-lite-260228' },
+      squilla_router: {
+        enabled: true,
+        rollout_phase: 'full',
+        preset_binding: 'follow_primary',
+        tier_profile: 'byteplus',
+      },
+      llm_ensemble: { enabled: false, selection_configured: false },
+    }
+    rpcCall.mockImplementation(async (method: string) => {
+      if (method === 'onboarding.catalog') {
+        return {
+          providers: [{
+            providerId: 'byteplus', label: 'BytePlus Ark', runtimeSupported: true,
+            requiresApiKey: true, envKey: 'BYTEPLUS_API_KEY', defaultDirectModel: saved.llm.model,
+            fields: [{ name: 'model', label: 'Model', required: true, default: saved.llm.model }],
+          }],
+        }
+      }
+      if (method === 'onboarding.status') {
+        return {
+          hasConfig: true,
+          llmConfigured: true,
+          llmCredentialStatus: { provider: 'byteplus', available: true, source: 'explicit' },
+        }
+      }
+      if (method === 'channels.status') return { channels: [] }
+      if (method === 'config.get') return structuredClone(saved)
+      if (method === 'config.effective') return { fields: {} }
+      if (method === 'onboarding.models.discover') return { ok: true, source: 'live', models: [] }
+      if (method === 'models.routing.set') throw new Error('Ensemble mode must remain a draft until the lineup is complete')
+      if (method === 'onboarding.router.configure' || method === 'onboarding.ensemble.configure') return {}
+      throw new Error(`Unexpected RPC method: ${method}`)
+    })
+    const { api, app } = await mountCatalog()
+
+    await api.setModelStrategy('ensemble')
+
+    expect(api.modelStrategyPanel.value.activeStrategy).toBe('ensemble')
+    expect(api.modelStrategyPanel.value.ensemble.scheme).toBe('custom')
+    expect(api.modelStrategyPanel.value.ensemble.candidates).toEqual([])
+    expect(api.sectionDirty('modelStrategy')).toBe(true)
+    expect(rpcCall.mock.calls.some(([method]) => method === 'models.routing.set')).toBe(false)
+    expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining('Ensemble mode must remain'), expect.anything())
+
+    await expect(api.saveModelStrategy({ reload: false })).resolves.toBe(false)
+    api.addEnsembleCandidate('byteplus', saved.llm.model, 'proposer')
+    await expect(api.saveModelStrategy({ reload: false })).resolves.toBe(false)
+    expect(rpcCall.mock.calls.some(([method]) => (
+      method === 'onboarding.router.configure' || method === 'onboarding.ensemble.configure'
+    ))).toBe(false)
+
+    api.addEnsembleCandidate('byteplus', 'seed-2-0-pro-260228', 'proposer')
+    await expect(api.saveModelStrategy({ reload: false })).resolves.toBe(true)
+    expect(rpcCall).toHaveBeenCalledWith('onboarding.ensemble.configure', expect.objectContaining({
+      enabled: true,
+      candidates: [
+        expect.objectContaining({ provider: 'byteplus', model: saved.llm.model, role: 'proposer' }),
+        expect.objectContaining({ provider: 'byteplus', model: 'seed-2-0-pro-260228', role: 'proposer' }),
+      ],
+    }))
+
+    app.unmount()
+  })
+
   it('preserves existing Ensemble edits and locks changes while the mode write is pending', async () => {
     let resolveRouting!: (value: Record<string, unknown>) => void
     const routingRequest = new Promise<Record<string, unknown>>(resolve => {

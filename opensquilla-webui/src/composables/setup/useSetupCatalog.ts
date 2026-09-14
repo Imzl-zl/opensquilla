@@ -3115,6 +3115,54 @@ function routingModeForStrategy(strategy: ModelStrategy): 'direct' | 'router' | 
   return 'direct'
 }
 
+function ensembleLineupIdentity(provider: unknown, model: unknown): string {
+  const normalizedProvider = normalizeProviderId(provider)
+  const normalizedModel = String(model || '').trim()
+  return normalizedProvider && normalizedModel
+    ? `${normalizedProvider}\n${normalizedModel}`
+    : ''
+}
+
+/**
+ * A fresh Ensemble selection is a draft when its lineup is not runnable yet.
+ * The mode card must still open the editor so the user can add the second
+ * model; sending `models.routing.set({mode: 'ensemble'})` first would make
+ * the Gateway reject the empty/one-model lineup before the editor is usable.
+ */
+function ensembleLineupReady(): boolean {
+  const selectionMode = String(ensembleForm.selectionMode.value || '').trim()
+  // OpenRouter and TokenRhythm have a server-owned fixed B5 lineup. Their
+  // candidates are intentionally not copied into the custom editor, so the
+  // mode transition can be committed without a local candidate array.
+  if (selectionMode in STATIC_B5_PROFILES || staticB5ModeForProvider(currentProvider.value)) return true
+
+  const identities = new Set<string>()
+  for (const candidate of ensembleForm.candidates.value || []) {
+    if (candidate.enabled === false || String(candidate.role || '').trim().toLowerCase() === 'aggregator') continue
+    const identity = ensembleLineupIdentity(candidate.provider, candidate.model)
+    if (identity) identities.add(identity)
+  }
+  for (const model of ensembleForm.modelOptions.value || []) {
+    const identity = ensembleLineupIdentity(
+      String(model || '').includes('/') ? 'openrouter' : currentProvider.value,
+      model,
+    )
+    if (identity) identities.add(identity)
+  }
+  return identities.size >= 2
+}
+
+function ensembleLineupHint(): string {
+  const proposerCount = (ensembleForm.candidates.value || []).filter(candidate => (
+    candidate.enabled !== false
+    && String(candidate.role || '').trim().toLowerCase() !== 'aggregator'
+    && ensembleLineupIdentity(candidate.provider, candidate.model)
+  )).length
+  return proposerCount > 0
+    ? t('setup.modelStrategy.ensembleMinimum')
+    : t('setup.modelStrategy.ensembleEmpty')
+}
+
 async function setModelStrategy(strategy: ModelStrategy) {
   if (providerInteractionLocked() || strategy === modelStrategyForm.activeStrategy.value) return
   const providerId = currentProvider.value
@@ -3138,8 +3186,25 @@ async function setModelStrategy(strategy: ModelStrategy) {
   let acknowledged = false
   try {
     modelStrategyForm.setStrategy(strategy)
-    ensembleForm.restoreRoutingModeDetails(ensembleRoutingState)
+    // `setStrategy('ensemble')` may seed a custom draft from the current
+    // Router tiers. Preserve an existing user lineup, but do not immediately
+    // restore an empty pre-switch snapshot over that seed.
+    const hasExistingEnsembleDraft = (
+      ensembleRoutingState.lineupDirty
+      || ensembleRoutingState.candidates.length > 0
+      || ensembleRoutingState.modelOptions.length > 0
+    )
+    if (hasExistingEnsembleDraft || (strategy === 'ensemble' && ensembleLineupReady())) {
+      ensembleForm.restoreRoutingModeDetails(ensembleRoutingState)
+    }
     routerForm.setEnsembleContext(ensembleForm.selectionMode.value, ensembleForm.enabled.value)
+
+    // A provider such as BytePlus can have a recommended Router preset but no
+    // two distinct models for Ensemble. Keep the choice local and expose the
+    // lineup editor; the eventual Save will validate the completed snapshot.
+    // This avoids rejecting the user before they can add the second model.
+    if (strategy === 'ensemble' && !ensembleLineupReady()) return
+
     let response
     let replacedRouter = false
     try {
@@ -4045,6 +4110,13 @@ async function saveModelStrategy(options: SaveOptions & {
   }
   if (fixedProviderChanged && (!fixedProviderId || !configuredProviderIds.value.has(fixedProviderId))) {
     pushToast(t('setup.toast.chooseProvider'), { tone: 'danger' })
+    return false
+  }
+  if (hasEnsembleWork && ensembleForm.enabled.value && !ensembleLineupReady()) {
+    // Keep this client-side guard aligned with the Gateway's runtime
+    // requirement. It prevents a predictable rejected write and leaves the
+    // lineup draft intact for the user to complete.
+    pushToast(ensembleLineupHint(), { tone: 'danger' })
     return false
   }
 

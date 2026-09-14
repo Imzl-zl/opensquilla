@@ -73,6 +73,7 @@ from opensquilla.provider.image_generation_policy import (
 )
 from opensquilla.provider.preset_registry import ProviderPreset, get_preset
 from opensquilla.router_tiers import (
+    CUSTOM_B5_SELECTION_MODE,
     DEFAULT_TEXT_TIER,
     HIGHEST_TEXT_TIER,
     ROUTER_TIER_ENSEMBLE_SELECTION_MODES,
@@ -1377,7 +1378,19 @@ def upsert_llm_ensemble(
         and not bool(current.get("enabled", False))
         and selection_mode is None
     ):
-        activation = ensemble_activation_patches(config)
+        # An explicit lineup is the activation input, even when the client
+        # omits the unchanged selection mode from a preview-backed form.
+        # Planning against the old Router here can reject that new lineup or
+        # overwrite it with generated candidates. Preserve a saved mode; on
+        # first configuration, submitted candidates select the custom plan.
+        if candidates is not None:
+            activation = (
+                {}
+                if ensemble_selection_configured(config)
+                else {"llm_ensemble.selection_mode": CUSTOM_B5_SELECTION_MODE}
+            )
+        else:
+            activation = ensemble_activation_patches(config)
         if activation:
             merged["selection_mode"] = activation["llm_ensemble.selection_mode"]
             generated_fields.add("selection_mode")
