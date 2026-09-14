@@ -86,7 +86,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Electron build failed' }
           npm run verify:prepared
           if ($LASTEXITCODE -ne 0) { throw 'Prepared package verification failed' }
-          npx electron-builder --win nsis --x64 --publish never -c.win.signExecutable=false -c.forceCodeSigning=false
+          node -e "const b=require('electron-builder'); b.build({targets:b.Platform.WINDOWS.createTarget('nsis'),publish:'never',config:{win:{signExecutable:false},forceCodeSigning:false}}).catch(e=>{console.error(e);process.exitCode=1})"
           if ($LASTEXITCODE -ne 0) { throw 'NSIS build failed' }
           npm run verify:package
           if ($LASTEXITCODE -ne 0) { throw 'Package verification failed' }
