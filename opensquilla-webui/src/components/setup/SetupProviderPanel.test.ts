@@ -494,7 +494,7 @@ describe('SetupProviderPanel — configured provider management', () => {
     const editing = el.querySelector<HTMLElement>('[data-provider-id="deepseek"]')!
     const activeIdentity = active.querySelector<HTMLButtonElement>('.setup-provider-card__select')!
     const editingIdentity = editing.querySelector<HTMLButtonElement>('.setup-provider-card__select')!
-    expect(active.querySelector('[data-testid="provider-primary-badge"]')?.textContent).toBe('Active')
+    expect(active.querySelector('[data-testid="provider-primary-badge"]')?.textContent?.trim()).toBe('Current primary')
     expect(activeIdentity.getAttribute('aria-label')).toContain('Active')
     expect(active.querySelector('.setup-provider-card__select')?.getAttribute('aria-current')).toBeNull()
     expect(editing.textContent).not.toContain('Active')

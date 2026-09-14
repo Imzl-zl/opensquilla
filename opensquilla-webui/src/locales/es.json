@@ -784,6 +784,7 @@
       "configuredSummary": "{ready} de {count} listos. La prueba envía una pequeña solicitud.",
       "configuredDesc": "Los proveedores guardados siguen disponibles para el enrutamiento hasta que los elimines. La verificación de la configuración envía una solicitud breve al modelo con los ajustes guardados; el proveedor puede aplicar cargos.",
       "activeBadge": "Activo",
+      "currentPrimary": "Proveedor principal actual",
       "editingBadge": "Editando",
       "profileReady": "Credenciales listas",
       "profileNeedsCredentials": "Necesita credenciales",

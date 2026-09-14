@@ -784,6 +784,7 @@
       "configuredSummary": "{ready} von {count} bereit. Der Test sendet eine kleine Modellanfrage.",
       "configuredDesc": "Gespeicherte Anbieter bleiben für das Routing verfügbar, bis sie entfernt werden. Die Konfigurationsprüfung sendet mit den gespeicherten Einstellungen eine kleine Modellanfrage; dabei können Anbietergebühren anfallen.",
       "activeBadge": "Aktiv",
+      "currentPrimary": "Aktueller Hauptanbieter",
       "editingBadge": "In Bearbeitung",
       "profileReady": "Anmeldedaten bereit",
       "profileNeedsCredentials": "Zugangsdaten erforderlich",

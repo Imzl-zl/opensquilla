@@ -746,7 +746,10 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
         v-for="provider in visibleConfiguredProviders"
         :key="provider.providerId"
         class="setup-provider-card"
-        :class="{ 'is-selected': editorOpen && isEditingProvider(provider.providerId) }"
+        :class="{
+          'is-primary': provider.active,
+          'is-selected': editorOpen && isEditingProvider(provider.providerId),
+        }"
         :data-provider-id="provider.providerId"
       >
         <button
@@ -758,7 +761,6 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
         >
           <span class="setup-provider-card__name-row">
             <span class="setup-provider-card__name">{{ provider.label }}</span>
-            <span v-if="provider.active" class="setup-provider-card__badge" data-testid="provider-primary-badge">{{ t('setup.provider.activeBadge') }}</span>
           </span>
           <span
             v-if="showConfiguredProbeStatus(provider.providerId)"
@@ -778,15 +780,29 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
           </span>
         </button>
         <div class="setup-provider-card__actions">
-          <div v-if="!provider.active" class="setup-provider-card__activation">
+          <span
+            v-if="provider.active"
+            class="setup-provider-card__primary-status"
+            data-testid="provider-primary-badge"
+            role="status"
+            :aria-label="`${t('setup.provider.currentPrimary')} — ${provider.label}`"
+          >
+            <Icon name="check" :size="14" aria-hidden="true" />
+            {{ t('setup.provider.currentPrimary') }}
+          </span>
+          <div v-else class="setup-provider-card__activation">
             <button
               type="button"
               class="btn setup-provider-card__activate"
               :disabled="providerBusy || Boolean(activationDisabledReason(provider))"
               :title="activationDisabledReason(provider) || undefined"
               :aria-label="activationActionLabel(provider)"
+              :aria-busy="activationInProgress(provider.providerId) ? 'true' : undefined"
               @click="activateConfigured(provider.providerId)"
-            >{{ activationInProgress(provider.providerId) ? t('setup.provider.activating') : t('setup.provider.makeActive') }}</button>
+            >
+              <span v-if="activationInProgress(provider.providerId)" class="setup-connection__spinner" aria-hidden="true"></span>
+              {{ activationInProgress(provider.providerId) ? t('setup.provider.activating') : t('setup.provider.makeActive') }}
+            </button>
             <small v-if="activationDisabledReason(provider)" class="setup-provider-card__activation-reason">{{ activationDisabledReason(provider) }}</small>
           </div>
           <button
@@ -1448,6 +1464,11 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
+.setup-provider-card.is-primary {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
 .setup-provider-card__identity {
   appearance: none;
   align-self: stretch;
@@ -1500,7 +1521,25 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
 }
 
 .setup-provider-card__activate {
+  align-items: center;
   color: var(--accent);
+  display: inline-flex;
+  gap: var(--sp-2);
+}
+
+.setup-provider-card__primary-status {
+  align-items: center;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  display: inline-flex;
+  font-size: var(--fs-xs);
+  font-weight: 650;
+  gap: var(--sp-1);
+  min-height: 32px;
+  padding: var(--sp-1) var(--sp-2);
+  white-space: nowrap;
 }
 
 .setup-provider-card__delete {
@@ -2020,6 +2059,10 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .setup-connection__spinner {
+    animation: none;
+  }
+
   .provider-dialog-enter-active,
   .provider-dialog-leave-active,
   .provider-dialog-enter-active .setup-provider-modal,

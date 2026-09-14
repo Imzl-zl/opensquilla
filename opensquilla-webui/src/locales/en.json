@@ -866,6 +866,7 @@
       "configuredSummary": "{ready} of {count} ready. Testing sends one small model request.",
       "configuredDesc": "Saved providers remain available for routing until you remove them. Configuration verification sends a small model request using the saved settings; provider charges may apply.",
       "activeBadge": "Active",
+      "currentPrimary": "Current primary",
       "editingBadge": "Editing",
       "profileReady": "Credentials ready",
       "profileNeedsCredentials": "Needs credentials",

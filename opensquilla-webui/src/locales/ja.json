@@ -784,6 +784,7 @@
       "configuredSummary": "{ready} / {count} 準備完了。テストは小さなリクエストを 1 回送信します。",
       "configuredDesc": "保存したプロバイダーは、手動で削除するまでルーティングに利用できます。構成の検証では保存済み設定を使って小規模なモデルリクエストを送信するため、プロバイダー料金が発生する場合があります。",
       "activeBadge": "使用中",
+      "currentPrimary": "現在の主用",
       "editingBadge": "編集中",
       "profileReady": "認証情報の準備完了",
       "profileNeedsCredentials": "認証情報が必要",

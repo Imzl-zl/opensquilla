@@ -866,6 +866,7 @@
       "configuredSummary": "{ready} / {count} 就绪。测试会发送一次小请求。",
       "configuredDesc": "已保存的服务商会一直可用于路由，直到你手动删除。配置验证会使用已保存设置发送一次小型模型请求，服务商可能会计费。",
       "activeBadge": "主用",
+      "currentPrimary": "当前主用",
       "editingBadge": "正在编辑",
       "profileReady": "凭证就绪",
       "profileNeedsCredentials": "需要凭证",

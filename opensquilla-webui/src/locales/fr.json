@@ -784,6 +784,7 @@
       "configuredSummary": "{ready} sur {count} prêts. Le test envoie une petite requête.",
       "configuredDesc": "Les fournisseurs enregistrés restent disponibles pour le routage jusqu’à leur suppression. La vérification de la configuration envoie une petite requête au modèle avec les réglages enregistrés ; des frais du fournisseur peuvent s’appliquer.",
       "activeBadge": "Actif",
+      "currentPrimary": "Fournisseur principal actuel",
       "editingBadge": "En cours d’édition",
       "profileReady": "Identifiants prêts",
       "profileNeedsCredentials": "Identifiants requis",
