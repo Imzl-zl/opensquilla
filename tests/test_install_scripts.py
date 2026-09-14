@@ -336,6 +336,38 @@ def windows_powershell(request: pytest.FixtureRequest) -> str:
     return executable
 
 
+def test_source_powershell_parses_with_legacy_windows_ansi_encoding(
+    windows_powershell: str,
+) -> None:
+    # Windows PowerShell 5.1 loads BOM-less scripts using the system ANSI code page.
+    # On CP1252, a UTF-8 em dash introduces a smart quote and breaks string parsing.
+    env = os.environ.copy()
+    env["SOURCE_INSTALLER_TO_PARSE"] = str(SOURCE_PS1)
+    result = subprocess.run(
+        [
+            windows_powershell,
+            "-NoProfile",
+            "-Command",
+            "& { $ErrorActionPreference = 'Stop'; "
+            "$bytes = [IO.File]::ReadAllBytes($env:SOURCE_INSTALLER_TO_PARSE); "
+            "$source = [Text.Encoding]::GetEncoding(1252).GetString($bytes); "
+            "$tokens = $null; $parseErrors = $null; "
+            "[Management.Automation.Language.Parser]::ParseInput("
+            "$source, [ref]$tokens, [ref]$parseErrors) | Out-Null; "
+            "if ($parseErrors.Count -gt 0) { "
+            "$parseErrors | ForEach-Object { "
+            "[Console]::Error.WriteLine(($_.ErrorId + ': ' + $_.Message)) }; exit 1 }; "
+            "exit 0 }",
+        ],
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def _tool_environment(tmp_path: Path) -> Path:
     return tmp_path / "custom tools 中文" / "opensquilla"
 
@@ -464,6 +496,7 @@ if ($global:fixture.Pip) {
         Microsoft.PowerShell.Core\Get-Command @PSBoundParameters
     }
 }
+$ErrorActionPreference = 'Stop'
 & $env:FAKE_SOURCE_INSTALLER
 exit $LASTEXITCODE
 """,

@@ -158,7 +158,7 @@ function Test-SquillaRouterAssets {
 
     if ($missing.Count -gt 0 -or $pointers.Count -gt 0) {
         if ($WarnOnly) {
-            Write-Host 'install_source.ps1: dry-run note — real recommended install would fail until bundled squilla-router v4 assets are available in this checkout.'
+            Write-Host 'install_source.ps1: dry-run note - real recommended install would fail until bundled squilla-router v4 assets are available in this checkout.'
         }
         else {
             Write-Error 'install_source.ps1: bundled squilla-router v4 assets are unavailable in this checkout.'
@@ -544,11 +544,11 @@ if ($dryRun) {
     if ($script:isWindowsHost -and $installer -eq 'uv') {
         Write-Host 'install_source.ps1: dry-run - would check the uv tool environment for running processes before build and immediately before install.'
     }
-    Write-Host "install_source.ps1: dry-run — would require Node.js >= $minimumNodeVersion and npm"
-    Write-Host "install_source.ps1: dry-run — would run in ${webuiDir}: npm ci"
-    Write-Host "install_source.ps1: dry-run — would run in ${webuiDir}: npm run build"
-    Write-Host "install_source.ps1: dry-run — would run: $installCmd"
-    Write-Host "install_source.ps1: dry-run — prefix: $prefix"
+    Write-Host "install_source.ps1: dry-run - would require Node.js >= $minimumNodeVersion and npm"
+    Write-Host "install_source.ps1: dry-run - would run in ${webuiDir}: npm ci"
+    Write-Host "install_source.ps1: dry-run - would run in ${webuiDir}: npm run build"
+    Write-Host "install_source.ps1: dry-run - would run: $installCmd"
+    Write-Host "install_source.ps1: dry-run - prefix: $prefix"
     Test-SquillaRouterAssets -WarnOnly
     Write-Banner
     if ($env:OPENSQUILLA_LISTEN -eq '0.0.0.0') {
