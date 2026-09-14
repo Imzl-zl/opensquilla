@@ -76,9 +76,11 @@ async def _handle_models_routing_reset_recommended(
     params: dict | None,
     ctx: RpcContext,
 ) -> dict[str, Any]:
-    from opensquilla.contracts.generated.v4.models_routing_reset_recommended import Params
+    from opensquilla.gateway.adapters.platform_configuration_contract import (
+        validate_reset_recommended_params,
+    )
 
-    Params.model_validate(params, strict=True)
+    params = validate_reset_recommended_params(params)
     if not isinstance(params, dict) or not isinstance(params.get("providerId"), str):
         raise ValueError("params.providerId is required")
     if not params["providerId"].strip():

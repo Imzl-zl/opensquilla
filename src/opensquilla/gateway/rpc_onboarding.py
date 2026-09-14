@@ -587,8 +587,8 @@ async def _llm_profile_upsert_and_activate(params: Any, ctx: RpcContext) -> dict
     from pydantic import ValidationError
 
     from opensquilla.application.profile_lifecycle import UpsertAndActivateProfile
-    from opensquilla.contracts.generated.v4.onboarding_llm_profile_upsert_and_activate import (
-        OnboardingLlmProfileUpsertAndActivateParams,
+    from opensquilla.gateway.adapters.platform_setup_contract import (
+        validate_upsert_and_activate_params,
     )
     from opensquilla.onboarding.mutations import LlmProfileActivationError
 
@@ -599,13 +599,12 @@ async def _llm_profile_upsert_and_activate(params: Any, ctx: RpcContext) -> dict
             "INVALID_REQUEST", "Invalid save-and-activate profile parameters"
         )
     try:
-        validated = OnboardingLlmProfileUpsertAndActivateParams.model_validate(params)
+        p = validate_upsert_and_activate_params(params)
     except ValidationError as exc:
         # Do not echo submitted credential fields from a validation exception.
         raise RpcHandlerError(
             "INVALID_REQUEST", "Invalid save-and-activate profile parameters"
         ) from exc
-    p = validated.model_dump(exclude_unset=True)
     provider_id = p["providerId"]
     try:
         result = await _profile_lifecycle(ctx).upsert_and_activate(
