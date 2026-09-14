@@ -2,6 +2,8 @@
 ; Their atomicRMDir moves old files into $PLUGINSDIR\old-install using MAX_PATH APIs.
 ; Never change the first attempt, the machine environment, or the new application's
 ; environment. Only retry exit code 2 with a shorter, writable old-install parent.
+; Capture the child environment and restore the parent BEFORE the old uninstaller
+; starts: a restore failure must never strand an already removed old installation.
 
 !include "LogicLib.nsh"
 
@@ -11,6 +13,18 @@ Var /GLOBAL osqLegacyTempChanged
 Var /GLOBAL osqLegacySavedTemp
 Var /GLOBAL osqLegacySavedTmp
 Var /GLOBAL osqLegacyRestoreFailed
+Var /GLOBAL osqLegacyChildEnvironment
+Var /GLOBAL osqLegacyCreateFailed
+
+!if ${NSIS_PTR_SIZE} > 4
+  !define OSQ_LEGACY_STARTUP_SIZE 104
+  !define OSQ_LEGACY_PROCESS_SIZE 24
+  !define OSQ_LEGACY_MESSAGE_SIZE 48
+!else
+  !define OSQ_LEGACY_STARTUP_SIZE 68
+  !define OSQ_LEGACY_PROCESS_SIZE 16
+  !define OSQ_LEGACY_MESSAGE_SIZE 28
+!endif
 
 !macro OpenSquillaLegacyRetry
   StrCpy $osqLegacyRetry 0
@@ -70,6 +84,7 @@ Function OpenSquillaLegacyTempPrepare
   StrCpy $osqLegacyTempChanged 0
   StrCpy $osqLegacySavedTemp 0
   StrCpy $osqLegacySavedTmp 0
+  StrCpy $osqLegacyChildEnvironment 0
   ${If} $osqLegacyRetry != 1
     Goto osqLegacyPrepareDone
   ${EndIf}
@@ -139,6 +154,14 @@ Function OpenSquillaLegacyTempPrepare
     Call OpenSquillaLegacyTempRestore
     Goto osqLegacyPrepareFatal
   ${EndIf}
+  ; Windows supplies the complete, sorted Unicode block, including hidden drive
+  ; current-directory entries. Never rebuild or log the full environment.
+  System::Call 'kernel32::GetEnvironmentStringsW() p.r1'
+  StrCpy $osqLegacyChildEnvironment $1
+  Call OpenSquillaLegacyTempRestore
+  ${If} $osqLegacyChildEnvironment == 0
+    Goto osqLegacyPrepareFatal
+  ${EndIf}
   DetailPrint "Retrying the previous uninstaller with a shorter temporary path."
   Goto osqLegacyPrepareDone
 
@@ -186,6 +209,109 @@ Function OpenSquillaLegacyTempRestore
   ${EndIf}
 FunctionEnd
 
+Function OpenSquillaExecWithLegacyEnvironment
+  ; The command line is identical to ExecWait and writable for CreateProcessW.
+  Exch $0
+  Push $1
+  Push $2
+  Push $3
+  Push $4
+  Push $5
+  Push $6
+  Push $7
+  StrCpy $osqLegacyCreateFailed 0
+  StrCpy $1 0
+  StrCpy $2 0
+  StrCpy $3 0
+  StrCpy $4 0
+
+  ; Allocate all bookkeeping BEFORE starting the old uninstaller. GPTR zeroes
+  ; STARTUPINFO; only cb is set, exactly as NSIS v3.04 myCreateProcess does.
+  System::Call 'kernel32::GlobalAlloc(i 0x40, p ${OSQ_LEGACY_STARTUP_SIZE}) p.r1'
+  System::Call 'kernel32::GlobalAlloc(i 0x40, p ${OSQ_LEGACY_PROCESS_SIZE}) p.r2'
+  System::Call 'kernel32::GlobalAlloc(i 0x40, p ${OSQ_LEGACY_MESSAGE_SIZE}) p.r3'
+  ${If} $1 == 0
+  ${OrIf} $2 == 0
+  ${OrIf} $3 == 0
+    DetailPrint "Unable to prepare the previous uninstaller process."
+    SetErrorLevel 2
+    Quit
+  ${EndIf}
+  System::Call '*$1(i ${OSQ_LEGACY_STARTUP_SIZE})'
+
+  ; Match NSIS v3.04 util.c: NULL application/CWD/security, no inherited handles,
+  ; CREATE_DEFAULT_ERROR_MODE. Only add CREATE_UNICODE_ENVIRONMENT (0x400).
+  System::Call 'kernel32::CreateProcessW(p 0, w r0, p 0, p 0, i 0, i 0x04000400, p $osqLegacyChildEnvironment, p 0, p r1, p r2) i.r5'
+  ${If} $5 == 0
+    StrCpy $osqLegacyCreateFailed 1
+    Goto osqLegacyProcessCleanup
+  ${EndIf}
+  System::Call '*$2(p.r4, p.r5)'
+  System::Call 'kernel32::CloseHandle(p r5)'
+
+  osqLegacyProcessWait:
+    System::Call 'kernel32::WaitForSingleObject(p r4, i 100) i.r7'
+    ${If} $7 == 258 ; WAIT_TIMEOUT
+      Goto osqLegacyProcessPaint
+    ${EndIf}
+    ; Reuse the preallocated PROCESS_INFORMATION buffer for an explicitly
+    ; nonzero default. A failed exit query must not look like success or a
+    ; CreateProcess failure that launches a second uninstaller in-place.
+    System::Call '*$2(i 2)'
+    System::Call 'kernel32::GetExitCodeProcess(p r4, p r2) i.r6'
+    System::Call '*$2(i.r5)'
+    ${If} $7 != 0 ; Wait failed: do not assume the child has stopped.
+      ${If} $6 == 0
+      ${OrIf} $5 == 259 ; STILL_ACTIVE
+        Sleep 100
+        Goto osqLegacyProcessPaint
+      ${EndIf}
+    ${EndIf}
+    ${If} $6 == 0
+      StrCpy $5 2 ; A failed API's output buffer is not trustworthy.
+      DetailPrint "The previous uninstaller stopped, but its exit code could not be confirmed."
+    ${EndIf}
+    StrCpy $R0 $5
+    Goto osqLegacyProcessCleanup
+
+  osqLegacyProcessPaint:
+    ; Same message pump as NSIS WaitForProcess: only WM_PAINT, no new cancel
+    ; or other installer callbacks while the old uninstaller is running.
+    System::Call 'user32::PeekMessageW(p r3, p 0, i 15, i 15, i 1) i.r6'
+    ${If} $6 != 0
+      System::Call 'user32::DispatchMessageW(p r3)'
+      Goto osqLegacyProcessPaint
+    ${EndIf}
+    Goto osqLegacyProcessWait
+
+  osqLegacyProcessCleanup:
+    ${If} $4 != 0
+      System::Call 'kernel32::CloseHandle(p r4)'
+    ${EndIf}
+    ; Cleanup cannot introduce a new abort after the previous files were removed.
+    ; The parent's environment was already restored before CreateProcessW.
+    System::Call 'kernel32::GlobalFree(p r1)'
+    System::Call 'kernel32::GlobalFree(p r2)'
+    System::Call 'kernel32::GlobalFree(p r3)'
+    System::Call 'kernel32::FreeEnvironmentStringsW(p $osqLegacyChildEnvironment)'
+    StrCpy $osqLegacyChildEnvironment 0
+    Pop $7
+    Pop $6
+    Pop $5
+    Pop $4
+    Pop $3
+    Pop $2
+    Pop $1
+    Pop $0
+    ${If} $osqLegacyCreateFailed == 1
+      SetErrors
+    ${ElseIf} $osqLegacyEntryErrors == 1
+      SetErrors
+    ${Else}
+      ClearErrors
+    ${EndIf}
+FunctionEnd
+
 !macro OpenSquillaExecLegacyUninstaller EXECUTABLE
   ; Preserve the upstream incoming Errors state as well as ExecWait's result.
   ; The same retry decision is used if copied execution falls back to in-place.
@@ -201,12 +327,10 @@ FunctionEnd
   ${Else}
     ClearErrors
   ${EndIf}
-  ExecWait '"${EXECUTABLE}" /S /KEEP_APP_DATA $0 _?=$installationDir' $R0
-  ${If} ${Errors}
-    Call OpenSquillaLegacyTempRestore
-    SetErrors
+  ${If} $osqLegacyChildEnvironment == 0
+    ExecWait '"${EXECUTABLE}" /S /KEEP_APP_DATA $0 _?=$installationDir' $R0
   ${Else}
-    Call OpenSquillaLegacyTempRestore
-    ClearErrors
+    Push '"${EXECUTABLE}" /S /KEEP_APP_DATA $0 _?=$installationDir'
+    Call OpenSquillaExecWithLegacyEnvironment
   ${EndIf}
 !macroend

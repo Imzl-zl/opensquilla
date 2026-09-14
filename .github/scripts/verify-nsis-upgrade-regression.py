@@ -262,6 +262,18 @@ class Windows:
             return None
         return values[0].ticks()
 
+    def is_running_exact(self, process: dict) -> bool:
+        """A read-only end-of-sample fence, including process creation time."""
+        handle = self.k.OpenProcess(0x1000, False, process['pid'])
+        if not handle:
+            return False
+        try:
+            code = wintypes.DWORD()
+            return (self.birth(handle) == process['birth']
+                    and bool(self.k.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259)
+        finally:
+            self.k.CloseHandle(handle)
+
     def processes(self) -> dict[int, dict]:
         snapshot = self.k.CreateToolhelp32Snapshot(2, 0)
         require(snapshot != ctypes.c_void_p(-1).value, 'Process snapshot failed')
@@ -538,6 +550,7 @@ class Audit:
             'environmentRegistryBefore': self.environment_before,
             'proofs': {'fixedUpgrade': False, 'readLockFailedWithoutDataLoss': None,
                        'sameCandidateRecovery': None, 'longPathFirstAttempt': None,
+                       'legacyUninstallerTempIsolated': None,
                        'realClientStarted': False, 'firstSend': False, 'toolRead': False,
                        'stop': False, 'restart': False, 'normalQuit': False,
                        'persistentTempEnvironmentUnchanged': False, 'finalUninstall': False},
@@ -588,7 +601,7 @@ class Audit:
     def run(self, label: str, executable: Path, arguments: list[str], temp: Path) -> dict:
         require(executable.is_file(), f'Missing executable: {executable}')
         require(within(temp, self.root), 'Child TEMP must be inside this audit task root')
-        operation = {'label': label, 'executable': str(executable), 'arguments': arguments, 'childTemp': str(temp), 'processes': [], 'pluginDirectories': [], 'directoryEvents': [], 'dialogs': [], 'timedOut': False, 'tempEnvironmentSamples': [], 'tempEnvironmentErrors': []}
+        operation = {'label': label, 'executable': str(executable), 'arguments': arguments, 'childTemp': str(temp), 'processes': [], 'pluginDirectories': [], 'directoryEvents': [], 'dialogs': [], 'timedOut': False, 'tempEnvironmentSamples': [], 'tempEnvironmentErrors': [], 'oldUninstallerEnvironmentPairs': []}
         self.report['operations'].append(operation)
         self.report['stage'] = label
         self.save()
@@ -599,6 +612,7 @@ class Audit:
         held_process_handles: dict[tuple[int, int], int] = {}
         observed_dirs: dict[str, dict] = {}
         observed_dialogs: dict[tuple[int, int], dict] = {}
+        environment_pairs: dict[tuple, dict] = {}
         started = time.monotonic()
         watchers = []
         try:
@@ -701,11 +715,13 @@ class Audit:
                             record['faultDestination'] = str(destination)
                             record['faultDestinationLength'] = len(str(destination))
                 active = [item for key, item in known.items() if key == (item['pid'], snapshot.get(item['pid'], {}).get('birth'))]
+                current_environments: dict[tuple[int, int], dict] = {}
                 for item in active:
                     # Only our recorded NSIS/probe tree is inspected. Save the
                     # first sample and value transitions, not every poll.
                     try:
                         values = self.win.temp_environment(item)
+                        current_environments[(item['pid'], item['birth'])] = values
                         if item.get('lastTempEnvironment') != values:
                             operation['tempEnvironmentSamples'].append({'pid': item['pid'], 'birth': item['birth'], 'image': item['image'], 'observedSeconds': round(now - started, 3), **values})
                             item['lastTempEnvironment'] = values
@@ -713,6 +729,32 @@ class Audit:
                         if not item.get('environmentReadErrorRecorded'):
                             operation['tempEnvironmentErrors'].append({'pid': item['pid'], 'birth': item['birth'], 'error': str(error)})
                             item['environmentReadErrorRecorded'] = True
+                for item in active:
+                    if not item['image'] or Path(item['image']).name.casefold() != 'old-uninstaller.exe':
+                        continue
+                    parent = next((value for value in active if value['pid'] == item['parentPid'] and value['birth'] <= item['birth']), None)
+                    if parent is None:
+                        continue
+                    child_values = current_environments.get((item['pid'], item['birth']))
+                    parent_values = current_environments.get((parent['pid'], parent['birth']))
+                    if child_values is None or parent_values is None:
+                        continue
+                    # Fence after both reads. A child that has already exited
+                    # must not be paired with its parent preparing a later
+                    # attempt. This neither opens nor terminates by image name.
+                    if not self.win.is_running_exact(item):
+                        continue
+                    key = (item['pid'], item['birth'], parent['pid'], parent['birth'],
+                           child_values['TEMP'], child_values['TMP'], parent_values['TEMP'], parent_values['TMP'])
+                    seconds = round(time.monotonic() - started, 3)
+                    pair = environment_pairs.setdefault(key, {
+                        'childPid': item['pid'], 'childBirth': item['birth'], 'childImage': item['image'],
+                        'parentPid': parent['pid'], 'parentBirth': parent['birth'], 'parentImage': parent['image'],
+                        'childEnvironment': child_values, 'parentEnvironment': parent_values,
+                        'childStillRunningAfterBothReads': True, 'observedSeconds': seconds, 'observations': 0,
+                    })
+                    pair['lastObservedSeconds'] = seconds
+                    pair['observations'] += 1
                 if child.poll() is not None and any(item['pid'] != child.pid for item in active) and not reported_root_exit_wait:
                     print(json.dumps({'stage': label, 'event': 'root-exited-awaiting-descendants', 'exitCode': child.returncode, 'active': active}), flush=True)
                     reported_root_exit_wait = True
@@ -772,6 +814,7 @@ class Audit:
             operation['processes'] = list(known.values())
             operation['pluginDirectories'] = list(observed_dirs.values())
             operation['dialogs'] = list(observed_dialogs.values())
+            operation['oldUninstallerEnvironmentPairs'] = list(environment_pairs.values())
             for key, handle in held_process_handles.items():
                 exit_code = wintypes.DWORD()
                 if self.win.k.GetExitCodeProcess(handle, ctypes.byref(exit_code)) and exit_code.value != 259:
@@ -874,13 +917,18 @@ class Audit:
             return all(isinstance(item[name], str) and Path(item[name]).resolve() == self.install.parent.resolve() for name in ('TEMP', 'TMP'))
 
         if redirected:
-            changed = [item for item in samples if short_parent(item) and not original(item)]
-            require(changed, 'Long-TEMP upgrade did not observe the scoped short TEMP/TMP environment')
-            restored = [item for item in samples if original(item) and any(
-                prior['pid'] == item['pid'] and prior['birth'] == item['birth'] and prior['observedSeconds'] < item['observedSeconds']
-                for prior in changed)]
-            require(restored, 'No same-identity NSIS process was observed restoring its original TEMP/TMP after old uninstall')
-            operation['scopedTempRestorationObserved'] = restored
+            pairs = [pair for pair in operation['oldUninstallerEnvironmentPairs']
+                     if short_parent(pair['childEnvironment']) and not original(pair['childEnvironment'])]
+            require(pairs, 'No running old-uninstaller with its custom short TEMP/TMP and direct parent was observed')
+            for pair in pairs:
+                require(pair['childStillRunningAfterBothReads'] is True, 'Old-uninstaller exited before the paired environment observation completed')
+                require(original(pair['parentEnvironment']), 'Direct NSIS parent TEMP/TMP differed from original while the old-uninstaller child was still running')
+                require(Path(pair['parentImage']).resolve() == Path(operation['executable']).resolve(), 'Short-TEMP child was not directly owned by this candidate installer')
+                child = next((item for item in operation['processes'] if item['pid'] == pair['childPid'] and item['birth'] == pair['childBirth']), None)
+                parent = next((item for item in operation['processes'] if item['pid'] == pair['parentPid'] and item['birth'] == pair['parentBirth']), None)
+                require(child and parent and child['parentPid'] == parent['pid'] and child['birth'] >= parent['birth'], 'Paired environment evidence lacks the direct parent identity and birth-order fence')
+            operation['shortChildWithOriginalParentEnvironmentObserved'] = pairs
+            self.report['proofs']['legacyUninstallerTempIsolated'] = True
         else:
             require(any(original(item) for item in samples), 'The original child TEMP/TMP was not observed')
         self.check_environment_registry(operation['label'])

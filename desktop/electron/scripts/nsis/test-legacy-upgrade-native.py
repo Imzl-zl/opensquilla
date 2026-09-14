@@ -94,7 +94,8 @@ SectionEnd
     print('PASS complete-template-compile (not executed)', flush=True)
 
     def case(name, iteration=2, prior=2, child_exit=2, modifications='',
-             temp_value=None, missing=False, fallback=False, deny_directory=False):
+             temp_value=None, missing=False, fallback=False, deny_directory=False,
+             query_fail=False, wait_fail_once=False):
         root = fixture / name
         root.mkdir()
         install = root / 'app'
@@ -106,6 +107,24 @@ SectionEnd
         log = root / 'environment.jsonl'
         child = root / 'synthetic-child.exe'
         parent = root / 'synthetic-parent.exe'
+        case_boundary = boundary
+        if query_fail or wait_fail_once:
+            boundary_source = boundary.read_text(encoding='utf-8')
+            if query_fail:
+                needle = "    System::Call 'kernel32::GetExitCodeProcess(p r4, p r2) i.r6'"
+                assert boundary_source.count(needle) == 1
+                boundary_source = boundary_source.replace(needle, '''    System::Call '*$2(i 0)'
+    StrCpy $6 0 ; Fixture: failed query also wrote an untrustworthy zero''')
+            if wait_fail_once:
+                needle = "    System::Call 'kernel32::WaitForSingleObject(p r4, i 100) i.r7'"
+                assert boundary_source.count(needle) == 1
+                boundary_source = 'Var /GLOBAL fixtureWaitFailedOnce\n' + boundary_source.replace(needle, needle + '''
+    ${If} $fixtureWaitFailedOnce != 1
+      StrCpy $fixtureWaitFailedOnce 1
+      StrCpy $7 -1 ; Fixture: one WAIT_FAILED while child is still running
+    ${EndIf}''')
+            case_boundary = root / 'injected-boundary.nsh'
+            case_boundary.write_text(boundary_source, encoding='utf-8-sig')
         compile_script(root / 'child.nsi', f'''Unicode true
 RequestExecutionLevel user
 SilentInstall silent
@@ -113,6 +132,7 @@ Name "Synthetic NSIS environment child"
 OutFile "{nsis(child)}"
 Section
   InitPluginsDir
+  {'Sleep 500' if wait_fail_once else ''}
   {capture_command(log, 'child', True)}
   SetErrorLevel {child_exit}
 SectionEnd
@@ -135,7 +155,7 @@ SilentInstall silent
 Name "Synthetic NSIS environment parent"
 OutFile "{nsis(parent)}"
 Var installationDir
-!include "{nsis(boundary)}"
+!include "{nsis(case_boundary)}"
 Section
   InitPluginsDir
   {modifications}
@@ -178,7 +198,9 @@ SectionEnd
         if missing or fallback:
             assert first['errors'] == '1', (name, first)
         else:
-            assert first == {'exit': str(child_exit), 'errors': '0'}, (name, first)
+            assert first == {'exit': str(2 if query_fail else child_exit), 'errors': '0'}, (name, first)
+        if query_fail or wait_fail_once:
+            assert len(children) == 1, (name, records)
         shortened = iteration > 1 and prior == 2 and not deny_directory
         for item in children:
             if shortened:
@@ -205,6 +227,8 @@ SectionEnd
     case('both-absent', modifications='''System::Call 'kernel32::SetEnvironmentVariableW(w "TEMP", p 0)'
   System::Call 'kernel32::SetEnvironmentVariableW(w "TMP", p 0)' ''')
     case('directory-denied', deny_directory=True)
+    case('exit-query-failure-no-fallback', child_exit=0, query_fail=True)
+    case('transient-wait-failure-one-child', child_exit=0, wait_fail_once=True)
 
     upstream = args.upstream_uninstaller.read_bytes()
     upstream_sha = hashlib.sha256(upstream).hexdigest()
@@ -346,6 +370,13 @@ SectionEnd
 
     atomic_case('atomic-longpath', locked=False)
     atomic_case('atomic-readlock', locked=True)
+    subprocess.run([sys.executable, str(boundary.with_name('test-legacy-environment-faults-native.py')),
+                    '--nsis-root', str(args.nsis_root), '--evidence-root', str(args.evidence_root / 'environment-faults'),
+                    '--fixture-parent', str(args.fixture_parent)], check=True, timeout=180)
+    fault_result = json.loads((args.evidence_root / 'environment-faults/result.json').read_text(encoding='utf-8'))
+    assert fault_result['completed'] and not fault_result['productRiskConfirmed']
+    result['environmentFaultCases'] = len(fault_result['cases'])
+    result['environmentFaultEvidence'] = str(args.evidence_root / 'environment-faults/result.json')
     result['passed'] = True
     (args.evidence_root / 'result.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
     print(f'Evidence: {args.evidence_root / "result.json"}', flush=True)
