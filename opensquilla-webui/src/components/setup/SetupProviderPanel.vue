@@ -76,6 +76,8 @@ interface ProviderPanelContract {
   selectedStoredProfile: boolean
   editingNew: boolean
   profileSaveSupported: boolean
+  profileUpsertAndActivateSupported?: boolean
+  hasConfiguredPrimaryProvider?: boolean
   primaryProviderRemovalSupported: boolean
   imageGenerationOffer?: boolean
   imageGenerationOptIn?: boolean
@@ -112,6 +114,7 @@ const emit = defineEmits<{
   probeConnection: []
   refreshModels: []
   saveProvider: []
+  saveProviderAndActivate: []
   cancelProviderEdit: []
   copy: [command: string]
   goToSection: [value: string]
@@ -204,6 +207,7 @@ function closeAddPicker(restoreFocus = true) {
 }
 
 function cancelAndClose(restoreFocus = true) {
+  if (providerBusy.value || props.saving) return
   if (!addOpen.value) {
     emit('cancelProviderEdit')
   }
@@ -211,6 +215,7 @@ function cancelAndClose(restoreFocus = true) {
 }
 
 function toggleAddPicker() {
+  if (providerBusy.value || props.saving) return
   if (editorOpen.value) {
     closeAddPicker()
     return
@@ -221,6 +226,7 @@ function toggleAddPicker() {
 }
 
 function selectConfigured(providerId: string) {
+  if (providerBusy.value || props.saving) return
   dialogInvoker.value = document.activeElement instanceof HTMLElement
     ? document.activeElement
     : null
@@ -379,12 +385,17 @@ const activationState = computed(() => props.panel.activation || {
 })
 
 function activationDisabledReason(provider: ProviderPanelContract['configuredProviders'][number]): string {
+  if (!props.panel.profileSaveSupported) return t('setup.provider.upgradeGatewayHint')
   if (provider.primaryEligible) return ''
   if (provider.primaryBlockReason === 'missing_model') {
     return t('setup.provider.activationModelRequiredHint')
   }
   if (provider.primaryBlockReason === 'primary_pool_unsupported') {
     return t('setup.provider.activationPoolUnsupported')
+  }
+  if (['missing_api_key', 'missing_credential', 'missing_credentials', 'missing_env'].includes(provider.primaryBlockReason)
+    || ['missing_api_key', 'missing_credentials'].includes(provider.reason)) {
+    return t('setup.provider.activationCredentialRequired')
   }
   if (['profile_status_unavailable', 'runtime_unsupported', 'unknown_provider'].includes(
     provider.primaryBlockReason,
@@ -401,7 +412,7 @@ function activationInProgress(providerId: string): boolean {
 
 const activationBusy = computed(() => activationState.value.phase === 'activating')
 const providerBusy = computed(() => (
-  activationBusy.value || props.panel.credentialRemovalPending
+  activationBusy.value || props.panel.credentialRemovalPending || props.saving
 ))
 
 watch(() => props.panel.credentialRemovalPending, (pending, wasPending) => {
@@ -706,6 +717,7 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
           count: panel.configuredProviders.length,
           ready: readyProviderCount,
         }) }}</p>
+        <p>{{ t('setup.provider.primaryRoleHint') }}</p>
       </div>
     </div>
 
@@ -746,6 +758,7 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
         >
           <span class="setup-provider-card__name-row">
             <span class="setup-provider-card__name">{{ provider.label }}</span>
+            <span v-if="provider.active" class="setup-provider-card__badge" data-testid="provider-primary-badge">{{ t('setup.provider.activeBadge') }}</span>
           </span>
           <span
             v-if="showConfiguredProbeStatus(provider.providerId)"
@@ -765,6 +778,17 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
           </span>
         </button>
         <div class="setup-provider-card__actions">
+          <div v-if="!provider.active" class="setup-provider-card__activation">
+            <button
+              type="button"
+              class="btn setup-provider-card__activate"
+              :disabled="providerBusy || Boolean(activationDisabledReason(provider))"
+              :title="activationDisabledReason(provider) || undefined"
+              :aria-label="activationActionLabel(provider)"
+              @click="activateConfigured(provider.providerId)"
+            >{{ activationInProgress(provider.providerId) ? t('setup.provider.activating') : t('setup.provider.makeActive') }}</button>
+            <small v-if="activationDisabledReason(provider)" class="setup-provider-card__activation-reason">{{ activationDisabledReason(provider) }}</small>
+          </div>
           <button
             type="button"
             class="btn setup-provider-card__test"
@@ -1233,6 +1257,15 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
                 @click="cancelAndClose()"
               >{{ t('common.cancel') }}</button>
               <button
+                v-if="!panel.editingPrimary && panel.hasConfiguredPrimaryProvider !== false"
+                type="button"
+                class="btn"
+                data-testid="provider-save-and-activate"
+                :disabled="providerBusy || !panel.profileUpsertAndActivateSupported || !hasSavableProviderChange"
+                :title="!panel.profileUpsertAndActivateSupported ? t('setup.provider.saveActivateUpgradeHint') : undefined"
+                @click="emit('saveProviderAndActivate')"
+              >{{ t('setup.provider.saveAndMakeActive') }}</button>
+              <button
                 type="button"
                 class="btn btn--primary"
                 :disabled="providerBusy || saving || !hasSavableProviderChange || (replacesCurrentProvider && panel.connection.phase !== 'verified')"
@@ -1243,8 +1276,9 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
                 @click="emit('saveProvider')"
               >
                 <span v-if="saving" class="setup-connection__spinner" aria-hidden="true"></span>
-                {{ t('setup.provider.saveChanges') }}
+                {{ t(panel.hasConfiguredPrimaryProvider === false ? 'setup.provider.saveAndStart' : 'setup.provider.saveChanges') }}
               </button>
+              <small v-if="!panel.editingPrimary && !panel.profileUpsertAndActivateSupported" class="setup-provider-card__activation-reason">{{ t('setup.provider.saveActivateUpgradeHint') }}</small>
             </footer>
 
           </section>
@@ -1883,8 +1917,26 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
   align-items: center;
   border-top: 1px solid var(--border);
   display: flex;
+  flex-wrap: wrap;
   gap: var(--sp-2);
   padding: var(--sp-4) var(--sp-5);
+}
+
+.setup-provider-modal__footer .btn {
+  white-space: normal;
+}
+
+.setup-provider-card__activation {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-1);
+}
+
+.setup-provider-card__activation-reason {
+  color: var(--text-muted);
+  max-width: 30ch;
+  white-space: normal;
 }
 
 .setup-provider-modal__footer-spacer {

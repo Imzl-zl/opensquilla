@@ -1059,7 +1059,18 @@
       "modelProvenance": "プロバイダーのライブ一覧 · 機能情報の出典：{sources}",
       "modelMetadataProvenance": "プロバイダーのライブ一覧 · 公式値を優先し、ない場合はカタログ値を使用",
       "modelMultimodal": "マルチモーダル",
-      "modelMultimodalTitle": "画像入力に対応"
+      "modelMultimodalTitle": "画像入力に対応",
+      "saveAndStart": "保存して使い始める",
+      "saveAndMakeActive": "保存して主用に設定",
+      "saveActivateUpgradeHint": "保存と主用への切り替えを一度に行うには Gateway を更新してください。",
+      "primaryRoleHint": "主用プロバイダーは既定の直接接続とフォールバックを担当します。カスタムの複数モデル戦略は既存の設定で動作します。",
+      "activationCredentialRequired": "主用に設定する前に使用可能な認証情報を追加してください。",
+      "routerConflictTitle": "既存のモデルルートの扱いを選択",
+      "routerConflictBody": "既存ルートは {conflicts} を使用しており、{provider} への切り替えに自動追従できません。推奨ルートは既存の階層を置き換えます。Router をオフにすると全階層が保持されます。キャンセルすると下書きが残り、プロバイダー変更は送信されません。",
+      "routerUseRecommended": "切り替え先の推奨ルートを使用",
+      "routerDisablePreserve": "ルートを保持して Router をオフ",
+      "alreadyActive": "対象プロバイダーは既に主用です。この認証情報の編集は保存されていません。",
+      "primarySaveUncertain": "保存結果を確認できません。下書きを保持しました。再試行前に保存済み設定を確認してください。主用になっていても認証情報の編集が保存されたとは限りません。"
     },
     "preset": {
       "modeCustom": "カスタム"
@@ -1743,7 +1754,10 @@
       "channelEnabled": "チャンネルを有効化しました。再起動が必要です。",
       "channelEnabledLive": "チャネルを有効化して起動しました。",
       "channelDisabled": "チャンネルを無効化しました。再起動が必要です。",
-      "channelDisabledLive": "チャネルを無効化して停止しました。"
+      "channelDisabledLive": "チャネルを無効化して停止しました。",
+      "providerSavedAndActivated": "{provider} を保存し主用に設定しました。",
+      "modelStrategyPartialSaved": "一部のモデル設定は保存されました。主用への変更は完了していません。未保存の編集はフォームに保持されています。",
+      "modelStrategyPartialSaveUncertain": "一部のモデル設定は保存されました。主用への切り替え結果を確認できませんでした。保存済みの状態を確認してください。残りの編集はフォームに保持されています。"
     },
     "needs": {
       "noApiKey": "API キーは不要です。",

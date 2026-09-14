@@ -129,7 +129,7 @@
               v-if="section === 'provider'"
               :panel="providerPanel"
               :dirty="providerDraftDirty"
-              :saving="saveAllPending || providerSavePending"
+              :saving="saveAllPending || providerSavePending || primaryMutationPending"
               @update-provider-selected="selectProvider"
               @provider-change="onProviderChange"
               @update-provider-field="updateProviderField"
@@ -138,6 +138,7 @@
               @probe-connection="probeProviderConnection"
               @refresh-models="refreshProviderModels"
               @save-provider="saveProvider"
+              @save-provider-and-activate="saveProviderAndActivate"
               @cancel-provider-edit="cancelProviderEdit"
               @copy="copyCommand"
               @go-to-section="selectSection"
@@ -329,6 +330,8 @@ const {
   onImageProviderChange,
   useImageRecommendation,
   saveProvider,
+  saveProviderAndActivate,
+  primaryMutationPending,
   resetCapability,
   copyCommand,
   copyConfigPath,
@@ -426,11 +429,12 @@ const hasSettingsExitDraft = computed(() => (
 const hasPendingSettingsWrite = computed(() => (
   saveAllPending.value
   || providerSavePending.value
+  || primaryMutationPending.value
   || modelStrategyRoutingBusy.value
   || closeSavePending.value
 ))
 const settingsInteractionLocked = computed(() => (
-  saveAllPending.value || closeSavePending.value
+  saveAllPending.value || closeSavePending.value || primaryMutationPending.value
 ))
 const shouldGuardBrowserUnload = computed(() => (
   hasSettingsExitDraft.value || hasPendingSettingsWrite.value

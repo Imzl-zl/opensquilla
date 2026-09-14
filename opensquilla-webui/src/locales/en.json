@@ -1141,7 +1141,18 @@
       "modelProvenance": "Live provider list · capability source: {sources}",
       "modelMetadataProvenance": "Live provider list · official values when available, catalog fallback otherwise",
       "modelMultimodal": "Multimodal",
-      "modelMultimodalTitle": "Supports image input"
+      "modelMultimodalTitle": "Supports image input",
+      "saveAndStart": "Save and start using",
+      "saveAndMakeActive": "Save and set as primary",
+      "saveActivateUpgradeHint": "Upgrade the Gateway to save and set a provider as primary in one operation.",
+      "primaryRoleHint": "The primary provider handles default direct requests and fallback. Custom multi-model strategies keep their own configuration.",
+      "activationCredentialRequired": "Add a usable credential before setting this provider as primary.",
+      "routerConflictTitle": "Choose how to handle existing model routes",
+      "routerConflictBody": "Existing routes use {conflicts} and cannot follow the switch to {provider} automatically. Recommended routes replace the existing tiers. Turning Router off preserves all saved tiers. Cancel keeps your draft and does not submit this provider change.",
+      "routerUseRecommended": "Use the target provider’s recommended routes",
+      "routerDisablePreserve": "Keep routes and turn Router off",
+      "alreadyActive": "The target provider is already primary. This credential edit was not saved.",
+      "primarySaveUncertain": "The save result could not be confirmed. Your draft was kept. Check the saved configuration before retrying; an active provider alone does not confirm that credential edits were saved."
     },
     "preset": {
       "modeCustom": "custom tiers"
@@ -1825,7 +1836,10 @@
       "channelEnabled": "Channel enabled. Restart required.",
       "channelEnabledLive": "Channel enabled and started.",
       "channelDisabled": "Channel disabled. Restart required.",
-      "channelDisabledLive": "Channel disabled and stopped."
+      "channelDisabledLive": "Channel disabled and stopped.",
+      "providerSavedAndActivated": "{provider} was saved and set as primary.",
+      "modelStrategyPartialSaved": "Some model settings were saved. The primary change was not completed; remaining edits are still in the form.",
+      "modelStrategyPartialSaveUncertain": "Some model settings were saved. The primary change could not be confirmed; check the saved state. Remaining edits are still in the form."
     },
     "needs": {
       "noApiKey": "No API key required.",

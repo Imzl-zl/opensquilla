@@ -150,6 +150,67 @@ async function mountPanel(props: Record<string, unknown> = {}, listeners: Record
   return { app, el, panelState }
 }
 
+describe('visible primary-provider save actions', () => {
+  it('labels the real first-configuration save using configured readiness', async () => {
+    const onSaveProvider = vi.fn()
+    const { app, el, panelState } = await mountPanel({
+      providerSelected: '', configuredProviders: [], hasConfiguredPrimaryProvider: false,
+    }, { dirty: true, onSaveProvider, onAddProvider: (providerId: string) => { panelState.providerSelected = providerId } })
+    try {
+      el.querySelector<HTMLButtonElement>('[data-provider-picker-trigger]')!.click()
+      await nextTick()
+      document.body.querySelector<HTMLButtonElement>('[role="option"]')!.click()
+      await nextTick()
+      const save = document.body.querySelector<HTMLButtonElement>('.setup-provider-modal__footer .btn--primary')!
+      expect(save.closest('[hidden]')).toBeNull()
+      expect(save.textContent?.trim()).toBe('Save and start using')
+      expect(save.disabled).toBe(false)
+      save.click()
+      expect(onSaveProvider).toHaveBeenCalledTimes(1)
+      expect(document.body.querySelector('[data-testid="provider-save-and-activate"]')).toBeNull()
+    } finally { app.unmount() }
+  })
+
+  it('offers independent visible save and save-plus-primary buttons for a secondary profile', async () => {
+    const onSaveProvider = vi.fn()
+    const onSaveProviderAndActivate = vi.fn()
+    const { app, el } = await mountPanel({
+      providerSelected: 'openai', editingPrimary: false, selectedStoredProfile: true,
+      hasConfiguredPrimaryProvider: true, profileUpsertAndActivateSupported: true,
+      configuredProviders: [{ providerId: 'openai', label: 'OpenAI', active: false, ready: true, primaryEligible: true }],
+    }, { dirty: true, onSaveProvider, onSaveProviderAndActivate })
+    try {
+      el.querySelector<HTMLButtonElement>('.setup-provider-card__select')!.click()
+      await nextTick()
+      const dialog = document.body.querySelector<HTMLElement>('#setup-provider-editor-dialog')!
+      const activate = dialog.querySelector<HTMLButtonElement>('[data-testid="provider-save-and-activate"]')!
+      const save = dialog.querySelector<HTMLButtonElement>('.setup-provider-modal__footer .btn--primary')!
+      expect(activate.closest('[hidden]')).toBeNull()
+      expect(activate.disabled).toBe(false)
+      save.click()
+      expect(onSaveProvider).toHaveBeenCalledTimes(1)
+      expect(onSaveProviderAndActivate).not.toHaveBeenCalled()
+      activate.click()
+      expect(onSaveProviderAndActivate).toHaveBeenCalledTimes(1)
+    } finally { app.unmount() }
+  })
+
+  it('disables the visible atomic action with an upgrade explanation on older Gateways', async () => {
+    const { app, el } = await mountPanel({
+      editingPrimary: false, selectedStoredProfile: true, hasConfiguredPrimaryProvider: true,
+      profileUpsertAndActivateSupported: false,
+    }, { dirty: true })
+    try {
+      el.querySelector<HTMLButtonElement>('.setup-provider-card__select')!.click()
+      await nextTick()
+      const action = document.body.querySelector<HTMLButtonElement>('[data-testid="provider-save-and-activate"]')!
+      expect(action.disabled).toBe(true)
+      expect(action.title).toContain('Upgrade the Gateway')
+      expect(action.closest('[hidden]')).toBeNull()
+    } finally { app.unmount() }
+  })
+})
+
 function testButton(el: HTMLElement): HTMLButtonElement | null {
   return Array.from(el.querySelectorAll<HTMLButtonElement>('.setup-provider-credential button.btn'))
     .find(btn => (btn.textContent || '').includes('Verify current configuration') || (btn.textContent || '').includes('Verifying')) || null
@@ -433,7 +494,7 @@ describe('SetupProviderPanel — configured provider management', () => {
     const editing = el.querySelector<HTMLElement>('[data-provider-id="deepseek"]')!
     const activeIdentity = active.querySelector<HTMLButtonElement>('.setup-provider-card__select')!
     const editingIdentity = editing.querySelector<HTMLButtonElement>('.setup-provider-card__select')!
-    expect(active.textContent).not.toContain('Active')
+    expect(active.querySelector('[data-testid="provider-primary-badge"]')?.textContent).toBe('Active')
     expect(activeIdentity.getAttribute('aria-label')).toContain('Active')
     expect(active.querySelector('.setup-provider-card__select')?.getAttribute('aria-current')).toBeNull()
     expect(editing.textContent).not.toContain('Active')
@@ -1011,7 +1072,7 @@ describe('SetupProviderPanel — configured provider management', () => {
 
     expect(onSelectConfiguredProvider).not.toHaveBeenCalled()
     expect(buttons.find(button => button.textContent?.trim() === 'Edit')).toBeTruthy()
-    expect(buttons.find(button => button.textContent?.trim() === 'Set active')).toBeUndefined()
+    expect(buttons.find(button => button.textContent?.trim() === 'Set active')?.closest('[hidden]')).toBeNull()
     buttons.find(button => button.textContent?.trim() === 'Delete')?.click()
     await nextTick()
     expect(onRemoveProviderProfile).toHaveBeenCalledWith('deepseek')
@@ -1223,7 +1284,7 @@ describe('SetupProviderPanel — configured provider management', () => {
     expect(labels).toContain('Verify saved configuration')
     expect(labels).toContain('Edit')
     expect(labels).toContain('Delete')
-    expect(labels).not.toContain('Set active')
+    expect(labels).toContain('Set active')
     expect(row.querySelector('[aria-haspopup="menu"]')).toBeNull()
     expect(row.querySelector('.setup-provider-card__identity')?.getAttribute('aria-label'))
       .toBe('Edit DeepSeek — Credentials ready — Not verified')
@@ -1251,8 +1312,8 @@ describe('SetupProviderPanel — configured provider management', () => {
     const interactions = el.querySelector<HTMLFieldSetElement>('.setup-provider-interactions')
     expect(interactions?.disabled).toBe(true)
     expect(interactions?.getAttribute('aria-busy')).toBe('true')
-    expect(el.querySelector('[data-provider-id="deepseek"] .setup-provider-card__activate'))
-      .toBeNull()
+    expect(el.querySelector<HTMLButtonElement>('[data-provider-id="deepseek"] .setup-provider-card__activate')?.disabled)
+      .toBe(true)
 
     app.unmount()
   })
@@ -1424,7 +1485,7 @@ describe('SetupProviderPanel — configured provider management', () => {
     app.unmount()
   })
 
-  it('keeps backend activation eligibility out of the quiet provider list', async () => {
+  it('exposes a visible primary action using backend eligibility', async () => {
     const onActivateProvider = vi.fn()
     const ready = configured.map(row => row.providerId === 'deepseek'
       ? {
@@ -1439,7 +1500,12 @@ describe('SetupProviderPanel — configured provider management', () => {
     const row = el.querySelector<HTMLElement>('[data-provider-id="deepseek"]')!
     const edit = row.querySelector<HTMLButtonElement>('.setup-provider-card__select')!
 
-    expect(row.querySelector('.setup-provider-card__activate')).toBeNull()
+    const activate = row.querySelector<HTMLButtonElement>('.setup-provider-card__activate')!
+    expect(activate.closest('[hidden]')).toBeNull()
+    expect(activate.disabled).toBe(false)
+    activate.click()
+    expect(onActivateProvider).toHaveBeenCalledWith('deepseek')
+    onActivateProvider.mockClear()
     edit.click()
     await nextTick()
     expect(onActivateProvider).not.toHaveBeenCalled()
@@ -1463,7 +1529,8 @@ describe('SetupProviderPanel — configured provider management', () => {
 
     const row = el.querySelector<HTMLElement>('[data-provider-id="deepseek"]')!
     const edit = row.querySelector<HTMLButtonElement>('.setup-provider-card__select')!
-    expect(row.querySelector('.setup-provider-card__activate')).toBeNull()
+    expect(row.querySelector<HTMLButtonElement>('.setup-provider-card__activate')?.disabled).toBe(true)
+    expect(row.textContent).toContain('Choose a direct/fallback model')
     expect(row.textContent).not.toContain('Choose and save a model below')
     edit.click()
     await nextTick()

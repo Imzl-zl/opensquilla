@@ -586,6 +586,10 @@ export function useSetupRouterForm() {
     routerVisualMode.value = normalizeRouterVisualMode(value)
   }
 
+  function acceptSavedVisualMode(value: unknown) {
+    visualModeBaseline.value = normalizeRouterVisualMode(value)
+  }
+
   function payload(): ConfigureRouter {
     const mode = routerMode.value === 'disabled'
       ? 'disabled'
@@ -664,6 +668,7 @@ export function useSetupRouterForm() {
     enableFromSavedBinding,
     setRouterDefaultTier,
     setRouterVisualMode,
+    acceptSavedVisualMode,
     updateTierField,
     setEnsembleContext,
     payload,

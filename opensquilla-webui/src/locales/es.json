@@ -1059,7 +1059,18 @@
       "modelProvenance": "Lista del proveedor en vivo · fuente de capacidades: {sources}",
       "modelMetadataProvenance": "Lista del proveedor en vivo · valores oficiales si están disponibles; si no, valores del catálogo",
       "modelMultimodal": "Multimodal",
-      "modelMultimodalTitle": "Admite entradas de imagen"
+      "modelMultimodalTitle": "Admite entradas de imagen",
+      "saveAndStart": "Guardar y empezar",
+      "saveAndMakeActive": "Guardar y establecer como principal",
+      "saveActivateUpgradeHint": "Actualiza el Gateway para guardar y activar el proveedor en una sola operación.",
+      "primaryRoleHint": "El proveedor principal gestiona las solicitudes directas predeterminadas y el respaldo. Las estrategias personalizadas conservan su configuración.",
+      "activationCredentialRequired": "Añade credenciales válidas antes de establecer este proveedor como principal.",
+      "routerConflictTitle": "Elige cómo gestionar las rutas existentes",
+      "routerConflictBody": "Las rutas actuales usan {conflicts} y no pueden cambiar automáticamente a {provider}. Las rutas recomendadas reemplazan los niveles existentes. Desactivar Router conserva todos los niveles. Cancelar conserva el borrador sin enviar este cambio de proveedor.",
+      "routerUseRecommended": "Usar las rutas recomendadas del proveedor de destino",
+      "routerDisablePreserve": "Conservar las rutas y desactivar Router",
+      "alreadyActive": "El proveedor de destino ya es el principal. Este cambio de credenciales no se guardó.",
+      "primarySaveUncertain": "No se pudo confirmar el guardado. Se conservó el borrador. Comprueba la configuración antes de reintentar; un proveedor activo no confirma que se hayan guardado las credenciales."
     },
     "preset": {
       "modeCustom": "personalizado"
@@ -1743,7 +1754,10 @@
       "channelEnabled": "Canal activado. Se requiere reiniciar.",
       "channelEnabledLive": "Canal habilitado e iniciado.",
       "channelDisabled": "Canal desactivado. Se requiere reiniciar.",
-      "channelDisabledLive": "Canal deshabilitado y detenido."
+      "channelDisabledLive": "Canal deshabilitado y detenido.",
+      "providerSavedAndActivated": "Se guardó {provider} y se estableció como principal.",
+      "modelStrategyPartialSaved": "Se guardaron algunos ajustes. El cambio del proveedor principal no se completó; los cambios pendientes siguen en el formulario.",
+      "modelStrategyPartialSaveUncertain": "Se guardaron algunos ajustes. No se pudo confirmar el cambio del proveedor principal; comprueba el estado guardado. Los cambios pendientes siguen en el formulario."
     },
     "needs": {
       "noApiKey": "No se requiere clave API.",

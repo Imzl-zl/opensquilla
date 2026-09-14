@@ -1059,7 +1059,18 @@
       "modelProvenance": "Live-Anbieterliste · Funktionsquelle: {sources}",
       "modelMetadataProvenance": "Live-Anbieterliste · offizielle Werte bevorzugt, sonst Katalogwerte",
       "modelMultimodal": "Multimodal",
-      "modelMultimodalTitle": "Unterstützt Bildeingaben"
+      "modelMultimodalTitle": "Unterstützt Bildeingaben",
+      "saveAndStart": "Speichern und verwenden",
+      "saveAndMakeActive": "Speichern und als primär festlegen",
+      "saveActivateUpgradeHint": "Aktualisieren Sie das Gateway, um Anbieter in einem Vorgang zu speichern und als primär festzulegen.",
+      "primaryRoleHint": "Der primäre Anbieter übernimmt direkte Standardanfragen und Fallback. Eigene Mehrmodellstrategien behalten ihre Konfiguration.",
+      "activationCredentialRequired": "Fügen Sie gültige Zugangsdaten hinzu, bevor Sie diesen Anbieter als primär festlegen.",
+      "routerConflictTitle": "Umgang mit vorhandenen Modellrouten wählen",
+      "routerConflictBody": "Vorhandene Routen verwenden {conflicts} und können nicht automatisch zu {provider} wechseln. Empfohlene Routen ersetzen die bisherigen Stufen. Router deaktivieren behält alle Stufen. Abbrechen behält den Entwurf ohne diesen Anbieterwechsel zu speichern.",
+      "routerUseRecommended": "Empfohlene Routen des Zielanbieters verwenden",
+      "routerDisablePreserve": "Routen behalten und Router deaktivieren",
+      "alreadyActive": "Der Zielanbieter ist bereits primär. Diese Änderung der Zugangsdaten wurde nicht gespeichert.",
+      "primarySaveUncertain": "Das Speicherergebnis ist unklar. Ihr Entwurf wurde behalten. Prüfen Sie vor einem erneuten Versuch die Konfiguration; ein primärer Anbieter bestätigt nicht die Speicherung der Zugangsdaten."
     },
     "preset": {
       "modeCustom": "benutzerdefiniert"
@@ -1743,7 +1754,10 @@
       "channelEnabled": "Kanal aktiviert. Neustart erforderlich.",
       "channelEnabledLive": "Kanal aktiviert und gestartet.",
       "channelDisabled": "Kanal deaktiviert. Neustart erforderlich.",
-      "channelDisabledLive": "Kanal deaktiviert und gestoppt."
+      "channelDisabledLive": "Kanal deaktiviert und gestoppt.",
+      "providerSavedAndActivated": "{provider} wurde gespeichert und als primär festgelegt.",
+      "modelStrategyPartialSaved": "Einige Modelleinstellungen wurden gespeichert. Der Wechsel des primären Anbieters wurde nicht abgeschlossen; übrige Änderungen bleiben im Formular.",
+      "modelStrategyPartialSaveUncertain": "Einige Modelleinstellungen wurden gespeichert. Der Wechsel des primären Anbieters konnte nicht bestätigt werden; prüfen Sie den gespeicherten Zustand. Übrige Änderungen bleiben im Formular."
     },
     "needs": {
       "noApiKey": "Kein API-Schlüssel erforderlich.",
