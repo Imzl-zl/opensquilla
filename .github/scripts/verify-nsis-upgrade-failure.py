@@ -17,8 +17,10 @@ import json
 import os
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import uuid
@@ -71,6 +73,10 @@ class PROCESSENTRY32W(ctypes.Structure):
     ]
 
 
+class OVERLAPPED(ctypes.Structure):
+    _fields_ = [('Internal', ctypes.c_size_t), ('InternalHigh', ctypes.c_size_t), ('Offset', wintypes.DWORD), ('OffsetHigh', wintypes.DWORD), ('hEvent', wintypes.HANDLE)]
+
+
 class Windows:
     def __init__(self) -> None:
         self.k = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -85,6 +91,11 @@ class Windows:
             'GetExitCodeProcess': ([wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)], wintypes.BOOL),
             'TerminateProcess': ([wintypes.HANDLE, wintypes.UINT], wintypes.BOOL),
             'CreateFileW': ([wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE], wintypes.HANDLE),
+            'CreateEventW': ([ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR], wintypes.HANDLE),
+            'ResetEvent': ([wintypes.HANDLE], wintypes.BOOL),
+            'ReadDirectoryChangesW': ([wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, wintypes.BOOL, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(OVERLAPPED), ctypes.c_void_p], wintypes.BOOL),
+            'GetOverlappedResult': ([wintypes.HANDLE, ctypes.POINTER(OVERLAPPED), ctypes.POINTER(wintypes.DWORD), wintypes.BOOL], wintypes.BOOL),
+            'CancelIoEx': ([wintypes.HANDLE, ctypes.POINTER(OVERLAPPED)], wintypes.BOOL),
         }
         for name, (arguments, result) in signatures.items():
             method = getattr(self.k, name)
@@ -193,6 +204,105 @@ class Windows:
         return handle
 
 
+class DirectoryEvents:
+    """Arm the real TEMP-directory event subscription before spawning NSIS.
+
+    A dedicated consumer immediately re-arms overlapped ReadDirectoryChangesW,
+    retaining old-install creation even if it disappears between process polls.
+    Only directory names are requested, avoiding the enormous file-copy stream.
+    """
+
+    def __init__(self, win: Windows, root: Path) -> None:
+        self.win = win
+        self.closed = threading.Event()
+        self.lock = threading.Lock()
+        self.io_lock = threading.Lock()
+        self.events: list[dict] = []
+        self.error: str | None = None
+        self.started = time.monotonic()
+        self.handle = win.k.CreateFileW(str(root), 1, 1 | 2 | 4, None, 3, 0x02000000 | 0x40000000, None)
+        if self.handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.event = win.k.CreateEventW(None, True, False, None)
+        if not self.event:
+            win.k.CloseHandle(self.handle)
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.overlapped = OVERLAPPED()
+        self.overlapped.hEvent = self.event
+        self.buffer = ctypes.create_string_buffer(65536)
+        try:
+            self.arm()
+        except Exception:
+            win.k.CloseHandle(self.event)
+            win.k.CloseHandle(self.handle)
+            raise
+        self.thread = threading.Thread(target=self.consume, name='nsis-temp-directory-events', daemon=True)
+        self.thread.start()
+
+    def arm(self) -> None:
+        self.win.k.ResetEvent(self.event)
+        self.overlapped.Internal = 0
+        self.overlapped.InternalHigh = 0
+        self.overlapped.Offset = 0
+        self.overlapped.OffsetHigh = 0
+        # FILE_NOTIFY_CHANGE_DIR_NAME only, recursively.
+        ok = self.win.k.ReadDirectoryChangesW(self.handle, self.buffer, len(self.buffer), True, 2, None, ctypes.byref(self.overlapped), None)
+        if not ok and ctypes.get_last_error() != 997:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def consume(self) -> None:
+        try:
+            while True:
+                size = wintypes.DWORD()
+                ok = self.win.k.GetOverlappedResult(self.handle, ctypes.byref(self.overlapped), ctypes.byref(size), True)
+                if not ok:
+                    error = ctypes.get_last_error()
+                    if self.closed.is_set() and error == 995:
+                        return
+                    raise ctypes.WinError(error)
+                if size.value == 0:
+                    raise RuntimeError('TEMP directory-change buffer overflow; actual-path evidence is incomplete')
+                payload = self.buffer.raw[:size.value]
+                offset = 0
+                captured = []
+                while True:
+                    next_offset, action, name_length = struct.unpack_from('<III', payload, offset)
+                    name = payload[offset + 12:offset + 12 + name_length].decode('utf-16-le')
+                    parts = Path(name).parts
+                    if len(parts) == 2 and parts[0].casefold().startswith('ns') and parts[0].casefold().endswith('.tmp') and parts[1].casefold() == 'old-install':
+                        captured.append({'relativePath': name, 'action': action, 'observedSeconds': round(time.monotonic() - self.started, 3)})
+                    if next_offset == 0:
+                        break
+                    offset += next_offset
+                with self.lock:
+                    self.events.extend(captured)
+                with self.io_lock:
+                    if self.closed.is_set():
+                        return
+                    self.arm()
+        except Exception as error:
+            if not self.closed.is_set():
+                self.error = str(error)
+
+    def drain(self) -> list[dict]:
+        with self.lock:
+            events, self.events = self.events, []
+        return events
+
+    def close(self) -> None:
+        with self.io_lock:
+            self.closed.set()
+            self.win.k.CancelIoEx(self.handle, ctypes.byref(self.overlapped))
+        self.thread.join(timeout=5)
+        if self.thread.is_alive():
+            # Do not close handles still used by a running native read. The
+            # process will release them, and the audit must report failure.
+            self.error = 'TEMP directory observer did not stop after CancelIoEx'
+            return
+        self.win.k.CloseHandle(self.event)
+        self.win.k.CloseHandle(self.handle)
+
+
 def installed_registry() -> list[dict]:
     import winreg
     found: list[dict] = []
@@ -294,21 +404,53 @@ class Audit:
     def run(self, label: str, executable: Path, arguments: list[str], temp: Path) -> dict:
         require(executable.is_file(), f'Missing executable: {executable}')
         require(within(temp, self.root), 'Child TEMP must be inside this audit task root')
-        operation = {'label': label, 'executable': str(executable), 'arguments': arguments, 'childTemp': str(temp), 'processes': [], 'pluginDirectories': [], 'dialogs': [], 'timedOut': False}
+        operation = {'label': label, 'executable': str(executable), 'arguments': arguments, 'childTemp': str(temp), 'processes': [], 'pluginDirectories': [], 'directoryEvents': [], 'dialogs': [], 'timedOut': False}
         self.report['operations'].append(operation)
         self.report['stage'] = label
         self.save()
+        print(json.dumps({'stage': label, 'event': 'start', 'childTemp': str(temp)}), flush=True)
         existing_temp = {entry.name for entry in temp.iterdir()}
         known: dict[tuple[int, int], dict] = {}
         held_process_handles: dict[tuple[int, int], int] = {}
         observed_dirs: dict[str, dict] = {}
         observed_dialogs: dict[tuple[int, int], dict] = {}
         started = time.monotonic()
+        watcher = DirectoryEvents(self.win, temp)
+
+        def consume_directory_events() -> None:
+            for event in watcher.drain():
+                operation['directoryEvents'].append(event)
+                directory = temp / Path(event['relativePath']).parts[0]
+                key = str(directory)
+                record = observed_dirs.setdefault(key, {'path': key, 'firstObservedSeconds': event['observedSeconds'], 'oldInstallObserved': False, 'oldUninstallerObserved': False})
+                record['lastObservedSeconds'] = event['observedSeconds']
+                if event['action'] in {1, 5}:  # ADDED or RENAMED_NEW_NAME
+                    record['oldInstallObserved'] = True
+                    record['oldInstallCreationEventObserved'] = True
+                if self.fault_relative is not None:
+                    destination = directory / 'old-install' / self.fault_relative
+                    record['faultDestination'] = str(destination)
+                    record['faultDestinationLength'] = len(str(destination))
+
         stdout_file = (self.evidence / (label + '-stdout.log')).open('wb')
         stderr_file = (self.evidence / (label + '-stderr.log')).open('wb')
-        child = subprocess.Popen([str(executable), *arguments], env=dict(os.environ, TEMP=str(temp), TMP=str(temp)), stdout=stdout_file, stderr=stderr_file, creationflags=subprocess.CREATE_NO_WINDOW)
+        try:
+            child = subprocess.Popen([str(executable), *arguments], env=dict(os.environ, TEMP=str(temp), TMP=str(temp)), stdout=stdout_file, stderr=stderr_file, creationflags=subprocess.CREATE_NO_WINDOW)
+        except Exception:
+            watcher.close()
+            stdout_file.close()
+            stderr_file.close()
+            raise
         birth = self.win.birth(int(child._handle))
-        require(birth is not None, 'Cannot determine installer process identity')
+        if birth is None:
+            # Popen's live handle identifies the exact child even when birth
+            # lookup fails; no PID lookup or name-based termination occurs.
+            self.win.k.TerminateProcess(int(child._handle), 125)
+            child.wait(timeout=15)
+            watcher.close()
+            stdout_file.close()
+            stderr_file.close()
+            raise RuntimeError('Cannot determine installer process identity')
         root_process = {'pid': child.pid, 'parentPid': os.getpid(), 'name': executable.name, 'image': str(executable), 'birth': birth, 'depth': 0}
         known[(child.pid, birth)] = root_process
         quiet_since: float | None = None
@@ -316,6 +458,7 @@ class Audit:
         try:
             while True:
                 now = time.monotonic()
+                consume_directory_events()
                 snapshot = self.win.processes()
                 # Record descendants only when the parent's live identity
                 # matches. Persistent identity is retained after observed exit.
@@ -396,6 +539,9 @@ class Audit:
                 operation['rootStillRunning'] = True
             stdout_file.close()
             stderr_file.close()
+            watcher.close()
+            consume_directory_events()
+            operation['directoryObserverError'] = watcher.error
             operation['exitCode'] = child.returncode
             operation['elapsedSeconds'] = round(time.monotonic() - started, 3)
             operation['processes'] = list(known.values())
@@ -407,7 +553,9 @@ class Audit:
                     known[key]['observedExitCode'] = exit_code.value
                 self.win.k.CloseHandle(handle)
             self.save()
+            print(json.dumps({'stage': label, 'event': 'finished', 'exitCode': child.returncode, 'timedOut': operation['timedOut'], 'elapsedSeconds': operation['elapsedSeconds'], 'observedProcesses': len(known), 'observedPluginDirectories': len(observed_dirs), 'acknowledgedDialogs': sum(bool(item['autoAcknowledged']) for item in observed_dialogs.values())}), flush=True)
         require(not operation['timedOut'], f'{label} timed out; this is not an observed exit-code-2 reproduction')
+        require(not operation['directoryObserverError'], f'{label} TEMP observer failed: {operation["directoryObserverError"]}')
         require(not operation.get('rootStillRunning'), f'{label} installer process could not be stopped')
         return operation
 
