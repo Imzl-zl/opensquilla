@@ -780,8 +780,10 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
       </div>
     </div>
 
-    <ul
+    <TransitionGroup
       v-if="panel.configuredProviders.length > 0"
+      name="provider-list"
+      tag="ul"
       class="setup-provider-list"
       :class="{ 'is-expanded': listExpanded }"
       data-testid="configured-provider-list"
@@ -793,6 +795,7 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
         :class="{
           'is-primary': provider.active,
           'is-selected': editorOpen && isEditingProvider(provider.providerId),
+          'is-activating': activationInProgress(provider.providerId),
         }"
         :data-provider-id="provider.providerId"
       >
@@ -842,6 +845,7 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
             <button
               type="button"
               class="btn setup-provider-card__activate"
+              :class="{ 'is-pending': activationInProgress(provider.providerId) }"
               :disabled="providerBusy || Boolean(activationDisabledReason(provider))"
               :title="activationDisabledReason(provider) || undefined"
               :aria-label="activationActionLabel(provider)"
@@ -874,7 +878,7 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
           />
         </div>
       </li>
-    </ul>
+    </TransitionGroup>
     <button
       v-if="panel.configuredProviders.length >= 5"
       type="button"
@@ -1398,6 +1402,32 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
   margin: var(--sp-3) 0 0;
   overflow: hidden;
   padding: 0;
+  position: relative;
+}
+
+/* Primary changes reorder the saved list. Keep the transition quiet and
+   directional so the new primary feels like it moved into place instead of
+   the whole list flashing or jumping. */
+.provider-list-move {
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.provider-list-enter-active,
+.provider-list-leave-active {
+  transition:
+    opacity var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.provider-list-enter-from,
+.provider-list-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+.provider-list-leave-active {
+  position: absolute;
+  inset-inline: 0;
 }
 
 .setup-provider-list.is-expanded {
@@ -1511,6 +1541,11 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
   box-shadow: inset 3px 0 0 var(--accent), inset 0 0 0 1px color-mix(in srgb, var(--accent) 28%, transparent);
 }
 
+.setup-provider-card.is-activating {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  box-shadow: inset 3px 0 0 var(--accent), inset 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
 .setup-provider-card__identity {
   appearance: none;
   align-self: stretch;
@@ -1567,6 +1602,15 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
   color: var(--accent);
   display: inline-flex;
   gap: var(--sp-2);
+}
+
+.setup-provider-card__activate.is-pending {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: var(--radius-sm);
+  cursor: progress;
+  min-height: 32px;
+  padding: var(--sp-1) var(--sp-2);
 }
 
 .setup-provider-card__primary-status {
@@ -2113,6 +2157,12 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
   .provider-dialog-leave-active,
   .provider-dialog-enter-active .setup-provider-modal,
   .provider-dialog-leave-active .setup-provider-modal {
+    transition: none;
+  }
+
+  .provider-list-move,
+  .provider-list-enter-active,
+  .provider-list-leave-active {
     transition: none;
   }
 }

@@ -122,4 +122,23 @@ describe('provider action menu', () => {
     app.unmount()
     bounds.mockRestore()
   })
+
+  it('keeps every action icon in a fixed slot for stable labels and checkmarks', async () => {
+    const { app, trigger } = await mountMenu()
+    trigger.click()
+    await settle()
+
+    const menu = document.querySelector<HTMLElement>('[role="menu"]')!
+    const items = Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]'))
+    expect(items).toHaveLength(3)
+    expect(items.every(item => item.querySelector('.setup-provider-menu__icon'))).toBe(true)
+    expect(items.map(item => item.querySelector('.setup-provider-menu__icon')?.className))
+      .toEqual([
+        expect.stringContaining('setup-provider-menu__icon'),
+        expect.stringContaining('setup-provider-menu__icon'),
+        expect.stringContaining('setup-provider-menu__icon'),
+      ])
+    expect(menu.querySelector('.setup-provider-menu__separator')).toBeTruthy()
+    app.unmount()
+  })
 })

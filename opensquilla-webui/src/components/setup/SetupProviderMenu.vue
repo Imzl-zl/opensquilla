@@ -175,7 +175,12 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
           :title="item.hint || undefined"
           @click="choose(item)"
         >
-          <Icon :name="item.icon" :size="15" aria-hidden="true" />
+          <Icon
+            class="setup-provider-menu__icon"
+            :name="item.icon"
+            :size="15"
+            aria-hidden="true"
+          />
           <span>{{ item.label }}<small v-if="item.hint">{{ item.hint }}</small></span>
         </button>
       </template>
@@ -203,7 +208,16 @@ onBeforeUnmount(() => window.removeEventListener('resize', onResize))
   min-height: 36px;
   white-space: normal;
 }
-.setup-provider-menu__item > svg { flex: 0 0 auto; margin-top: 2px; }
+.setup-provider-menu__icon {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 16px;
+  height: 16px;
+  justify-content: center;
+  margin-top: 1px;
+  width: 16px;
+}
+.setup-provider-menu__icon :deep(svg) { display: block; }
 .setup-provider-menu__item span { min-width: 0; overflow-wrap: anywhere; }
 .setup-provider-menu__item small {
   color: var(--text-muted);

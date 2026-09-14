@@ -631,6 +631,38 @@ describe('SetupProviderPanel — configured provider management', () => {
     app.unmount()
   })
 
+  it('keeps the primary action outside the menu and puts maintenance actions in the menu', async () => {
+    const { app, el } = await mountPanel({
+      configuredProviders: configured,
+    })
+    try {
+      const primaryRow = el.querySelector<HTMLElement>('[data-provider-id="openai"]')!
+      const secondaryRow = el.querySelector<HTMLElement>('[data-provider-id="deepseek"]')!
+
+      expect(primaryRow.querySelectorAll('.setup-provider-card__actions > button')).toHaveLength(2)
+      expect(primaryRow.querySelector('.setup-provider-card__activate')).toBeNull()
+      expect(secondaryRow.querySelector('.setup-provider-card__activate')?.textContent)
+        .toContain('Set active')
+      expect(secondaryRow.querySelectorAll('.setup-provider-card__actions button')).toHaveLength(2)
+
+      const primaryMenu = await openProviderMenu(el, 'openai')
+      expect(primaryMenu.textContent).toContain('Verify saved configuration')
+      expect(primaryMenu.textContent).toContain('Delete')
+      expect(primaryMenu.textContent).not.toContain('Edit')
+      primaryMenu.querySelector<HTMLButtonElement>('[role="menuitem"]')?.click()
+      await nextTick()
+
+      const secondaryMenu = await openProviderMenu(el, 'deepseek')
+      const labels = Array.from(secondaryMenu.querySelectorAll<HTMLElement>('[role="menuitem"]'))
+        .map(item => item.textContent?.trim())
+      expect(labels).toEqual([
+        'Edit',
+        expect.stringContaining('Add key to verify'),
+        'Delete',
+      ])
+    } finally { app.unmount() }
+  })
+
   it('shows first model response before complete probe duration for a saved provider', async () => {
     const { app, el } = await mountPanel({
       configuredProviders: [configured[0]],
@@ -1317,6 +1349,10 @@ describe('SetupProviderPanel — configured provider management', () => {
     expect(interactions?.disabled).toBe(true)
     expect(interactions?.getAttribute('aria-busy')).toBe('true')
     expect(el.querySelector<HTMLButtonElement>('[data-provider-id="deepseek"] .setup-provider-card__activate')?.disabled)
+      .toBe(true)
+    expect(el.querySelector<HTMLElement>('[data-provider-id="deepseek"]')?.classList.contains('is-activating'))
+      .toBe(true)
+    expect(el.querySelector<HTMLButtonElement>('[data-provider-id="deepseek"] .setup-provider-card__activate')?.classList.contains('is-pending'))
       .toBe(true)
 
     app.unmount()
