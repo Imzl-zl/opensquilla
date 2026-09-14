@@ -87,6 +87,10 @@ def config_set(
         )
 
         reconcile_model_routing_write(updated, {key}, previous=cfg)
+        # Canonical mode reconciliation can enable Router after model validation.
+        # Resolve the same provider defaults a reload would apply before checking
+        # execution dependencies; explicit custom ladders remain untouched.
+        updated._default_squilla_router_profile_for_direct_provider()
         from opensquilla.onboarding.router_policy import validate_router_reactivation
 
         validate_router_reactivation(cfg, updated, explicit_paths={key})
