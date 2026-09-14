@@ -3039,6 +3039,57 @@ def activate_llm_profile(
     )
 
 
+def upsert_and_activate_llm_profile(
+    config: GatewayConfig,
+    *,
+    provider_id: str,
+    model: str | None = None,
+    api_key: str | None = None,
+    api_key_env: str | None = None,
+    api_key_env_pool: list[str] | tuple[str, ...] | None = None,
+    preserve_api_key: bool = False,
+    base_url: str | None = None,
+    proxy: str | None = None,
+    router_action: str | None = None,
+    image_generation_intent: str | None = None,
+) -> MutationResult:
+    """Build one fully validated candidate for saving and promoting a draft.
+
+    Both component mutations are pure, so validation failure cannot save a
+    partial draft. Reuse promotion's demotion and credential provenance rules.
+    Active edits must use the primary-provider operation, never a shadow profile.
+    """
+    provider = str(provider_id or "").strip().lower()
+    if provider == str(config.llm.provider or "").strip().lower():
+        raise LlmProfileActivationError(
+            "already_active", f"provider {provider!r} is already active"
+        )
+    saved = upsert_llm_profile(
+        config,
+        provider_id=provider,
+        model=model,
+        api_key=api_key,
+        api_key_env=api_key_env,
+        api_key_env_pool=api_key_env_pool,
+        preserve_api_key=preserve_api_key,
+        base_url=base_url,
+        proxy=proxy,
+    )
+    activated = activate_llm_profile(
+        saved.config,
+        provider_id=provider,
+        router_action=router_action,
+        image_generation_intent=image_generation_intent,
+    )
+    return MutationResult(
+        config=activated.config,
+        changed=saved.changed or activated.changed,
+        restart_required=saved.restart_required or activated.restart_required,
+        warnings=[*saved.warnings, *activated.warnings],
+        public_payload=activated.public_payload,
+    )
+
+
 def remove_active_llm_profile(
     config: GatewayConfig,
     *,

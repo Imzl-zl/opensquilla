@@ -57,7 +57,9 @@ if TYPE_CHECKING:
 
 
 @contextmanager
-def _validation_error(code: str) -> Iterator[None]:
+def _validation_error(
+    code: str, *, router_provider_id: str | None = None
+) -> Iterator[None]:
     """Translate a mutation validation error into a stable, client-localizable
     ``RpcHandlerError`` code, keeping the original English text as the message so
     the Web UI can fall back to it (and developers keep the detail).
@@ -71,6 +73,22 @@ def _validation_error(code: str) -> Iterator[None]:
     try:
         yield
     except (ValueError, KeyError) as exc:
+        from opensquilla.onboarding.mutations import LlmProfileActivationError
+
+        if (
+            router_provider_id is not None
+            and isinstance(exc, LlmProfileActivationError)
+            and exc.reason == "router_provider_conflict"
+        ):
+            raise RpcHandlerError(
+                "ROUTER_PROVIDER_CONFLICT",
+                str(exc),
+                details={
+                    "reason": exc.reason,
+                    "providerId": router_provider_id.strip().lower(),
+                    **exc.details,
+                },
+            ) from exc
         raise RpcHandlerError(code, str(exc)) from exc
 
 
@@ -503,7 +521,10 @@ async def _provider_configure(params: Any, ctx: RpcContext) -> dict[str, Any]:
         ConfigurePrimaryProvider,
     )
 
-    with _validation_error("onboarding.provider.invalid"):
+    with _validation_error(
+        "onboarding.provider.invalid",
+        router_provider_id=str(_require(params, "providerId")),
+    ):
         command = ConfigurePrimaryProvider(
             provider_id=str(_require(params, "providerId")),
             model=str(_param(params, "model", "")),
@@ -553,6 +574,65 @@ async def _llm_profile_upsert(params: Any, ctx: RpcContext) -> dict[str, Any]:
                 proxy=p.get("proxy") if "proxy" in p else None,
             )
         )
+    return cast(dict[str, Any], result.to_payload())
+
+
+async def _llm_profile_upsert_and_activate(params: Any, ctx: RpcContext) -> dict[str, Any]:
+    """Validate a draft, then save and promote it with one durable write."""
+    from pydantic import ValidationError
+
+    from opensquilla.application.profile_lifecycle import UpsertAndActivateProfile
+    from opensquilla.contracts.generated.v4.onboarding_llm_profile_upsert_and_activate import (
+        OnboardingLlmProfileUpsertAndActivateParams,
+    )
+    from opensquilla.onboarding.mutations import LlmProfileActivationError
+
+    if not isinstance(params, dict) or any(value is None for value in params.values()):
+        # Generated optional Python fields use None for omission. The new
+        # wire Contract excludes explicit null so keep absence and clear distinct.
+        raise RpcHandlerError(
+            "INVALID_REQUEST", "Invalid save-and-activate profile parameters"
+        )
+    try:
+        validated = OnboardingLlmProfileUpsertAndActivateParams.model_validate(params)
+    except ValidationError as exc:
+        # Do not echo submitted credential fields from a validation exception.
+        raise RpcHandlerError(
+            "INVALID_REQUEST", "Invalid save-and-activate profile parameters"
+        ) from exc
+    p = validated.model_dump(exclude_unset=True)
+    provider_id = p["providerId"]
+    try:
+        result = await _profile_lifecycle(ctx).upsert_and_activate(
+            UpsertAndActivateProfile(
+                provider_id=provider_id,
+                model=p.get("model"),
+                api_key=p.get("apiKey"),
+                api_key_env=p.get("apiKeyEnv"),
+                api_key_env_pool=p.get("apiKeyEnvPool"),
+                keep_current_secret=p.get(
+                    "keepCurrentSecret", p.get("preserveApiKey", False)
+                ),
+                base_url=p.get("baseUrl"),
+                proxy=p.get("proxy"),
+                router_action=p.get("routerAction", "preserve"),
+                image_generation_intent=p.get("imageGenerationIntent", "preserve"),
+            )
+        )
+    except LlmProfileActivationError as exc:
+        raise RpcHandlerError(
+            "ROUTER_PROVIDER_CONFLICT"
+            if exc.reason == "router_provider_conflict"
+            else "LLM_PROFILE_INVALID",
+            str(exc),
+            details={
+                "reason": exc.reason,
+                "providerId": provider_id.strip().lower(),
+                **exc.details,
+            },
+        ) from exc
+    except (ValueError, KeyError) as exc:
+        raise RpcHandlerError("LLM_PROFILE_INVALID", str(exc)) from exc
     return cast(dict[str, Any], result.to_payload())
 
 
@@ -1530,6 +1610,7 @@ _PLATFORM_SETUP_IMPLEMENTATIONS = {
     "onboarding.provider.credential.reveal": _provider_credential_reveal,
     "onboarding.provider.credential.clear": _provider_credential_clear,
     "onboarding.llmProfile.upsert": _llm_profile_upsert,
+    "onboarding.llmProfile.upsertAndActivate": _llm_profile_upsert_and_activate,
     "onboarding.llmProfile.activate": _llm_profile_activate,
     "onboarding.llmProfile.remove": _llm_profile_remove,
     "onboarding.llmProfile.active.remove": _llm_profile_active_remove,

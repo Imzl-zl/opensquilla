@@ -797,6 +797,14 @@
     },
     {
       "kind": "method",
+      "wireName": "onboarding.llmProfile.upsertAndActivate",
+      "roles": [
+        "params",
+        "result"
+      ]
+    },
+    {
+      "kind": "method",
       "wireName": "onboarding.memory_embedding.configure",
       "roles": [
         "result"

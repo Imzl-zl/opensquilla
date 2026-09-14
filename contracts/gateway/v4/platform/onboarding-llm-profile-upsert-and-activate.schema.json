@@ -1,16 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://opensquilla.dev/contracts/gateway/v4/platform/onboarding-provider-configure.schema.json",
-  "title": "OpenSquilla onboarding.provider.configure Contract",
-  "description": "Generated boundary Contract for the existing v4 onboarding.provider.configure behavior.",
+  "$id": "https://opensquilla.dev/contracts/gateway/v4/platform/onboarding-llm-profile-upsert-and-activate.schema.json",
+  "title": "OpenSquilla onboarding.llmProfile.upsertAndActivate Contract",
+  "description": "Atomically save a non-primary deployment draft and activate it; validation precedes a single durable write.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
     "request": {
-      "$ref": "#/$defs/OnboardingProviderConfigureRequestFrame"
+      "$ref": "#/$defs/OnboardingLlmProfileUpsertAndActivateRequestFrame"
     },
     "response": {
-      "$ref": "#/$defs/OnboardingProviderConfigureResponseFrame"
+      "$ref": "#/$defs/OnboardingLlmProfileUpsertAndActivateResponseFrame"
     }
   },
   "x-opensquilla-wire": {
@@ -35,22 +35,22 @@
     }
   },
   "x-opensquilla-method": {
-    "name": "onboarding.provider.configure",
+    "name": "onboarding.llmProfile.upsertAndActivate",
     "kind": "command",
     "scope": "operator.admin",
     "guestAllowed": false,
-    "idempotency": "idempotent",
+    "idempotency": "non-idempotent",
     "timeout": {
       "policy": "transport"
     },
     "capability": {
       "kind": "method-availability",
-      "name": "onboarding.provider.configure"
+      "name": "onboarding.llmProfile.upsertAndActivate"
     },
-    "request": "#/$defs/OnboardingProviderConfigureRequestFrame",
-    "params": "#/$defs/OnboardingProviderConfigureParams",
-    "response": "#/$defs/OnboardingProviderConfigureResponseFrame",
-    "result": "#/$defs/OnboardingProviderConfigureResult",
+    "request": "#/$defs/OnboardingLlmProfileUpsertAndActivateRequestFrame",
+    "params": "#/$defs/OnboardingLlmProfileUpsertAndActivateParams",
+    "response": "#/$defs/OnboardingLlmProfileUpsertAndActivateResponseFrame",
+    "result": "#/$defs/OnboardingLlmProfileUpsertAndActivateResult",
     "errors": [
       {
         "code": "INVALID_REQUEST"
@@ -67,73 +67,67 @@
       },
       {
         "code": "ROUTER_PROVIDER_CONFLICT"
+      },
+      {
+        "code": "LLM_PROFILE_INVALID"
       }
     ]
   },
   "$defs": {
-    "OnboardingProviderConfigureParams": {
-      "title": "onboarding.provider.configure params",
+    "OnboardingLlmProfileUpsertAndActivateParams": {
+      "title": "onboarding.llmProfile.upsertAndActivate params",
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "properties": {
         "providerId": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
         },
         "model": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string",
+          "description": "Omit to retain the stored model; empty clears it and activation uses the provider default."
         },
         "apiKey": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string",
+          "description": "Explicit credential or empty to clear; omit with keepCurrentSecret to retain a stored credential at the same endpoint."
         },
         "apiKeyEnv": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
+        },
+        "apiKeyEnvPool": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "keepCurrentSecret": {
+          "type": "boolean",
+          "description": "Retain the stored key only when the endpoint permits credential reuse."
         },
         "preserveApiKey": {
-          "type": [
-            "boolean",
-            "null"
-          ]
+          "type": "boolean"
         },
         "baseUrl": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "proxy": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "presetId": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "routerAction": {
-          "type": [
-            "string",
-            "null"
+          "type": "string",
+          "enum": [
+            "preserve",
+            "use_recommended",
+            "enable_cross_provider",
+            "disable"
           ]
         },
         "imageGenerationIntent": {
-          "type": [
-            "string",
-            "null"
+          "type": "string",
+          "enum": [
+            "preserve",
+            "enable_provider_default"
           ]
         }
       },
@@ -141,7 +135,7 @@
         "providerId"
       ]
     },
-    "OnboardingProviderConfigureRequestFrame": {
+    "OnboardingLlmProfileUpsertAndActivateRequestFrame": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -157,14 +151,14 @@
           "type": "string"
         },
         "method": {
-          "const": "onboarding.provider.configure"
+          "const": "onboarding.llmProfile.upsertAndActivate"
         },
         "params": {
-          "$ref": "#/$defs/OnboardingProviderConfigureParams"
+          "$ref": "#/$defs/OnboardingLlmProfileUpsertAndActivateParams"
         }
       }
     },
-    "OnboardingProviderConfigureResult": {
+    "OnboardingLlmProfileUpsertAndActivateResult": {
       "type": "object",
       "additionalProperties": true,
       "required": [
@@ -226,7 +220,7 @@
         }
       }
     },
-    "OnboardingProviderConfigureOkResponseFrame": {
+    "OnboardingLlmProfileUpsertAndActivateOkResponseFrame": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -246,14 +240,14 @@
           "const": true
         },
         "payload": {
-          "$ref": "#/$defs/OnboardingProviderConfigureResult"
+          "$ref": "#/$defs/OnboardingLlmProfileUpsertAndActivateResult"
         },
         "error": {
           "type": "null"
         }
       }
     },
-    "OnboardingProviderConfigureErrorResponseFrame": {
+    "OnboardingLlmProfileUpsertAndActivateErrorResponseFrame": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -280,13 +274,13 @@
         }
       }
     },
-    "OnboardingProviderConfigureResponseFrame": {
+    "OnboardingLlmProfileUpsertAndActivateResponseFrame": {
       "oneOf": [
         {
-          "$ref": "#/$defs/OnboardingProviderConfigureOkResponseFrame"
+          "$ref": "#/$defs/OnboardingLlmProfileUpsertAndActivateOkResponseFrame"
         },
         {
-          "$ref": "#/$defs/OnboardingProviderConfigureErrorResponseFrame"
+          "$ref": "#/$defs/OnboardingLlmProfileUpsertAndActivateErrorResponseFrame"
         }
       ]
     }

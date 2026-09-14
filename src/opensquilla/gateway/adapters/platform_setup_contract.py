@@ -25,6 +25,7 @@ PLATFORM_SETUP_CONTRACT_METHODS: Final = (
     "onboarding.provider.credential.reveal",
     "onboarding.provider.credential.clear",
     "onboarding.llmProfile.upsert",
+    "onboarding.llmProfile.upsertAndActivate",
     "onboarding.llmProfile.activate",
     "onboarding.llmProfile.remove",
     "onboarding.llmProfile.active.remove",
