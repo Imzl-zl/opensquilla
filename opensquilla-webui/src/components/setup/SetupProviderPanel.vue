@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import ControlSwitch from '@/components/ControlSwitch.vue'
@@ -138,6 +138,8 @@ const editorHeadingRef = ref<HTMLElement | null>(null)
 const editorDialogRef = ref<HTMLElement | null>(null)
 const sectionRef = ref<HTMLElement | null>(null)
 const pendingRemoval = ref<{ providerId: string; index: number } | null>(null)
+const recentlyActivatedProviderId = ref('')
+let recentlyActivatedTimer: ReturnType<typeof setTimeout> | null = null
 const dialogInvoker = ref<HTMLElement | null>(null)
 
 const selectedProviderLabel = computed(() => (
@@ -379,6 +381,24 @@ watch(() => props.panel.configuredProviders, rows => {
     })
   }
 }, { deep: true })
+
+const activeConfiguredProviderId = computed(() => (
+  props.panel.configuredProviders.find(row => row.active)?.providerId || ''
+))
+
+watch(activeConfiguredProviderId, (providerId, previousProviderId) => {
+  if (!previousProviderId || !providerId || providerId === previousProviderId) return
+  recentlyActivatedProviderId.value = providerId
+  if (recentlyActivatedTimer) clearTimeout(recentlyActivatedTimer)
+  recentlyActivatedTimer = setTimeout(() => {
+    recentlyActivatedProviderId.value = ''
+    recentlyActivatedTimer = null
+  }, 700)
+})
+
+onBeforeUnmount(() => {
+  if (recentlyActivatedTimer) clearTimeout(recentlyActivatedTimer)
+})
 
 function probeFor(providerId: string): ConnectionState {
   return (props.panel.configuredProviderProbes || {})[providerId.toLowerCase()] || {
@@ -796,6 +816,7 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
           'is-primary': provider.active,
           'is-selected': editorOpen && isEditingProvider(provider.providerId),
           'is-activating': activationInProgress(provider.providerId),
+          'is-settling': recentlyActivatedProviderId === provider.providerId,
         }"
         :data-provider-id="provider.providerId"
       >
@@ -1546,6 +1567,30 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
   box-shadow: inset 3px 0 0 var(--accent), inset 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
+.setup-provider-card.is-settling {
+  animation: provider-primary-settle var(--dur-enter) var(--ease-out) both;
+}
+
+.setup-provider-card.is-settling .setup-provider-card__primary-status {
+  animation: provider-primary-badge-settle var(--dur-base) var(--ease-spring) both;
+}
+
+@keyframes provider-primary-settle {
+  from {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    box-shadow: inset 4px 0 0 var(--accent), inset 0 0 0 1px color-mix(in srgb, var(--accent) 34%, transparent);
+  }
+  to {
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
+    box-shadow: inset 2px 0 0 var(--accent);
+  }
+}
+
+@keyframes provider-primary-badge-settle {
+  from { opacity: 0; transform: translateX(-4px) scale(.96); }
+  to { opacity: 1; transform: translateX(0) scale(1); }
+}
+
 .setup-provider-card__identity {
   appearance: none;
   align-self: stretch;
@@ -2162,8 +2207,11 @@ const tokenRhythmCredentialReplacementRequired = computed(() => (
 
   .provider-list-move,
   .provider-list-enter-active,
-  .provider-list-leave-active {
+  .provider-list-leave-active,
+  .setup-provider-card.is-settling,
+  .setup-provider-card.is-settling .setup-provider-card__primary-status {
     transition: none;
+    animation: none;
   }
 }
 

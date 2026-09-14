@@ -1358,6 +1358,27 @@ describe('SetupProviderPanel — configured provider management', () => {
     app.unmount()
   })
 
+  it('marks the newly active row while the primary transition settles', async () => {
+    vi.useFakeTimers()
+    const { app, el, panelState } = await mountPanel({ configuredProviders: configured })
+    try {
+      const rows = panelState.configuredProviders as Array<Record<string, unknown>>
+      rows[0]!.active = false
+      rows[1]!.active = true
+      await nextTick()
+
+      expect(el.querySelector('[data-provider-id="deepseek"]')?.classList.contains('is-settling'))
+        .toBe(true)
+      vi.advanceTimersByTime(700)
+      await nextTick()
+      expect(el.querySelector('[data-provider-id="deepseek"]')?.classList.contains('is-settling'))
+        .toBe(false)
+    } finally {
+      app.unmount()
+      vi.useRealTimers()
+    }
+  })
+
   it('disables provider interactions while removing a credential and restores credential focus', async () => {
     const { app, el, panelState } = await mountPanel({
       credentialRemovalPending: true,
