@@ -73,6 +73,7 @@ RECENTLY_ADDED_ACTIVE_TESTS = {
     "tests/contracts/test_gateway_validator_profiles.py",
     "tests/test_desktop/test_router_provider_bridge.py",
     "tests/test_gateway/test_router_recommended_reset.py",
+    "tests/test_scripts/test_gateway_ux.py",
     "tests/test_engine/test_agent_autonomous_tool_recovery.py",
     "tests/test_engine/test_agent_connection_recovery.py",
     "tests/test_engine/test_selector_provider_recovery.py",
