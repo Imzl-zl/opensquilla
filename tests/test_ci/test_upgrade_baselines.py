@@ -665,6 +665,9 @@ def test_rehearsal_driver_accepts_selected_baseline(
     assert f"DOWNLOAD_REACHED:{selected}" in result.stderr
 
 
+# Keep all consumers of the shared Node driver in the serial phase. Otherwise
+# moving one cold-start probe leaves the next consumer exposed to the same
+# Windows runner contention; these are behavior contracts, not latency checks.
 @pytest.mark.ci_serial
 def test_rehearsal_driver_rejects_mislabeled_official_baseline(
     rehearsal_driver: tuple[str, Path],
@@ -684,6 +687,7 @@ def test_rehearsal_driver_rejects_mislabeled_official_baseline(
         ("0.5.4", "0.5.5rc1", "must be a canonical stable version"),
     ],
 )
+@pytest.mark.ci_serial
 def test_rehearsal_driver_rejects_invalid_versions_before_launch(
     rehearsal_driver: tuple[str, Path], baseline: str, candidate: str, message: str
 ) -> None:
@@ -696,6 +700,7 @@ def test_rehearsal_driver_rejects_invalid_versions_before_launch(
 
 
 @pytest.mark.parametrize("baseline", [None, "0.5.3", "0.5.4", "0.5.5rc1"])
+@pytest.mark.ci_serial
 def test_signed_handoff_rejects_missing_or_legacy_baseline_before_launch(
     rehearsal_driver: tuple[str, Path], baseline: str | None
 ) -> None:
@@ -712,6 +717,7 @@ def test_signed_handoff_rejects_missing_or_legacy_baseline_before_launch(
 
 
 @pytest.mark.parametrize("missing", ["source_sha", "expected_sha"])
+@pytest.mark.ci_serial
 def test_signed_handoff_requires_pinned_artifact_before_launch(
     rehearsal_driver: tuple[str, Path], missing: str
 ) -> None:
@@ -729,6 +735,7 @@ def test_signed_handoff_requires_pinned_artifact_before_launch(
 
 
 @pytest.mark.parametrize("fault", ["capability-denied", "cache-replaced"])
+@pytest.mark.ci_serial
 def test_signed_handoff_rejects_unverified_or_changed_candidate(
     rehearsal_driver: tuple[str, Path], fault: str
 ) -> None:
@@ -749,6 +756,7 @@ def test_signed_handoff_rejects_unverified_or_changed_candidate(
     assert not (rehearsal_driver[1].parent / "handoff.json").exists()
 
 
+@pytest.mark.ci_serial
 def test_signed_handoff_records_only_handoff_until_outer_audit_verifies_install(
     rehearsal_driver: tuple[str, Path],
 ) -> None:
@@ -781,6 +789,7 @@ def test_signed_handoff_records_only_handoff_until_outer_audit_verifies_install(
 
 
 @pytest.mark.parametrize("fault", ["", "discovery", "download"])
+@pytest.mark.ci_serial
 def test_signed_download_fallback_requires_both_stage_observations(
     rehearsal_driver: tuple[str, Path], fault: str
 ) -> None:
@@ -807,6 +816,7 @@ def test_signed_download_fallback_requires_both_stage_observations(
     ("native", "github-to-oss"), ("manual", "oss"),
     ("signed-cached-handoff", "github-to-oss"), ("signed-handoff", "invalid"),
 ])
+@pytest.mark.ci_serial
 def test_download_source_override_rejects_other_modes_before_launch(
     rehearsal_driver: tuple[str, Path], mode: str, source: str
 ) -> None:
