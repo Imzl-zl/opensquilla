@@ -6,7 +6,7 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { test } from 'node:test'
 import { setTimeout as delay } from 'node:timers/promises'
 import { runInNewContext } from 'node:vm'
-import { AUDIT_MARKER, AUDIT_PURPOSE, assertPreservedInputs, assertStopEvidence, auditMessages, parseAuditManifest, parseSyntheticCredential, sha256, verifyAuditInputs } from './fixtures/packaged-retained-interaction/contract.mjs'
+import { AUDIT_MARKER, AUDIT_PURPOSE, assertNoExistingDesktop, assertPreservedInputs, assertStopEvidence, auditMessages, parseAuditManifest, parseSyntheticCredential, sha256, verifyAuditInputs } from './fixtures/packaged-retained-interaction/contract.mjs'
 import { installRetainedRpcProbe } from './fixtures/packaged-retained-interaction/browser-probe.mjs'
 import { startRetainedProvider } from './fixtures/packaged-retained-interaction/provider.mjs'
 
@@ -102,6 +102,37 @@ test('only credential-free fixed synthetic models at explicit IPv4 loopback are 
     assert.throws(() => parseSyntheticCredential({ ...credential(), ...change }))
   }
   assert.throws(() => parseSyntheticCredential({ ...credential(), encryptedApiKey: 'private-marker-must-not-appear' }), error => !error.message.includes('private-marker-must-not-appear'))
+})
+
+test('Desktop process guard uses a bounded native census and parses full quoted CSV', async () => {
+  const windowsDirectory = join(tmpdir(), 'Windows')
+  let calls = 0
+  await assertNoExistingDesktop(async (command, args, options) => {
+    calls += 1
+    assert.equal(command, join(windowsDirectory, 'System32', 'tasklist.exe'))
+    assert.deepEqual(args, ['/FO', 'CSV', '/NH'])
+    assert.deepEqual(options, { windowsHide: true, timeout: 15_000 })
+    return { stdout: '\r\n"System Idle Process","0","Services","0","8 K"\r\n"Other,""quoted"".exe","42","Console","1","26,228 K"\r\n', stderr: '' }
+  }, windowsDirectory)
+  assert.equal(calls, 1)
+})
+
+test('Desktop process guard rejects any existing Desktop and every incomplete census', async () => {
+  const windowsDirectory = join(tmpdir(), 'Windows')
+  const row = '"System","4","Services","0","8 K"'
+  for (const name of ['OpenSquilla.exe', 'opensquilla.exe', 'OPENSQUILLA.EXE']) {
+    await assert.rejects(assertNoExistingDesktop(async () => ({ stdout: `${row}\r\n"${name}","42","Console","1","26,228 K"`, stderr: '' }), windowsDirectory), /Close existing Desktop/)
+  }
+  for (const stdout of ['', '\r\n', 'INFO: No tasks are running which match the specified criteria.', `${row}\r\nbroken`, `${row}\r\n\r\n${row}`, '"System","not-a-pid","Services","0","8 K"', '"System","4","Services","0"', `${row},"extra"`, '"","4","Services","0","8 K"', '"System","4","Services","0","8 K']) {
+    await assert.rejects(assertNoExistingDesktop(async () => ({ stdout, stderr: '' }), windowsDirectory), /Windows process census/)
+  }
+  await assert.rejects(assertNoExistingDesktop(async () => ({ stdout: row, stderr: 'query failed' }), windowsDirectory), /unexpected stderr/)
+  for (const failure of [Object.assign(new Error('tasklist exited unsuccessfully'), { code: 1 }), Object.assign(new Error('tasklist timed out'), { killed: true, signal: 'SIGTERM' })]) {
+    let calls = 0
+    await assert.rejects(assertNoExistingDesktop(async () => { calls += 1; throw failure }, windowsDirectory), error => error === failure)
+    assert.equal(calls, 1, 'Process census failures must not retry or pass')
+  }
+  await assert.rejects(assertNoExistingDesktop(async () => assert.fail('Invalid SystemRoot must not spawn a process'), 'relative-directory'), /absolute SystemRoot/)
 })
 
 const stopSnapshot = () => ({ requests: [{ method: 'chat.abort', params: { sessionKey: 'session-a', taskId: 'task-a', source: 'webui_stop', scope: 'task' } }], events: [{ taskId: 'task-a', reason: 'aborted' }] })
