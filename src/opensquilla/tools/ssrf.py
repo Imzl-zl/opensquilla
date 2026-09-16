@@ -166,9 +166,11 @@ def environment_proxy_url(url: str) -> str | None:
     """Return the opted-in environment proxy applicable to ``url``.
 
     Callers remain responsible for gating this helper with
-    ``opensquilla.env.trust_env()``. Resolving the proxy explicitly lets the
-    pinned transport preserve DNS-rebinding protection instead of relying on
-    HTTPX's ambient proxy discovery, which is disabled by a custom transport.
+    ``opensquilla.env.trust_env()``. Prefer passing the returned URL as an
+    explicit httpx ``proxy`` (and skipping DNS pinning) so the proxy can
+    resolve the original hostname. Passing it into ``pinned_transport`` still
+    CONNECT's to the locally resolved IP, which fails on censored networks
+    where that address is poisoned or TLS-intercepted.
     """
     parsed = urlparse(url)
     hostname = parsed.hostname

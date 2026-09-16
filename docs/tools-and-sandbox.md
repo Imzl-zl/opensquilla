@@ -126,6 +126,11 @@ For source-backed answers, `web_search` is the default high-level web tool.
 `web_discover` is lightweight link discovery, `web_fetch` reads a specific
 page, and `http_request` is reserved for raw HTTP/API requests.
 
+`web_fetch` and `http_request` honor `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`
+only when `OPENSQUILLA_TRUST_ENV=1`. That opt-in is off by default. Search
+providers use the separate `search_use_env_proxy` setting. See
+[`configuration.md`](configuration.md#environment-proxies).
+
 ## Tool Compression
 
 Large tool results may be compacted before they are shown to the model. This is

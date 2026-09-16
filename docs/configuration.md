@@ -372,6 +372,23 @@ Only subnets of `198.18.0.0/15` are accepted in this setting. Loopback, RFC
 hard-blocked even if configured. If a public hostname resolves to one of those
 hard-blocked ranges, fix the DNS or proxy setup instead of bypassing the guard.
 
+## Environment Proxies
+
+Outbound HTTP clients ignore `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` by
+default so a stray proxy in a parent shell cannot reroute agent traffic. Set
+`OPENSQUILLA_TRUST_ENV=1` (for example in `~/.opensquilla/.env`) to opt in.
+That gate is shared by channel adapters, providers, `http_request`, and
+`web_fetch`.
+
+`web_search` has a separate `search_use_env_proxy` / `OPENSQUILLA_GATEWAY_SEARCH_USE_ENV_PROXY`
+switch; it does not enable `web_fetch`.
+
+When trust-env is on and an environment proxy applies to the URL, `web_fetch`
+skips client-side DNS pinning and sends the original hostname to the proxy.
+Pinning through a local resolver would CONNECT to a poisoned or intercepted IP
+on censored networks. Direct fetches (no opted-in proxy) still pin to the
+SSRF-vetted address. The SSRF guard still runs on the pre-fetch DNS lookup.
+
 ## Gateway Binding
 
 The desktop application always owns a loopback-only child Gateway bound to
