@@ -70,7 +70,9 @@ def toc_records(value: object) -> Iterator[tuple[str, str, str]]:
     if isinstance(value, (list, tuple)):
         if len(value) == 3 and all(isinstance(item, str) for item in value):
             name, source, kind = value
-            if kind in {"PYMODULE", "PYSOURCE", "EXTENSION", "BINARY", "DATA"}:
+            if re.fullmatch(r"(?:PYMODULE|PYSOURCE)(?:-[12])?", kind) or kind in {
+                "EXTENSION", "BINARY", "DATA"
+            }:
                 yield name, source, kind
                 return
         for item in value:

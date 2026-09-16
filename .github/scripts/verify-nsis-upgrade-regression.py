@@ -991,6 +991,7 @@ class Audit:
             'expectedCandidateAsarSha256': args.candidate_asar_sha256,
             'expectedCandidateExecutableSha256': args.candidate_executable_sha256,
             'expectedCandidateInstallerSha256': args.candidate_installer_sha256,
+            'expectedCandidateDependencyInventorySha256': args.candidate_dependency_inventory_sha256,
             'candidateSourceSha': args.candidate_source_sha,
         }
         require(args.baseline_version in OFFICIAL_BASELINE_SHA256, 'Only pinned official 0.5.3 and 0.5.4 baselines are accepted')
@@ -1142,7 +1143,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--candidate-version', default='0.5.4')
     parser.add_argument('--candidate-asar-sha256', required=True)
     parser.add_argument('--candidate-executable-sha256', required=True)
-    parser.add_argument('--candidate-dependency-inventory-sha256', default='')
+    parser.add_argument('--candidate-dependency-inventory-sha256', required=True)
     parser.add_argument('--candidate-installer-sha256', required=True)
     parser.add_argument('--candidate-source-sha', required=True)
     parser.add_argument('--case', required=True, choices=['baseline', 'readlock', 'longpath'])
@@ -1155,7 +1156,8 @@ def parse_args() -> argparse.Namespace:
         args.candidate_version = args.candidate_version[:-2]
     for value in [args.baseline_version, args.candidate_version]:
         parser.error('Versions must be stable X.Y.Z') if not re.fullmatch(r'\d+\.\d+\.\d+', value) else None
-    for value in [args.candidate_asar_sha256, args.candidate_executable_sha256, args.candidate_installer_sha256]:
+    for value in [args.candidate_asar_sha256, args.candidate_executable_sha256,
+                  args.candidate_installer_sha256, args.candidate_dependency_inventory_sha256]:
         parser.error('Expected hashes must be SHA-256 hex') if value and not re.fullmatch(r'[a-fA-F0-9]{64}', value) else None
     if not re.fullmatch(r'[a-f0-9]{40}', args.candidate_source_sha):
         parser.error('Candidate source must be a full lowercase Git commit SHA')

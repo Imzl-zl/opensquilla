@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from io import BytesIO
-from urllib.parse import urlsplit
 
 import pytest
 from PIL import Image
@@ -48,5 +47,10 @@ def test_presentational_background_cannot_inject_a_second_fetch(template: str) -
     requests.clear()
     payload = "x);background-image:url(https://injected.invalid/secret)"
     assert render(payload).startswith(b"%PDF-")
-    assert requests, "the original background should still be treated as one URL"
-    assert all(urlsplit(url).hostname == "assets.invalid" for url in requests), requests
+    # Treat the attribute as one URL (with normalized path separators),
+    # retaining CSS punctuation as path data.
+    # Merely observing no request to the second host would also pass if the
+    # CSS parser discarded the malformed declaration instead of escaping it.
+    assert requests == [
+        "https://assets.invalid/x);background-image:url(https:/injected.invalid/secret)"
+    ]

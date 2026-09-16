@@ -101,3 +101,9 @@ def test_frozen_inventory_does_not_execute_toc(tmp_path):
     with pytest.raises((ValueError, SyntaxError)):
         inventory.frozen_packages(tmp_path, analysis, {}, [])
     assert not marker.exists()
+
+
+@pytest.mark.parametrize("kind", ["PYMODULE-1", "PYMODULE-2", "PYSOURCE-1", "PYSOURCE-2"])
+def test_optimized_python_modules_remain_in_inventory(kind):
+    record = ("example", "/build/site-packages/example.py", kind)
+    assert list(inventory.toc_records([record])) == [record]
