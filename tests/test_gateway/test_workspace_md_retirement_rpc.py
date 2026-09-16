@@ -15,10 +15,14 @@ FIXTURES = Path(__file__).parents[1] / "fixtures" / "workspace_md_retirement"
 
 
 @pytest.mark.parametrize("registry_enabled", [False, True])
-async def test_file_rpc_contract_and_no_default_upgrade_on_reads(tmp_path, registry_enabled):
+@pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+async def test_file_rpc_contract_and_no_default_upgrade_on_reads(
+    tmp_path, registry_enabled, newline
+):
     root = tmp_path / "workspace"
     ensure_agent_workspace(root)
-    old_agents = (FIXTURES / "AGENTS.txt").read_bytes()
+    old_agents_text = (FIXTURES / "AGENTS.txt").read_text(encoding="utf-8")
+    old_agents = old_agents_text.replace("\n", newline).encode("utf-8")
     (root / "AGENTS.md").write_bytes(old_agents)
     for name in RETIRED_WORKSPACE_FILENAMES:
         (root / name).write_bytes(b"old data")
@@ -46,7 +50,8 @@ async def test_file_rpc_contract_and_no_default_upgrade_on_reads(tmp_path, regis
         ctx,
     )
     assert read.error is None
-    assert read.payload["content"].encode() == old_agents
+    assert read.payload["content"] == old_agents_text
+    assert (root / "AGENTS.md").read_bytes() == old_agents
     assert not (root / ".opensquilla").exists()
     for name in RETIRED_WORKSPACE_FILENAMES:
         for method in ("get", "set"):
