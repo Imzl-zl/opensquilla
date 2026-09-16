@@ -14,6 +14,9 @@ const runtimeSuffix = / ?\n\n\[Runtime context for this turn\]\nCurrent local da
 export async function startRetainedProvider({ baseUrl, model, messages, sentinelPath, sentinelTokenSha256 }) {
   const endpoint = new URL(baseUrl)
   assert.equal(endpoint.hostname, '127.0.0.1')
+  // Match render_execution_identity for this bound synthetic deployment only.
+  // The identity is part of runtime context, never arbitrary user text.
+  const executionSuffix = '\nCurrent response execution: ' + JSON.stringify({ kind: 'single_model', provider: 'ollama', model })
   const state = { first: 0, toolCalls: 0, toolResults: 0, held: 0, cancelledBeforeCleanup: 0, afterStop: 0, restart: 0, errors: [] }
   const sockets = new Set()
   let closing = false
@@ -46,7 +49,12 @@ export async function startRetainedProvider({ baseUrl, model, messages, sentinel
       assert.ok(Array.isArray(payload.messages), 'Missing provider messages')
       const userIndex = payload.messages.findLastIndex(message => message.role === 'user')
       const content = payload.messages[userIndex]?.content
-      const prompt = typeof content === 'string' ? content.replace(timePrefix, '').replace(runtimeSuffix, '') : content
+      let prompt = typeof content === 'string' ? content.replace(timePrefix, '') : content
+      if (typeof prompt === 'string' && prompt.endsWith(executionSuffix)) {
+        const withoutIdentity = prompt.slice(0, -executionSuffix.length)
+        if (runtimeSuffix.test(withoutIdentity)) prompt = withoutIdentity
+      }
+      if (typeof prompt === 'string') prompt = prompt.replace(runtimeSuffix, '')
       if (prompt === messages.first) {
         assert.equal(++state.first, 1, 'Duplicate first send')
         send(response, messages.firstAnswer)

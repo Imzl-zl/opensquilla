@@ -182,6 +182,45 @@ test('provider accepts the separator inserted between Ollama content blocks', as
   assert.match(await response.text(), /RETAINED_FIRST_OK/)
   assert.equal(provider.snapshot().first, 1)
 })
+test('provider accepts the complete runtime context with its bound execution identity', async t => {
+  // Captured from the real packaged Gateway: execution_identity.py appends
+  // this compact JSON line after the runtime context before Ollama dispatch.
+  for (const separator of ['', ' ']) {
+    await t.test(`content separator ${JSON.stringify(separator)}`, async t => {
+      const { provider, messages, post } = await providerFixture(t)
+      const identity = JSON.stringify({ kind: 'single_model', provider: 'ollama', model: credential().model })
+      const response = await post(messages.first + separator + runtimeSuffix + `\nCurrent response execution: ${identity}`)
+      assert.equal(response.status, 200)
+      assert.match(await response.text(), /RETAINED_FIRST_OK/)
+      assert.equal(provider.snapshot().first, 1)
+      assert.deepEqual(provider.snapshot().errors, [])
+    })
+  }
+})
+test('execution identity must exactly match the fixture and follow one complete runtime context', async t => {
+  const { provider, messages, post } = await providerFixture(t)
+  const identity = { kind: 'single_model', provider: 'ollama', model: credential().model }
+  const line = `\nCurrent response execution: ${JSON.stringify(identity)}`
+  const wrongIdentities = [
+    { ...identity, kind: 'multi_model_fusion' },
+    { ...identity, provider: 'other' },
+    { ...identity, model: 'other' },
+    { ...identity, extra: 'unexpected' },
+  ]
+  for (const content of [
+    ...wrongIdentities.map(value => messages.first + runtimeSuffix + `\nCurrent response execution: ${JSON.stringify(value)}`),
+    messages.first + line,
+    messages.first + runtimeSuffix + line + line,
+    messages.first + runtimeSuffix + line + '\nextra',
+    messages.first + runtimeSuffix + '\nCurrent response execution: {bad json}',
+    messages.first + line + runtimeSuffix,
+  ]) {
+    const response = await post(content)
+    assert.equal(response.status, 422)
+    await response.text()
+  }
+  assert.equal(provider.snapshot().first, 0)
+})
 test('provider rejects quoted, repeated, malformed or historical audit prompts', async t => {
   const { provider, messages, post } = await providerFixture(t)
   const prefix = '[2026-09-10T16:00+08:00 Thu Asia/Shanghai]\n'
