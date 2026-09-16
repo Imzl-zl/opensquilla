@@ -87,16 +87,22 @@ def _hold_profile_lock(home: str, state_root: str, ready, release) -> None:
 
 
 def _hold_gateway(home: str, ready, release) -> None:
-    from opensquilla.gateway.pidlock import GatewayPidLock
+    from opensquilla.recovery.locking import (
+        acquire_gateway_legacy_lease,
+        release_gateway_legacy_lease,
+    )
 
+    # Cleanup checks the OS lock authority, not gateway.pid metadata. Use the
+    # same lease as GatewayPidLock without importing the entire Gateway app in
+    # this Windows spawn child before it can signal readiness.
     state = Path(home) / "state"
-    lock = GatewayPidLock(state)
-    lock.acquire()
+    lease = acquire_gateway_legacy_lease(state)
+    assert lease is not None
     try:
         ready.set()
         release.wait(10)
     finally:
-        lock.release()
+        release_gateway_legacy_lease(lease)
 
 
 def _hold_recreated_legacy_gateway(home: str, ready, release) -> None:
