@@ -1,0 +1,37 @@
+{
+  "schema_version": "opensquilla-monthly-fusion-lineups/v1",
+  "provider": "openrouter",
+  "fallback_model": "deepseek/deepseek-v4-pro",
+  "thinking_level": "high",
+  "ensemble": {
+    "proposer_tools": false,
+    "min_successful_proposers": 1,
+    "proposer_max_retries": 0,
+    "all_failed_policy": "fallback_single",
+    "candidate_max_chars": 24000,
+    "proposer_timeout_seconds": 120.0,
+    "aggregator_timeout_seconds": 180.0,
+    "shuffle_candidates": false,
+    "record_candidates": true
+  },
+  "groups": {
+    "baseline": {
+      "proposers": [
+        "deepseek/deepseek-v4.1-flash",
+        "z-ai/glm-5.3-flash",
+        "minimax/minimax-m3",
+        "qwen/qwen3.8-max-0902"
+      ],
+      "aggregator": "deepseek/deepseek-v4.1-flash"
+    },
+    "candidate": {
+      "proposers": [
+        "deepseek/deepseek-v4.1-flash",
+        "z-ai/glm-5.3-flash",
+        "minimax/minimax-m3",
+        "qwen/qwen3.8-flash"
+      ],
+      "aggregator": "deepseek/deepseek-v4.1-flash"
+    }
+  }
+}

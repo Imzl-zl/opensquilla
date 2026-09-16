@@ -1,0 +1,7 @@
+{
+  "id": "provider/model",
+  "pricing": {
+    "prompt": "0.000001",
+    "completion": "0.000002"
+  }
+}
