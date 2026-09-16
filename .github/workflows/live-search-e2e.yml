@@ -1,101 +1,50 @@
-name: Live Search E2E
-
-"on":
+name: Windows upgrade baseline preflight
+on:
   workflow_dispatch:
-    inputs:
-      run_extended_matrix:
-        description: "Run the broader live provider/API matrix"
-        required: false
-        type: boolean
-        default: false
-
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
-  live-search-e2e:
-    name: Live search provider and agent gates
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+  windows-preflight:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
     env:
-      PYTHONPATH: ${{ github.workspace }}
-      OPENSQUILLA_TURN_CALL_LOG: "0"
-      OPENSQUILLA_LIVE_SEARCH: "1"
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      OPENROUTER_BASE_URL: ${{ vars.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1' }}
-      LLM_TEST_MODEL: ${{ vars.LLM_TEST_MODEL || 'openai/gpt-4o-mini' }}
-      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-      BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
-      EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
-      FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
-
+      OPENSQUILLA_TESTING: "true"
+      PYTHONPATH: ${{ github.workspace }}/src
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Configure runtime directories
-        shell: bash
-        run: |
-          printf 'OPENSQUILLA_STATE_DIR=%s/opensquilla-state\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-          printf 'OPENSQUILLA_LOG_DIR=%s/opensquilla-logs\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+          persist-credentials: false
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Install dependencies
-        run: uv sync --extra dev --extra recommended --frozen
-
-      - name: Fail if required live search secrets are missing
-        shell: bash
+      - uses: astral-sh/setup-uv@v5
+      - name: Prepare isolated runtime and dependencies
         run: |
-          if [ -z "$OPENROUTER_API_KEY" ]; then
-            echo "OPENROUTER_API_KEY GitHub secret is required"
-            exit 1
-          fi
-          if [ -z "$TAVILY_API_KEY" ]; then
-            echo "TAVILY_API_KEY GitHub secret is required"
-            exit 1
-          fi
-          if [ "${{ inputs.run_extended_matrix }}" = "true" ] \
-            && [ -z "$BRAVE_SEARCH_API_KEY" ]; then
-            echo "BRAVE_SEARCH_API_KEY GitHub secret is required for the extended matrix"
-            exit 1
-          fi
-          if [ "${{ inputs.run_extended_matrix }}" = "true" ] \
-            && [ -z "$EXA_API_KEY" ]; then
-            echo "EXA_API_KEY GitHub secret is required for the extended matrix"
-            exit 1
-          fi
-          if [ "${{ inputs.run_extended_matrix }}" = "true" ] \
-            && [ -z "$FIRECRAWL_API_KEY" ]; then
-            echo "FIRECRAWL_API_KEY GitHub secret is required for the extended matrix"
-            exit 1
-          fi
-
-      - name: Run core live search gates
+          "OPENSQUILLA_STATE_DIR=$env:RUNNER_TEMP/preflight-state" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "OPENSQUILLA_LOG_DIR=$env:RUNNER_TEMP/preflight-logs" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          uv sync --locked --extra dev --extra recommended --extra mcp
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency setup failed' }
+      - name: Verify source and interpreter
         run: |
-          timeout 180s uv run pytest \
-            tests/live/test_search_retrieval_live.py \
-            tests/live/test_web_search_agent_e2e.py \
-            -m live_search \
-            -q -s
-
-      - name: Run extended live search matrix
-        if: ${{ inputs.run_extended_matrix }}
-        env:
-          OPENSQUILLA_LIVE_SEARCH_MATRIX: "1"
+          (Get-Location).Path
+          git rev-parse --show-toplevel HEAD
+          uv run python -c "import sys,opensquilla;print(sys.executable);print(opensquilla.__file__)"
+          node --version
+          $PSVersionTable.PSVersion.ToString()
+      - name: Recheck all three previously failing probes
         run: |
-          timeout 240s uv run pytest \
-            tests/live/test_search_api_matrix_live.py \
-            -m live_search \
-            -q -s
+          uv run pytest -q --tb=short --durations=10 `
+            'tests/test_ci/test_upgrade_baselines.py::test_packaged_recovery_preserves_original_failure_after_cleanup[False-False]' `
+            tests/test_ci/test_upgrade_baselines.py::test_windows_nsis_known_folder_is_independent_of_localappdata_environment `
+            tests/test_ci/test_upgrade_baselines.py::test_rehearsal_driver_rejects_mislabeled_official_baseline
+          if ($LASTEXITCODE -ne 0) { throw 'Previously failing probe failed' }
+      - name: Run complete affected files with the production phase split
+        run: |
+          uv run pytest -q --tb=short --durations=10 -n 4 --dist=loadfile -m 'not ci_serial' tests/test_ci/test_upgrade_baselines.py tests/test_ci/test_windows_test_shards.py tests/test_tools/test_web_fetch_proxy.py
+          if ($LASTEXITCODE -ne 0) { throw 'Parallel file preflight failed' }
+          uv run pytest -q --tb=short --durations=10 -m ci_serial tests/test_ci/test_upgrade_baselines.py tests/test_ci/test_windows_test_shards.py tests/test_tools/test_web_fetch_proxy.py
+          if ($LASTEXITCODE -ne 0) { throw 'Serial file preflight failed' }
