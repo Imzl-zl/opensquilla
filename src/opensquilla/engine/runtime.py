@@ -6448,6 +6448,13 @@ class TurnRunner:
                 image_failure_cleanup = temporary_images.cleanup
                 attachment_cleanup = image_failure_cleanup
 
+            if tool_context is not None:
+                from opensquilla.skills.install_turn import SkillInstallTurn
+
+                tool_context = replace(
+                    tool_context,
+                    skill_install_turn=SkillInstallTurn(semantic_message or message),
+                )
             pt_outcome = await self._provider_and_tools_stage.run(
                 ProviderAndToolsStageInput(
                     session_key=session_key,
@@ -6481,6 +6488,8 @@ class TurnRunner:
                 await self._persist_turn_error(
                     session_key,
                     provider_error_event,
+                    turn_id=turn_id,
+                    surface=input_mode or "unknown",
                     expected_session_id=expected_session_id,
                     expected_session_epoch=expected_session_epoch,
                 )
@@ -7498,6 +7507,24 @@ class TurnRunner:
             # append -> memory capture (try/except) -> error persist ->
             # session totals rollup (try/except).
             mark_current_turn_failure_stage(TurnFailureStage.RESULT_FINALIZATION)
+            # Attribute selector failures to an executed leg, not a fallback
+            # that was only selected. A composite may have several contributing
+            # providers; leave that physical identity unspecified.
+            error_provider = None
+            error_model = None
+            if isinstance(provider, _SelectorFallbackProvider):
+                execution_legs = turn.metadata.get("execution_legs")
+                if isinstance(execution_legs, list) and execution_legs:
+                    last_leg = execution_legs[-1]
+                    if isinstance(last_leg, dict) and last_leg.get("provider") != "ensemble":
+                        error_provider = last_leg.get("provider") or None
+                        error_model = last_leg.get("model") or None
+            elif not getattr(provider, "accounts_physical_usage", False):
+                error_provider = getattr(provider, "provider_name", None) or None
+                error_model = resolved_model or None
+            error_fallback_hops = turn.metadata.get("router_fallback_hops", 0)
+            if not isinstance(error_fallback_hops, int) or isinstance(error_fallback_hops, bool):
+                error_fallback_hops = 0
             fin_outcome = await self._turn_finalizer_stage.run(
                 TurnFinalizerStageInput(
                     final_text_parts=final_text_parts,
@@ -7522,6 +7549,9 @@ class TurnRunner:
                     execution_context=execution_context,
                     publication_ledger=execution_context.publication_ledger,
                     terminal_generation_reset=stream_state.terminal_generation_reset,
+                    error_provider=error_provider,
+                    error_model=error_model,
+                    error_fallback_hops=error_fallback_hops,
                 )
             )
             fin_out = fin_outcome.require_output()
@@ -8361,9 +8391,14 @@ class TurnRunner:
         append_transcript: bool = True,
         expected_session_id: str | None = None,
         expected_session_epoch: int | None = None,
+        turn_id: str | None = None,
+        surface: str = "unknown",
+        provider: str | None = None,
+        model: str | None = None,
+        fallback_hops: int = 0,
     ) -> None:
         """Best-effort durable transcript record for terminal turn errors."""
-        if self._session_manager is None or event is None:
+        if event is None:
             return
         error_code, message = sanitize_agent_error(
             {
@@ -8386,22 +8421,26 @@ class TurnRunner:
         if not error_id:
             error_id = await self._record_turn_error(
                 session_key=session_key,
-                turn_id=None,
+                turn_id=turn_id,
                 session_id=expected_session_id,
-                surface="unknown",
+                surface=surface,
                 error_class=event_code,
                 message=message,
                 exc=None,
-                provider=None,
-                model=None,
-                fallback_hops=0,
+                provider=provider,
+                model=model,
+                fallback_hops=fallback_hops,
             )
+            if error_id:
+                event.error_id = error_id
         if not append_transcript:
             log.info(
                 "turn_runner.error_recorded_without_transcript_append",
                 session_key=session_key,
                 code=event_code,
             )
+            return
+        if self._session_manager is None:
             return
         outcome_details = turn_outcome_details(
             outcome_from_error(
@@ -8873,6 +8912,20 @@ class TurnRunner:
             ctx is not None and str(getattr(ctx, "plan_run_id", "") or "").strip()
         )
         if ctx is not None:
+            from opensquilla.skills.catalog_policy import project_public_catalog
+            from opensquilla.skills.install_turn import SkillInstallTurn
+
+            skill_tools: set[str] = set()
+            if isinstance(ctx.skill_install_turn, SkillInstallTurn):
+                skill_tools.update(ctx.skill_install_turn.surface_tools())
+            if project_public_catalog(
+                loaded_skills, coding_mode=ctx.coding_mode, include_stable_meta=False,
+            ):
+                skill_tools.update({"skill_list", "skill_view"})
+            if skill_tools:
+                if ctx.surfaced_tools is None:
+                    ctx.surfaced_tools = set()
+                ctx.surfaced_tools.update(skill_tools)
             # A lossy tool-result projection is only useful when the model can
             # recover the stored original. Surface the read-only retrieval tool
             # before the first schema is built; normal allow/deny/profile policy

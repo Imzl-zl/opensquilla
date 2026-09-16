@@ -5,18 +5,16 @@ import { sha256 } from './contract.mjs'
 // Match the production inject_time_prefix format, stripping exactly one stamp
 // from the current user message. History/substrings must never select a turn.
 const timePrefix = /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+\-]\d{2}:\d{2} (?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) [A-Za-z0-9_+\-/]+\]\n/
-// Agent appends runtime context directly or as a separate text block. Ollama
-// joins text blocks with one space; accept only that exact separator.
-const runtimeSuffix = / ?\n\n\[Runtime context for this turn\]\nCurrent local date\/time: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+\-]\d{2}:\d{2} \((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\)\nTime zone \/ location hint: [^\r\n]{1,128}\nUse this runtime context for questions about the current date, time, or local time zone\. Do not treat it as a user request\.$/
+// Agent._runtime_context_block appends the OS-localized timezone to a turn.
+// Ollama joins text blocks with one space; consume only that optional separator.
+// The direct synthetic route may append its exact deployment identity afterward.
+const runtimeSuffix = / ?\n\n\[Runtime context for this turn\]\nCurrent local date\/time: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+\-]\d{2}:\d{2} \((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\)\nTime zone \/ location hint: [^\r\n]{1,128}\nUse this runtime context for questions about the current date, time, or local time zone\. Do not treat it as a user request\.(?:\nCurrent response execution: (\{[^\r\n]*\}))?$/
 
 // The provider is not given the sentinel's contents. It can complete the tool
 // turn only after read_file returns the nonce whose hash the driver supplied.
 export async function startRetainedProvider({ baseUrl, model, messages, sentinelPath, sentinelTokenSha256 }) {
   const endpoint = new URL(baseUrl)
   assert.equal(endpoint.hostname, '127.0.0.1')
-  // Match render_execution_identity for this bound synthetic deployment only.
-  // The identity is part of runtime context, never arbitrary user text.
-  const executionSuffix = '\nCurrent response execution: ' + JSON.stringify({ kind: 'single_model', provider: 'ollama', model })
   const state = { first: 0, toolCalls: 0, toolResults: 0, held: 0, cancelledBeforeCleanup: 0, afterStop: 0, restart: 0, errors: [] }
   const sockets = new Set()
   let closing = false
@@ -49,12 +47,14 @@ export async function startRetainedProvider({ baseUrl, model, messages, sentinel
       assert.ok(Array.isArray(payload.messages), 'Missing provider messages')
       const userIndex = payload.messages.findLastIndex(message => message.role === 'user')
       const content = payload.messages[userIndex]?.content
-      let prompt = typeof content === 'string' ? content.replace(timePrefix, '') : content
-      if (typeof prompt === 'string' && prompt.endsWith(executionSuffix)) {
-        const withoutIdentity = prompt.slice(0, -executionSuffix.length)
-        if (runtimeSuffix.test(withoutIdentity)) prompt = withoutIdentity
-      }
-      if (typeof prompt === 'string') prompt = prompt.replace(runtimeSuffix, '')
+      const prompt = typeof content === 'string' ? content.replace(timePrefix, '').replace(runtimeSuffix, (_suffix, execution) => {
+        if (execution !== undefined) {
+          const expected = { kind: 'single_model', provider: 'ollama', model }
+          assert.deepEqual(JSON.parse(execution), expected, 'Unexpected audit execution identity')
+          assert.equal(execution, JSON.stringify(expected), 'Unexpected audit execution identity format')
+        }
+        return ''
+      }) : content
       if (prompt === messages.first) {
         assert.equal(++state.first, 1, 'Duplicate first send')
         send(response, messages.firstAnswer)
