@@ -614,24 +614,43 @@ def _run_rehearsal_driver(
         cache = driver.parent / "user-data" / "update-downloads"
         cache.mkdir(parents=True, exist_ok=True)
         (cache / f"OpenSquilla-{candidate}-win-x64.exe").write_bytes(cached_bytes)
-    return subprocess.run(
-        arguments,
-        env={
-            **os.environ,
-            "SYNTHETIC_BASELINE_VERSION": installed,
-            "SYNTHETIC_CANDIDATE_VERSION": candidate,
-            "SYNTHETIC_UPDATE_MODE": mode,
-            "SYNTHETIC_COMPLETE_SIGNED": "1" if complete_signed else "0",
-            "SYNTHETIC_CAN_INSTALL": "1" if can_install else "0",
-            "SYNTHETIC_EXPECTED_SOURCE": (
-                "github" if download_source_mode == "github-to-oss" else "oss"
-            ),
-            "SYNTHETIC_FALLBACK_FAULT": fallback_fault,
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=15,
+    environment = {
+        **os.environ,
+        "SYNTHETIC_BASELINE_VERSION": installed,
+        "SYNTHETIC_CANDIDATE_VERSION": candidate,
+        "SYNTHETIC_UPDATE_MODE": mode,
+        "SYNTHETIC_COMPLETE_SIGNED": "1" if complete_signed else "0",
+        "SYNTHETIC_CAN_INSTALL": "1" if can_install else "0",
+        "SYNTHETIC_EXPECTED_SOURCE": (
+            "github" if download_source_mode == "github-to-oss" else "oss"
+        ),
+        "SYNTHETIC_FALLBACK_FAULT": fallback_fault,
+    }
+    # Keep the process deadline independent of Windows pipe-reader threads.
+    # Files also retain partial diagnostics if the driver itself hangs.
+    stdout_path = driver.parent / "rehearsal-stdout.log"
+    stderr_path = driver.parent / "rehearsal-stderr.log"
+    with stdout_path.open("wb") as stdout_file, stderr_path.open("wb") as stderr_file:
+        try:
+            result = subprocess.run(
+                arguments,
+                env=environment,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                check=False,
+                timeout=15,
+            )
+        except subprocess.TimeoutExpired as error:
+            error.add_note(
+                f"Captured stdout: {stdout_path.read_text(encoding='utf-8', errors='replace')!r}\n"
+                f"Captured stderr: {stderr_path.read_text(encoding='utf-8', errors='replace')!r}"
+            )
+            raise
+    return subprocess.CompletedProcess(
+        result.args,
+        result.returncode,
+        stdout_path.read_text(encoding="utf-8"),
+        stderr_path.read_text(encoding="utf-8"),
     )
 
 
@@ -646,6 +665,7 @@ def test_rehearsal_driver_accepts_selected_baseline(
     assert f"DOWNLOAD_REACHED:{selected}" in result.stderr
 
 
+@pytest.mark.ci_serial
 def test_rehearsal_driver_rejects_mislabeled_official_baseline(
     rehearsal_driver: tuple[str, Path],
 ) -> None:
