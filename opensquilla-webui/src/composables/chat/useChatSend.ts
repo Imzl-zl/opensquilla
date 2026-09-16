@@ -2623,7 +2623,18 @@ export function useChatSend(options: UseChatSendOptions) {
     if (blockedReason?.value) return 'not_sent'
     const preDispatchAllowed = (
       stage: 'preflight' | 'before_rpc' = 'preflight',
-    ) => sendOpts.preDispatchGuard?.(stage) !== false
+    ) => {
+      const snapshot = sendOpts.composerSnapshot
+      // A project choice preserves the draft key. An older preparation must
+      // still not send that draft into its previous directory. Unknown
+      // acceptance replays retain their original, immutable request instead.
+      if (
+        !sendOpts.idempotentReplay
+        && snapshot?.intent === 'new_chat'
+        && snapshot.workspaceId !== pendingWorkspaceForIntent(options.pendingSessionIntent.value)
+      ) return false
+      return sendOpts.preDispatchGuard?.(stage) !== false
+    }
     if (!preDispatchAllowed()) return 'not_sent'
     let preserveComposer = sendOpts.preserveComposer === true
     const sourceAttachments = sendOpts.payload?.attachments

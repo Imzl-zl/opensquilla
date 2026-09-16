@@ -2459,6 +2459,39 @@ describe('useChatSend attachment payloads', () => {
     )
   })
 
+  it.each(['preflight', 'attachments'] as const)(
+    'keeps a new-task draft when its project changes during %s preparation',
+    async stage => {
+      const pendingWorkspaceId = ref<string | null>('project-a')
+      let finish!: () => void
+      const preparation = vi.fn(() => new Promise<any>(resolve => {
+        finish = () => resolve(stage === 'preflight' ? null : true)
+      }))
+      const attachment: Attachment = {
+        kind: 'staged', local_id: 1, name: 'report.pdf', mime: 'application/pdf', file_uuid: 'file-report',
+      }
+      const { api, options, rpc } = makeOptions({
+        pendingSessionIntent: ref('new_chat'),
+        pendingWorkspaceId,
+        pendingAttachments: ref([attachment]),
+        ...(stage === 'preflight'
+          ? { validateActiveProjectBeforeSend: preparation }
+          : { prepareAttachmentsForSend: preparation }),
+      })
+      const sending = api.onSend()
+      await vi.waitFor(() => expect(preparation).toHaveBeenCalledOnce())
+      pendingWorkspaceId.value = 'project-b'
+      finish()
+      await sending
+
+      expect(rpc.call).not.toHaveBeenCalled()
+      expect(options.inputText.value).toBe('hello')
+      expect(options.pendingAttachments.value).toEqual([attachment])
+      expect(options.pendingSessionIntent.value).toBe('new_chat')
+      expect(options.messages.value).toEqual([])
+    },
+  )
+
   it('binds a new project task to its workspace and preserves that binding on retry', async () => {
     const pendingSessionIntent = ref<string | null>('new_chat')
     const pendingWorkspaceId = ref<string | null>('project-a')
