@@ -288,9 +288,11 @@ def test_a_wedged_encoding_load_returns_within_the_configured_budget(
     entered = threading.Event()
     completed = threading.Event()
     load_join_timeouts: list[float | None] = []
+    loaders: list[threading.Thread] = []
 
     class _RecordingLoadThread(threading.Thread):
         def start(self) -> None:
+            loaders.append(self)
             super().start()
             assert entered.wait(5), "encoding loader did not enter its blocked section"
 
@@ -324,6 +326,11 @@ def test_a_wedged_encoding_load_returns_within_the_configured_budget(
     finally:
         release.set()
         assert completed.wait(5)
+        for loader in loaders:
+            # Join the actual worker, not only the loader-body event. Calling
+            # the base method keeps this cleanup out of the production budget.
+            threading.Thread.join(loader, 5)
+            assert not loader.is_alive()
     assert token_estimation._encoding is token_estimation._ENCODING_UNAVAILABLE
 
 
