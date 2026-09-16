@@ -212,6 +212,13 @@ jobs:
         baseline: ['0.5.3', '0.5.4']
         install-path: [default, custom]
         scenario: [baseline, readlock, longpath]
+        include:
+          - baseline: fresh
+            install-path: default
+            scenario: fresh
+          - baseline: fresh
+            install-path: custom
+            scenario: fresh
     defaults:
       run:
         shell: pwsh
@@ -235,6 +242,7 @@ jobs:
           npm run build
           if ($LASTEXITCODE -ne 0) { throw 'Probe build failed' }
       - name: Download pinned official baseline
+        if: matrix.scenario != 'fresh'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -245,18 +253,16 @@ jobs:
         with:
           name: nsis-regression-installer
           path: candidate
-      - name: Verify upgrade, preserved data and real client restart
+      - name: Verify fresh first interaction or retained upgrade and restart
         run: |
           $ErrorActionPreference = 'Stop'
-          $old = @(Get-ChildItem old -Filter '*.exe' -File)
           $candidate = @(Get-ChildItem candidate -Filter '*.exe' -File)
-          if ($old.Count -ne 1 -or $candidate.Count -ne 1) { throw 'Unexpected installer count' }
+          if ($candidate.Count -ne 1) { throw 'Unexpected candidate installer count' }
           $manifest = Get-Content candidate/audit-candidate.json -Raw | ConvertFrom-Json
           if ($manifest.sourceSha -ne (git rev-parse HEAD).Trim()) { throw 'Candidate source mismatch' }
           if ((Get-FileHash -LiteralPath $candidate[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -ne $manifest.installerSha256) { throw 'Candidate hash mismatch' }
           $arguments = @('.github/scripts/verify-nsis-upgrade-regression.py',
-            '--baseline-installer', $old[0].FullName, '--candidate-installer', $candidate[0].FullName,
-            '--baseline-version', '${{ matrix.baseline }}', '--candidate-version', $manifest.version,
+            '--candidate-installer', $candidate[0].FullName, '--candidate-version', $manifest.version,
             '--case', '${{ matrix.scenario }}', '--install-path', '${{ matrix.install-path }}',
             '--candidate-source-sha', $manifest.sourceSha,
             '--candidate-installer-sha256', $manifest.installerSha256,
@@ -264,6 +270,11 @@ jobs:
             '--candidate-executable-sha256', $manifest.executableSha256,
             '--candidate-dependency-inventory-sha256', $manifest.dependencyInventorySha256,
             '--evidence-root', (Join-Path $env:RUNNER_TEMP 'nsis-regression-evidence'))
+          if ('${{ matrix.scenario }}' -ne 'fresh') {
+            $old = @(Get-ChildItem old -Filter '*.exe' -File)
+            if ($old.Count -ne 1) { throw 'Unexpected baseline installer count' }
+            $arguments += @('--baseline-installer', $old[0].FullName, '--baseline-version', '${{ matrix.baseline }}')
+          }
           & python @arguments
           if ($LASTEXITCODE -ne 0) { throw 'NSIS upgrade/startup regression assertions failed' }
       - uses: actions/upload-artifact@v4
