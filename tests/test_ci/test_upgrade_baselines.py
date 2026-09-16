@@ -17,6 +17,10 @@ ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / ".github" / "scripts"
 DRIVER = ROOT / "desktop/electron/scripts/test-packaged-real-update-flow.mjs"
 
+# Run Node/PowerShell probes in the shard's serial phase. Their hard startup
+# deadlines must not compete with parallel migration I/O; keep all assertions
+# and timeouts intact. Pure Python and static contracts stay in the bulk phase.
+
 
 @pytest.fixture
 def complete_v054_profile(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -207,6 +211,7 @@ def test_packaged_recovery_transport_contract_runs_in_desktop_node_ci() -> None:
 @pytest.mark.parametrize(
     ("launch_fails", "cleanup_fails"), [(False, False), (False, True), (True, False)]
 )
+@pytest.mark.ci_serial
 def test_packaged_recovery_preserves_original_failure_after_cleanup(
     tmp_path: Path, launch_fails: bool, cleanup_fails: bool
 ) -> None:
@@ -635,6 +640,7 @@ def _run_rehearsal_driver(
 
 
 @pytest.mark.parametrize("baseline", [None, "0.5.3", "0.5.4"])
+@pytest.mark.ci_serial
 def test_rehearsal_driver_accepts_selected_baseline(
     rehearsal_driver: tuple[str, Path], baseline: str | None
 ) -> None:
@@ -644,6 +650,7 @@ def test_rehearsal_driver_accepts_selected_baseline(
     assert f"DOWNLOAD_REACHED:{selected}" in result.stderr
 
 
+@pytest.mark.ci_serial
 def test_rehearsal_driver_rejects_mislabeled_official_baseline(
     rehearsal_driver: tuple[str, Path],
 ) -> None:
@@ -662,6 +669,7 @@ def test_rehearsal_driver_rejects_mislabeled_official_baseline(
         ("0.5.4", "0.5.5rc1", "must be a canonical stable version"),
     ],
 )
+@pytest.mark.ci_serial
 def test_rehearsal_driver_rejects_invalid_versions_before_launch(
     rehearsal_driver: tuple[str, Path], baseline: str, candidate: str, message: str
 ) -> None:
@@ -674,6 +682,7 @@ def test_rehearsal_driver_rejects_invalid_versions_before_launch(
 
 
 @pytest.mark.parametrize("baseline", [None, "0.5.3", "0.5.4", "0.5.5rc1"])
+@pytest.mark.ci_serial
 def test_signed_handoff_rejects_missing_or_legacy_baseline_before_launch(
     rehearsal_driver: tuple[str, Path], baseline: str | None
 ) -> None:
@@ -690,6 +699,7 @@ def test_signed_handoff_rejects_missing_or_legacy_baseline_before_launch(
 
 
 @pytest.mark.parametrize("missing", ["source_sha", "expected_sha"])
+@pytest.mark.ci_serial
 def test_signed_handoff_requires_pinned_artifact_before_launch(
     rehearsal_driver: tuple[str, Path], missing: str
 ) -> None:
@@ -707,6 +717,7 @@ def test_signed_handoff_requires_pinned_artifact_before_launch(
 
 
 @pytest.mark.parametrize("fault", ["capability-denied", "cache-replaced"])
+@pytest.mark.ci_serial
 def test_signed_handoff_rejects_unverified_or_changed_candidate(
     rehearsal_driver: tuple[str, Path], fault: str
 ) -> None:
@@ -727,6 +738,7 @@ def test_signed_handoff_rejects_unverified_or_changed_candidate(
     assert not (rehearsal_driver[1].parent / "handoff.json").exists()
 
 
+@pytest.mark.ci_serial
 def test_signed_handoff_records_only_handoff_until_outer_audit_verifies_install(
     rehearsal_driver: tuple[str, Path],
 ) -> None:
@@ -759,6 +771,7 @@ def test_signed_handoff_records_only_handoff_until_outer_audit_verifies_install(
 
 
 @pytest.mark.parametrize("fault", ["", "discovery", "download"])
+@pytest.mark.ci_serial
 def test_signed_download_fallback_requires_both_stage_observations(
     rehearsal_driver: tuple[str, Path], fault: str
 ) -> None:
@@ -785,6 +798,7 @@ def test_signed_download_fallback_requires_both_stage_observations(
     ("native", "github-to-oss"), ("manual", "oss"),
     ("signed-cached-handoff", "github-to-oss"), ("signed-handoff", "invalid"),
 ])
+@pytest.mark.ci_serial
 def test_download_source_override_rejects_other_modes_before_launch(
     rehearsal_driver: tuple[str, Path], mode: str, source: str
 ) -> None:
@@ -1053,6 +1067,7 @@ def _assert_windows_signature_arguments(
         ("0.5.5-rc1", "0.5.5.0"),
     ],
 )
+@pytest.mark.ci_serial
 def test_windows_replacement_rejects_successful_installer_with_stale_app(
     windows_upgrade_harness: tuple[str, Path],
     install_mode: str,
@@ -1078,6 +1093,7 @@ def test_windows_replacement_rejects_successful_installer_with_stale_app(
 
 @pytest.mark.parametrize("install_mode", ["default", "custom"])
 @pytest.mark.parametrize("candidate", ["0.5.5", "0.5.5-rc1"])
+@pytest.mark.ci_serial
 def test_windows_replacement_accepts_exact_installed_candidate_version(
     windows_upgrade_harness: tuple[str, Path], install_mode: str, candidate: str
 ) -> None:
@@ -1098,6 +1114,7 @@ def test_windows_replacement_accepts_exact_installed_candidate_version(
 
 
 @pytest.mark.parametrize("install_mode", ["default", "custom"])
+@pytest.mark.ci_serial
 def test_windows_upgrade_accepts_zero_revision_for_stable_pe_versions(
     windows_upgrade_harness: tuple[str, Path], install_mode: str
 ) -> None:
@@ -1118,6 +1135,7 @@ def test_windows_upgrade_accepts_zero_revision_for_stable_pe_versions(
 
 
 @pytest.mark.parametrize("baseline_product_version", ["0.5.4.1", "0.5.40"])
+@pytest.mark.ci_serial
 def test_windows_upgrade_rejects_other_baseline_pe_versions(
     windows_upgrade_harness: tuple[str, Path], baseline_product_version: str
 ) -> None:
@@ -1136,6 +1154,7 @@ def test_windows_upgrade_rejects_other_baseline_pe_versions(
     assert "POST_INSTALL_LAUNCH_REACHED" not in result.stderr
 
 
+@pytest.mark.ci_serial
 def test_windows_default_install_rejects_unrelated_executable_outside_known_folder(
     windows_upgrade_harness: tuple[str, Path],
 ) -> None:
@@ -1155,6 +1174,7 @@ def test_windows_default_install_rejects_unrelated_executable_outside_known_fold
     assert not (windows_upgrade_harness[1].parent / "signature-arguments.json").exists()
 
 
+@pytest.mark.ci_serial
 def test_windows_default_install_refuses_existing_installation_before_download(
     windows_upgrade_harness: tuple[str, Path],
 ) -> None:
@@ -1173,6 +1193,7 @@ def test_windows_default_install_refuses_existing_installation_before_download(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows KnownFolder read")
+@pytest.mark.ci_serial
 def test_windows_nsis_known_folder_is_independent_of_localappdata_environment(
     windows_upgrade_harness: tuple[str, Path],
 ) -> None:
@@ -1215,6 +1236,7 @@ $after = Get-NSISUserProgramsDirectory
 
 @pytest.mark.parametrize("install_mode", ["default", "custom"])
 @pytest.mark.parametrize("signature_failure", ["exit", "throw"])
+@pytest.mark.ci_serial
 def test_windows_upgrade_propagates_signature_failure_before_launch(
     windows_upgrade_harness: tuple[str, Path], install_mode: str, signature_failure: str
 ) -> None:
@@ -1249,6 +1271,7 @@ def test_windows_upgrade_propagates_signature_failure_before_launch(
         "OpenSquilla-0.5.5-win-arm64.exe",
     ],
 )
+@pytest.mark.ci_serial
 def test_windows_upgrade_rejects_noncanonical_asset_before_side_effects(
     windows_upgrade_harness: tuple[str, Path], candidate_name: str
 ) -> None:
@@ -1260,6 +1283,7 @@ def test_windows_upgrade_rejects_noncanonical_asset_before_side_effects(
 
 
 @pytest.mark.parametrize("manifest_version", ["0.5.6", "0.5.5-rc1"])
+@pytest.mark.ci_serial
 def test_windows_upgrade_rejects_manifest_candidate_mismatch_before_side_effects(
     windows_upgrade_harness: tuple[str, Path], manifest_version: str
 ) -> None:
