@@ -29,6 +29,7 @@ from pathlib import Path
 
 import structlog
 
+from opensquilla.paths import native_io_path
 from opensquilla.session.models import ProjectWorkspace, SessionNode
 
 log = structlog.get_logger(__name__)
@@ -140,5 +141,16 @@ def rmtree_scoped(target: Path, *, expected_name: str) -> None:
     if not is_safe_segment(expected_name) or target.name != expected_name:
         log.warning("session_material_cleanup.unsafe_target", target=str(target))
         return
-    if target.is_dir() and not target.is_symlink():
-        shutil.rmtree(target, ignore_errors=True)
+    try:
+        io_target = native_io_path(target)
+        if io_target.is_dir() and not io_target.is_symlink():
+            shutil.rmtree(io_target)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        # Keep later material stores eligible for cleanup after a local failure.
+        log.warning(
+            "session_material_cleanup.remove_failed",
+            target=str(target),
+            error_type=type(exc).__name__,
+        )
