@@ -207,6 +207,7 @@ def test_packaged_recovery_transport_contract_runs_in_desktop_node_ci() -> None:
 @pytest.mark.parametrize(
     ("launch_fails", "cleanup_fails"), [(False, False), (False, True), (True, False)]
 )
+@pytest.mark.ci_serial
 def test_packaged_recovery_preserves_original_failure_after_cleanup(
     tmp_path: Path, launch_fails: bool, cleanup_fails: bool
 ) -> None:
@@ -626,6 +627,7 @@ def _run_rehearsal_driver(
 
 
 @pytest.mark.parametrize("baseline", [None, "0.5.3", "0.5.4"])
+@pytest.mark.ci_serial
 def test_rehearsal_driver_accepts_selected_baseline(
     rehearsal_driver: tuple[str, Path], baseline: str | None
 ) -> None:
@@ -1164,6 +1166,7 @@ def test_windows_default_install_refuses_existing_installation_before_download(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows KnownFolder read")
+@pytest.mark.ci_serial
 def test_windows_nsis_known_folder_is_independent_of_localappdata_environment(
     windows_upgrade_harness: tuple[str, Path],
 ) -> None:
