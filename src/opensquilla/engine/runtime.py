@@ -9385,6 +9385,8 @@ class TurnRunner:
         is right-stripped of newlines so it slots cleanly into the dynamic
         suffix (``base + "\\n\\n" + suffix`` is reassembled downstream).
         """
+        from opensquilla.identity.bootstrap import RETIRED_WORKSPACE_FILENAMES
+
         sections: list[str] = []
 
         # 1. ## Recent Notes (daily_notes), suppressed in minimal mode.
@@ -9405,20 +9407,15 @@ class TurnRunner:
                 filename: content
                 for filename, content in workspace_files.items()
                 if filename not in ("SOUL.md", "IDENTITY.md")
+                and filename not in RETIRED_WORKSPACE_FILENAMES
             }
             if visible:
                 buf = "## Workspace Files (injected)\n\n"
                 # Filenames are masked as ``### Workspace Context N`` so the
                 # template surface mirrors pilot's filename-non-exposure
-                # convention (commit 93dfb8a). BOOTSTRAP.md is the exception:
-                # it gets a named heading so the model recognizes it as a
-                # one-shot setup ritual and removes the file on completion
-                # (see identity/templates/bootstrap/BOOTSTRAP.md).
+                # convention (commit 93dfb8a).
                 context_index = 0
                 for filename, content in visible.items():
-                    if filename == "BOOTSTRAP.md":
-                        buf += f"### One-Shot Workspace Bootstrap\n\n{content}\n\n"
-                        continue
                     context_index += 1
                     rendered_content = (
                         injection_guard.wrap_untrusted(content, source=f"workspace:{filename}")
@@ -9491,21 +9488,13 @@ class TurnRunner:
             safety_cfg = getattr(self._config, "safety", None) if self._config else None
             bootstrap_filenames: tuple[str, ...]
             bootstrap_filenames = (
-                ("HEARTBEAT.md",)
-                if bootstrap_context_mode == "heartbeat_light"
+                ()
+                if bootstrap_context_mode in {"heartbeat_light", "stateless"}
                 else filter_workspace_filenames_for_session(None, session_key)
             )
-            if bootstrap_context_mode == "unattended":
+            if bootstrap_context_mode == "stateless_keep_project_rules":
                 bootstrap_filenames = tuple(
-                    name for name in bootstrap_filenames if name != "BOOTSTRAP.md"
-                )
-            elif bootstrap_context_mode == "stateless":
-                bootstrap_filenames = tuple(
-                    name for name in bootstrap_filenames if name == "TOOLS.md"
-                )
-            elif bootstrap_context_mode == "stateless_keep_project_rules":
-                bootstrap_filenames = tuple(
-                    name for name in bootstrap_filenames if name in {"AGENTS.md", "TOOLS.md"}
+                    name for name in bootstrap_filenames if name == "AGENTS.md"
                 )
             loaded_workspace_files, bootstrap_report = load_workspace_files_budgeted_with_report(
                 str(bootstrap_workspace_dir),
@@ -9527,7 +9516,7 @@ class TurnRunner:
                 workspace_files = {
                     name: content
                     for name, content in workspace_files.items()
-                    if name in {"AGENTS.md", "TOOLS.md"}
+                    if name == "AGENTS.md"
                 }
             visible_bootstrap_report = [
                 report for report in bootstrap_report if report.filename in workspace_files

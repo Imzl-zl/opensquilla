@@ -1675,13 +1675,12 @@ class HeartbeatConfig(BaseSettings):
         default=False,
         validation_alias=AliasChoices("light_context", "lightContext"),
     )
-    # Path to HEARTBEAT.md for live-reload of cadence + Loop overrides.
-    # ``None`` resolves to ``<workspace_dir>/HEARTBEAT.md``
-    # at boot. When the file is absent the loop falls back to the bootstrap
-    # values above; a malformed frontmatter is fail-open (defaults).
+    # Retained for configuration round-tripping, never resolved or read.
     config_path: str | None = Field(
         default=None,
         validation_alias=AliasChoices("config_path", "configPath"),
+        description="Deprecated and ignored: HEARTBEAT.md no longer controls heartbeat.",
+        json_schema_extra={"deprecated": True},
     )
 
     @field_validator("target")
@@ -2178,7 +2177,7 @@ class SubagentsGatewayConfig(BaseModel):
     is archived. ``0`` disables auto-archive."""
 
     prompt_compact: bool = False
-    """When enabled, subagent bootstrap prompts keep only AGENTS.md and TOOLS.md."""
+    """When enabled, subagent bootstrap prompts keep only AGENTS.md."""
 
 
 class MetaSkillPersistenceConfig(BaseSettings):

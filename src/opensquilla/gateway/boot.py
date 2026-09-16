@@ -671,7 +671,6 @@ class ServiceContainer:
     task_runtime: Any = None
     goal_service: Any = None
     heartbeat_loop: Any = None
-    heartbeat_watcher: Any = None
     prompt_cache_keepalive_service: Any = None
     daily_usage_telemetry_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     deferred_warmups: list[Callable[[], Any]] = field(default_factory=list)
@@ -814,11 +813,6 @@ class ServiceContainer:
             except Exception:
                 pass
             self.prompt_cache_keepalive_service = None
-        if self.heartbeat_watcher is not None:
-            try:
-                await self.heartbeat_watcher.stop()
-            except Exception:
-                pass
         if self.heartbeat_loop is not None:
             try:
                 await self.heartbeat_loop.stop()
@@ -1118,16 +1112,33 @@ def _ensure_configured_agent_workspaces(
         return
 
     from opensquilla.identity.bootstrap import ensure_agent_workspace
+    from opensquilla.identity.template_upgrade import upgrade_workspace_defaults
+
+    seen_workspaces: set[Path] = set()
 
     for agent_id in _configured_agent_ids(config, extra_agent_ids):
         result = ensure_agent_workspace(resolve_agent_workspace_dir(agent_id, config))
+        physical_workspace = result.workspace_dir.resolve()
+        if physical_workspace not in seen_workspaces:
+            seen_workspaces.add(physical_workspace)
+            for upgrade in upgrade_workspace_defaults(
+                result.workspace_dir, profile_home=default_opensquilla_home()
+            ):
+                if upgrade.status != "unchanged":
+                    logger = log.info if upgrade.reason == "old-default" else log.warning
+                    logger(
+                        "build_services.workspace_template_upgrade",
+                        agent_id=agent_id,
+                        filename=upgrade.filename,
+                        status=upgrade.status,
+                        reason=upgrade.reason,
+                        backup=str(upgrade.backup_path) if upgrade.backup_path else None,
+                    )
         log.info(
             "build_services.agent_workspace_ready",
             agent_id=agent_id,
             workspace=str(result.workspace_dir),
             created_files=list(result.created_files),
-            bootstrap_seeded=result.bootstrap_seeded,
-            bootstrap_completed=result.bootstrap_completed,
         )
 
 
@@ -4355,10 +4366,6 @@ async def start_gateway_server(
     # populated after channel_manager is constructed below.
     _cm_holder: list = [None]
     from opensquilla.gateway.project_workspace_runtime import prepare_heartbeat_tool_context
-    from opensquilla.scheduler.heartbeat import (
-        HeartbeatConfigWatcher,
-        HeartbeatRunner,
-    )
     from opensquilla.scheduler.heartbeat_loop import HeartbeatLoop
     from opensquilla.scheduler.heartbeat_service import HeartbeatService
 
@@ -4623,26 +4630,6 @@ async def start_gateway_server(
                 "gateway.steer_restart_recovery_completed",
                 **steer_recovery,
             )
-
-    # Resolve HEARTBEAT.md path; instantiate Runner + Watcher;
-    # start Watcher BEFORE the Loop so the first tick already sees any
-    # frontmatter overrides. ``reload_now()`` runs synchronously at start.
-    heartbeat_runner = HeartbeatRunner()
-    workspace_dir = config.workspace_dir or ""
-    md_path_setting = getattr(config.heartbeat, "config_path", None)
-    if md_path_setting:
-        heartbeat_md_path = Path(md_path_setting).expanduser()
-    elif workspace_dir:
-        heartbeat_md_path = Path(workspace_dir).expanduser() / "HEARTBEAT.md"
-    else:
-        heartbeat_md_path = Path.home() / ".opensquilla" / "workspace" / "HEARTBEAT.md"
-    heartbeat_watcher = HeartbeatConfigWatcher(
-        heartbeat_runner,
-        heartbeat_md_path,
-        loop_listener=heartbeat_loop.apply_overrides,
-    )
-    await heartbeat_watcher.start()
-    svc.heartbeat_watcher = heartbeat_watcher
 
     await heartbeat_loop.start()
     svc.heartbeat_loop = heartbeat_loop
