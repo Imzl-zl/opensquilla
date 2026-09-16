@@ -1098,6 +1098,12 @@ class Audit:
             require(after['asarSha256'] != before['asarSha256'], 'No expected asar hash supplied and asar did not change; cannot prove candidate replacement')
         if args.candidate_executable_sha256:
             require(after['executableSha256'] == args.candidate_executable_sha256.lower(), 'Installed application executable differs from the candidate build manifest')
+        if args.candidate_dependency_inventory_sha256:
+            inventory_path = self.install / 'resources/runtime/gateway/dependency-inventory.json'
+            require(inventory_path.is_file(), 'Installed candidate lacks its dependency inventory')
+            require(digest(inventory_path) == args.candidate_dependency_inventory_sha256.lower(),
+                    'Installed dependency inventory differs from the audited candidate')
+            self.report['proofs']['auditedDependenciesInstalled'] = True
         if fault is not None:
             require(not fault.exists(), 'Successful candidate replacement retained the injected old-only sentinel')
         self.check_profiles('afterCandidate')
@@ -1136,6 +1142,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--candidate-version', default='0.5.4')
     parser.add_argument('--candidate-asar-sha256', required=True)
     parser.add_argument('--candidate-executable-sha256', required=True)
+    parser.add_argument('--candidate-dependency-inventory-sha256', default='')
     parser.add_argument('--candidate-installer-sha256', required=True)
     parser.add_argument('--candidate-source-sha', required=True)
     parser.add_argument('--case', required=True, choices=['baseline', 'readlock', 'longpath'])
