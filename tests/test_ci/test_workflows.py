@@ -540,7 +540,7 @@ def test_ci_fast_paths_keep_the_required_check_and_fail_closed() -> None:
     assert jobs["plan-ci"]["outputs"]["reason_codes"] == (
         "${{ steps.plan.outputs.reason_codes }}"
     )
-    assert "always()" in jobs["plan-ci"]["if"]
+    assert jobs["plan-ci"]["if"].startswith("${{ !cancelled()")
     assert "github.event_name != 'merge_group'" in jobs["plan-ci"]["if"]
     assert "needs.queue-attestation.result != 'success'" in (
         jobs["plan-ci"]["if"]
@@ -562,7 +562,10 @@ def test_ci_fast_paths_keep_the_required_check_and_fail_closed() -> None:
     assert planner_consumers
     for job_name, job in planner_consumers.items():
         condition = str(job.get("if", ""))
-        assert "always()" in condition, job_name
+        # An explicit status function also permits skipped/failed dependencies;
+        # dropping it would implicitly require success() and break PR planning.
+        assert condition.startswith("${{ !cancelled()"), job_name
+        assert "always()" not in condition, job_name
         assert "needs.plan-ci.result == 'success'" in condition, job_name
     for job_name in ("webui-chat-recovery", "desktop-recovery-e2e"):
         assert "needs.frontend-artifact.result == 'success'" in str(
@@ -589,6 +592,7 @@ def test_ci_fast_paths_keep_the_required_check_and_fail_closed() -> None:
     assert jobs["main-canary"]["name"] == (
         "Queue/main installation and offline gateway canary"
     )
+    assert jobs["main-canary"]["if"].startswith("${{ !cancelled()")
     assert "needs.queue-attestation.result == 'success'" in jobs["main-canary"]["if"]
     assert "test_gateway_silent_reply_process_e2e.py" in str(jobs["main-canary"])
     assert all(
@@ -647,6 +651,28 @@ def test_ci_fast_paths_keep_the_required_check_and_fail_closed() -> None:
         if step.get("name") == "Upload tree-indexed CI evidence v2"
     )
     assert tree_upload["if"] == "${{ steps.attestation.outcome == 'success' }}"
+
+
+def test_cancelled_workflow_fails_required_gate_before_checkout_or_evidence() -> None:
+    gate = _workflow("ci.yml")["jobs"]["ci-result"]
+    # GitHub accepts skipped required jobs. The aggregate gate must still run
+    # after failed/skipped dependencies and explicitly reject cancellation.
+    assert gate["if"] == "always()"
+    guard, *remaining_steps = gate["steps"]
+    assert guard["name"] == "Reject cancelled workflow"
+    assert guard["if"] == "${{ cancelled() }}"
+    assert not guard.get("continue-on-error")
+    assert guard["shell"] == "bash"
+    completed = subprocess.run(
+        [_bash_executable(), "-euo", "pipefail", "-c", guard["run"]],
+        capture_output=True, text=True, check=False, timeout=10,
+    )
+    assert completed.returncode == 1
+    assert "cancelled workflow cannot satisfy required CI checks" in completed.stderr
+    # Keep the implicit success() guard after rejection; status overrides here
+    # could run checkout or mint trusted evidence despite the failed guard.
+    for step in remaining_steps:
+        assert not re.search(r"\b(?:always|cancelled|failure)\s*\(", step.get("if", ""))
 
 
 @pytest.mark.parametrize(

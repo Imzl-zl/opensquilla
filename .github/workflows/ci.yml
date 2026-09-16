@@ -128,7 +128,7 @@ jobs:
     name: Plan CI suites
     needs: queue-attestation
     if: >-
-      ${{ always()
+      ${{ !cancelled()
           && (github.event_name != 'merge_group'
               || (vars.CI_OPTIMIZATION_MODE || 'enforce') != 'enforce'
               || needs.queue-attestation.result != 'success'
@@ -295,7 +295,7 @@ jobs:
   workflow-lint:
     name: Validate GitHub Actions workflows
     needs: plan-ci
-    if: ${{ always() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'workflow-lint') }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'workflow-lint') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -318,7 +318,7 @@ jobs:
     needs: plan-ci
     # This job owns the generated package input. Source-only Python tests stay
     # parallel; only packaging/browser/desktop consumers wait for this artifact.
-    if: ${{ always() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'frontend-artifact') }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'frontend-artifact') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -381,7 +381,7 @@ jobs:
     name: Frontend tests and package validation
     needs: [plan-ci, frontend-artifact]
     if: >-
-      ${{ always()
+      ${{ !cancelled()
           && needs.plan-ci.result == 'success'
           && needs.frontend-artifact.result == 'success'
           && (contains(fromJSON(needs.plan-ci.outputs.required_suites), 'frontend-validation')
@@ -522,7 +522,7 @@ jobs:
   gateway-contract-verification-linux:
     name: Complete Gateway Contract verification (Linux)
     needs: [plan-ci]
-    if: ${{ always() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'frontend-validation') }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'frontend-validation') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -577,7 +577,7 @@ jobs:
     name: Gateway Contract determinism (Windows)
     needs: [plan-ci, frontend-check, gateway-contract-verification-linux]
     if: >-
-      ${{ always()
+      ${{ !cancelled()
           && needs.plan-ci.result == 'success'
           && needs.frontend-check.result == 'success'
           && needs.gateway-contract-verification-linux.result == 'success'
@@ -674,7 +674,7 @@ jobs:
   webui-chat-recovery:
     name: WebUI chat recovery
     needs: [plan-ci, frontend-artifact]
-    if: ${{ always() && needs.plan-ci.result == 'success' && needs.frontend-artifact.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'webui-chat-recovery') }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && needs.frontend-artifact.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'webui-chat-recovery') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -781,7 +781,7 @@ jobs:
   tui-check:
     name: OpenTUI package tests
     needs: plan-ci
-    if: ${{ always() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'tui') }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'tui') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -827,7 +827,7 @@ jobs:
   desktop-check:
     name: Desktop Electron unit tests
     needs: plan-ci
-    if: ${{ always() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'desktop-static') }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'desktop-static') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -916,7 +916,7 @@ jobs:
   ubuntu-quality:
     name: Lint, test, and build (ubuntu-latest, 3.12)
     needs: plan-ci
-    if: ${{ always() && needs.plan-ci.result == 'success' && (contains(fromJSON(needs.plan-ci.outputs.required_suites), 'python-targeted') || contains(fromJSON(needs.plan-ci.outputs.required_suites), 'python-full')) }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && (contains(fromJSON(needs.plan-ci.outputs.required_suites), 'python-targeted') || contains(fromJSON(needs.plan-ci.outputs.required_suites), 'python-full')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -1016,7 +1016,7 @@ jobs:
   ubuntu-full:
     name: Full offline tests (ubuntu-latest, ${{ matrix.shard }})
     needs: plan-ci
-    if: ${{ always() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'python-full') }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'python-full') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -1122,7 +1122,7 @@ jobs:
   windows-full:
     name: Windows high-risk (${{ matrix.shard }})
     needs: plan-ci
-    if: ${{ always() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'windows-high-risk') }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'windows-high-risk') }}
     runs-on: windows-latest
     timeout-minutes: 60
     strategy:
@@ -1363,7 +1363,7 @@ jobs:
   macos-recovery:
     name: macOS profile recovery and native no-replace (3.12)
     needs: plan-ci
-    if: ${{ always() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'macos-recovery') }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'macos-recovery') }}
     runs-on: macos-latest
     timeout-minutes: 30
 
@@ -1469,7 +1469,7 @@ jobs:
     # native-focus, and local-socket state cannot leak across those domains.
     name: Desktop recovery E2E (${{ matrix.os }}, ${{ matrix.shard }})
     needs: [plan-ci, frontend-artifact]
-    if: ${{ always() && needs.plan-ci.result == 'success' && needs.frontend-artifact.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'desktop-recovery-e2e') }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && needs.frontend-artifact.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'desktop-recovery-e2e') }}
     strategy:
       fail-fast: false
       matrix:
@@ -2082,7 +2082,7 @@ jobs:
   skill-hub:
     name: skill-hub-contract (${{ matrix.os }})
     needs: plan-ci
-    if: ${{ always() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'skill-hub') }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'skill-hub') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -2167,7 +2167,7 @@ jobs:
   release-packaging:
     name: Release packaging contracts
     needs: plan-ci
-    if: ${{ always() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'release-packaging') }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'release-packaging') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -2217,7 +2217,7 @@ jobs:
   readme-locale-check:
     name: README locale parity
     needs: plan-ci
-    if: ${{ always() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'readme-locale') }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'readme-locale') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -2236,14 +2236,14 @@ jobs:
   managed-toolchain-artifacts:
     name: Managed Toolchain Artifact E2E
     needs: plan-ci
-    if: ${{ always() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'managed-toolchain') }}
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'managed-toolchain') }}
     uses: ./.github/workflows/managed-toolchain-artifacts.yml
 
   main-canary:
     name: Queue/main installation and offline gateway canary
     needs: queue-attestation
     if: >-
-      ${{ always()
+      ${{ !cancelled()
           && ((github.event_name == 'push'
                && (vars.CI_OPTIMIZATION_MODE || 'enforce') == 'enforce')
               || (github.event_name == 'merge_group'
@@ -2349,6 +2349,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # A skipped required job can count as passing. Keep this gate unconditional,
+      # but stop before checkout or evidence creation when the run was cancelled.
+      - name: Reject cancelled workflow
+        if: ${{ cancelled() }}
+        shell: bash
+        run: |
+          echo "ERROR: cancelled workflow cannot satisfy required CI checks." >&2
+          exit 1
+
       - name: Accept verified queue or main fast path
         if: >-
           ${{ (github.event_name == 'merge_group'
