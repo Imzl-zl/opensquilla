@@ -96,7 +96,7 @@ def test_shared_workspace_is_upgraded_once_and_disabled_agent_is_not_scanned(
     tmp_path,
     monkeypatch,
 ):
-    from opensquilla.identity import template_upgrade
+    from opensquilla.gateway import workspace_template_upgrade as template_upgrade
 
     root = tmp_path / "workspace"
     calls = []

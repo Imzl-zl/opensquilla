@@ -1111,8 +1111,8 @@ def _ensure_configured_agent_workspaces(
     if not config.workspace_dir:
         return
 
+    from opensquilla.gateway.workspace_template_upgrade import upgrade_workspace_defaults
     from opensquilla.identity.bootstrap import ensure_agent_workspace
-    from opensquilla.identity.template_upgrade import upgrade_workspace_defaults
 
     seen_workspaces: set[Path] = set()
 

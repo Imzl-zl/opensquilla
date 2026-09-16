@@ -534,7 +534,7 @@ def _dest_is_pristine_bootstrap_template(destination: Path, filename: str) -> bo
         return False
     # Compare after normalizing trailing whitespace so a stray EOL difference
     # (e.g. a one-off platform artifact) does not disqualify a pristine file.
-    from opensquilla.identity.template_upgrade import is_pre_retirement_default
+    from opensquilla.gateway.workspace_template_upgrade import is_pre_retirement_default
 
     return existing.rstrip() == template.rstrip() or is_pre_retirement_default(
         filename, existing.encode("utf-8"), importing=True

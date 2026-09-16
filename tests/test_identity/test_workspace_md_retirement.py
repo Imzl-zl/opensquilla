@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from opensquilla.identity import template_upgrade as upgrade
+from opensquilla.gateway import workspace_template_upgrade as upgrade
 from opensquilla.identity.bootstrap import RETIRED_WORKSPACE_FILENAMES, ensure_agent_workspace
 from opensquilla.identity.workspace import (
     filter_workspace_filenames_for_session,

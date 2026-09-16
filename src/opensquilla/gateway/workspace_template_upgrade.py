@@ -1,7 +1,8 @@
 """Narrow, recoverable replacement of the defaults retired at 4d181161.
 
-This is an explicit startup operation, not part of missing-only seeding or RPC
-reads. The profile lease and pre-publication snapshot check exclude cooperating
+Gateway composition owns this explicit startup operation across identity and
+recovery; missing-only seeding and RPC reads never invoke it. The profile lease
+and pre-publication snapshot check exclude cooperating
 writers and detect changes during preparation; os.replace is not a content CAS.
 """
 
