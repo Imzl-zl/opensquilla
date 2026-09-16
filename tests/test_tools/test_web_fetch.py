@@ -16,6 +16,7 @@ from opensquilla.tools.builtin.web_fetch import (
     _wrap_content,
     web_fetch,
 )
+from opensquilla.tools.types import ToolContext, current_tool_context
 
 _PROXY_ENV_VARS = (
     "HTTP_PROXY",
@@ -33,7 +34,6 @@ def _clear_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in _PROXY_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("REQUEST_METHOD", raising=False)
-from opensquilla.tools.types import ToolContext, current_tool_context
 
 
 @pytest.fixture
