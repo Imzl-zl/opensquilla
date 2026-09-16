@@ -166,20 +166,27 @@ test('provider accepts one production time prefix on the current user turn', asy
   assert.equal(provider.snapshot().first, 1)
 })
 const runtimeSuffix = '\n\n[Runtime context for this turn]\nCurrent local date/time: 2026-09-10T16:13+08:00 (Thu)\nTime zone / location hint: 中国标准时间\nUse this runtime context for questions about the current date, time, or local time zone. Do not treat it as a user request.'
-test('provider accepts the production runtime suffix with a localized Windows timezone', async t => {
-  const { provider, messages, post } = await providerFixture(t)
-  const response = await post(messages.first + runtimeSuffix)
-  assert.equal(response.status, 200)
-  assert.match(await response.text(), /RETAINED_FIRST_OK/)
-  assert.equal(provider.snapshot().first, 1)
-})
+for (const textBlocks of [false, true]) {
+  test(`provider accepts the production runtime suffix for ${textBlocks ? 'Ollama text blocks' : 'string content'}`, async t => {
+    const { provider, messages, post } = await providerFixture(t)
+    // Agent appends runtime context as a second text block for block content;
+    // _build_ollama_messages serializes those blocks with exactly one space.
+    const content = textBlocks ? [messages.first, runtimeSuffix].join(' ') : messages.first + runtimeSuffix
+    const response = await post(content)
+    assert.equal(response.status, 200)
+    assert.match(await response.text(), /RETAINED_FIRST_OK/)
+    assert.equal(provider.snapshot().first, 1)
+  })
+}
 test('provider rejects quoted, repeated, malformed or historical audit prompts', async t => {
   const { provider, messages, post } = await providerFixture(t)
   const prefix = '[2026-09-10T16:00+08:00 Thu Asia/Shanghai]\n'
   for (const content of [`quoted ${messages.first}`, `${messages.first}\n${messages.tool}`,
     `${prefix}${prefix}${messages.first}`, `[bad timestamp]\n${messages.first}`, 'unrelated current turn',
     messages.first + runtimeSuffix + '\nextra', messages.first + runtimeSuffix + runtimeSuffix,
-    runtimeSuffix + messages.first, messages.first + runtimeSuffix.replace('(Thu)', '(invalid)')]) {
+    runtimeSuffix + messages.first, messages.first + runtimeSuffix.replace('(Thu)', '(invalid)'),
+    messages.first + '  ' + runtimeSuffix, messages.first + ' ',
+    auditMessages('d'.repeat(32)).first + ' ' + runtimeSuffix]) {
     const response = await post(content, { messages: [
       { role: 'user', content: messages.first }, { role: 'assistant', content: messages.firstAnswer },
       { role: 'user', content },
