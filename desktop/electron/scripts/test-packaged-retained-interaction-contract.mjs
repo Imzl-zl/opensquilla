@@ -173,13 +173,23 @@ test('provider accepts the production runtime suffix with a localized Windows ti
   assert.match(await response.text(), /RETAINED_FIRST_OK/)
   assert.equal(provider.snapshot().first, 1)
 })
+test('provider accepts the separator inserted between Ollama content blocks', async t => {
+  const { provider, messages, post } = await providerFixture(t)
+  // Agent appends runtime context as a second text block; the Ollama adapter
+  // serializes those blocks using " ".join(text_parts).
+  const response = await post([messages.first, runtimeSuffix].join(' '))
+  assert.equal(response.status, 200)
+  assert.match(await response.text(), /RETAINED_FIRST_OK/)
+  assert.equal(provider.snapshot().first, 1)
+})
 test('provider rejects quoted, repeated, malformed or historical audit prompts', async t => {
   const { provider, messages, post } = await providerFixture(t)
   const prefix = '[2026-09-10T16:00+08:00 Thu Asia/Shanghai]\n'
   for (const content of [`quoted ${messages.first}`, `${messages.first}\n${messages.tool}`,
     `${prefix}${prefix}${messages.first}`, `[bad timestamp]\n${messages.first}`, 'unrelated current turn',
     messages.first + runtimeSuffix + '\nextra', messages.first + runtimeSuffix + runtimeSuffix,
-    runtimeSuffix + messages.first, messages.first + runtimeSuffix.replace('(Thu)', '(invalid)')]) {
+    runtimeSuffix + messages.first, messages.first + runtimeSuffix.replace('(Thu)', '(invalid)'),
+    messages.first + '  ' + runtimeSuffix]) {
     const response = await post(content, { messages: [
       { role: 'user', content: messages.first }, { role: 'assistant', content: messages.firstAnswer },
       { role: 'user', content },

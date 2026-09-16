@@ -5,8 +5,9 @@ import { sha256 } from './contract.mjs'
 // Match the production inject_time_prefix format, stripping exactly one stamp
 // from the current user message. History/substrings must never select a turn.
 const timePrefix = /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+\-]\d{2}:\d{2} (?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) [A-Za-z0-9_+\-/]+\]\n/
-// Agent._runtime_context_block appends the OS-localized timezone to a turn.
-const runtimeSuffix = /\n\n\[Runtime context for this turn\]\nCurrent local date\/time: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+\-]\d{2}:\d{2} \((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\)\nTime zone \/ location hint: [^\r\n]{1,128}\nUse this runtime context for questions about the current date, time, or local time zone\. Do not treat it as a user request\.$/
+// Agent appends runtime context directly or as a separate text block. Ollama
+// joins text blocks with one space; accept only that exact separator.
+const runtimeSuffix = / ?\n\n\[Runtime context for this turn\]\nCurrent local date\/time: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}[+\-]\d{2}:\d{2} \((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\)\nTime zone \/ location hint: [^\r\n]{1,128}\nUse this runtime context for questions about the current date, time, or local time zone\. Do not treat it as a user request\.$/
 
 // The provider is not given the sentinel's contents. It can complete the tool
 // turn only after read_file returns the nonce whose hash the driver supplied.
