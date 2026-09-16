@@ -101,12 +101,10 @@ def _web_fetch_httpx_client_kwargs(
 ) -> dict[str, Any]:
     """Build httpx client kwargs for one web_fetch hop.
 
-    Direct fetches pin to the SSRF-vetted IP so a rebinding second DNS lookup
-    cannot reach a private address. A custom transport disables HTTPX env-proxy
-    discovery, and pinning would CONNECT to the locally resolved IP — which is
-    the poisoned/intercepted address on censored networks. When a sandbox
-    proxy or an opted-in environment proxy applies, skip pinning and send the
-    original hostname to the proxy so it can resolve DNS itself.
+    Direct and environment-proxied fetches pin to the SSRF-vetted IP by default.
+    Delegating DNS to an environment proxy requires a separate explicit opt-in:
+    the proxy must then enforce the final destination's access policy. Managed
+    sandbox proxies retain their own routing and policy independently.
     """
     client_kwargs: dict[str, Any] = {
         "timeout": 30.0,
@@ -117,15 +115,25 @@ def _web_fetch_httpx_client_kwargs(
     if "proxy" in managed_kwargs:
         return client_kwargs
 
-    env_proxy = _environment_proxy_url(url) if managed_kwargs.get("trust_env") else None
-    if env_proxy is not None:
+    trust_env = bool(managed_kwargs.get("trust_env"))
+    env_proxy = _environment_proxy_url(url) if trust_env else None
+    trust_proxy_dns = (
+        os.environ.get("OPENSQUILLA_WEB_FETCH_TRUST_PROXY_DNS", "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    if env_proxy is not None and trust_proxy_dns:
         client_kwargs["proxy"] = env_proxy
-        client_kwargs["trust_env"] = False
+        # An explicit proxy already disables HTTPX's proxy discovery. Preserve
+        # trust_env so SSL_CERT_FILE / SSL_CERT_DIR still configure TLS roots.
         return client_kwargs
 
-    transport = _pinned_transport(url, vetted_ips or [])
-    if transport is not None:
-        client_kwargs["transport"] = transport
+    transport = _pinned_transport(url, vetted_ips or [], proxy=env_proxy, trust_env=trust_env)
+    # IP literals need no DNS pinning. Still install an explicit transport so
+    # HTTPX cannot rediscover a proxy after our NO_PROXY decision.
+    client_kwargs["transport"] = (
+        transport if transport is not None
+        else httpx.AsyncHTTPTransport(proxy=env_proxy, trust_env=trust_env)
+    )
     return client_kwargs
 
 

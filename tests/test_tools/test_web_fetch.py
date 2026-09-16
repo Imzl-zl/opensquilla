@@ -34,6 +34,7 @@ def _clear_proxy_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in _PROXY_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("REQUEST_METHOD", raising=False)
+    monkeypatch.delenv("OPENSQUILLA_WEB_FETCH_TRUST_PROXY_DNS", raising=False)
 
 
 @pytest.fixture
@@ -565,6 +566,7 @@ def test_web_fetch_uses_https_proxy_without_pinning_when_trust_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("OPENSQUILLA_WEB_FETCH_TRUST_PROXY_DNS", "1")
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
 
     def _must_not_pin(*args: object, **kwargs: object) -> object:
@@ -581,7 +583,7 @@ def test_web_fetch_uses_https_proxy_without_pinning_when_trust_env(
     )
 
     assert kwargs["proxy"] == "http://127.0.0.1:7897"
-    assert kwargs["trust_env"] is False
+    assert kwargs["trust_env"] is True
     assert "transport" not in kwargs
 
 
@@ -589,6 +591,7 @@ def test_web_fetch_uses_all_proxy_for_https_when_scheme_proxy_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("OPENSQUILLA_WEB_FETCH_TRUST_PROXY_DNS", "1")
     monkeypatch.setenv("ALL_PROXY", "http://127.0.0.1:7897")
     kwargs = _client_kwargs_for(monkeypatch, managed={"trust_env": True})
     assert kwargs["proxy"] == "http://127.0.0.1:7897"
@@ -599,6 +602,7 @@ def test_web_fetch_uses_http_proxy_for_http_url_when_trust_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("OPENSQUILLA_WEB_FETCH_TRUST_PROXY_DNS", "1")
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7897")
     kwargs = _client_kwargs_for(
         monkeypatch,
@@ -682,6 +686,7 @@ async def test_web_fetch_passes_env_proxy_to_httpx_client(
 
     _cache.clear()
     _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("OPENSQUILLA_WEB_FETCH_TRUST_PROXY_DNS", "1")
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7897")
     monkeypatch.setattr("opensquilla.tools.builtin.web_fetch.httpx.AsyncClient", RecordingClient)
     monkeypatch.setattr(
