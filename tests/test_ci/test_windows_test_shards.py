@@ -37,11 +37,6 @@ pytest_file_selection_arg = SHARD_MODULE["_pytest_file_selection_arg"]
 
 OFFLINE_MARKER_EXCLUSIONS = SHARD_MODULE["OFFLINE_MARKER_EXCLUSIONS"]
 RECENTLY_ADDED_ACTIVE_TESTS = {
-    # Workspace MD retirement suites use the declared provisional floor until
-    # a comparable three-run Windows refresh supplies measured timings.
-    "tests/test_gateway/test_workspace_md_retirement_rpc.py",
-    "tests/test_identity/test_workspace_md_retirement.py",
-    "tests/test_scheduler/test_heartbeat_retirement.py",
     # Telemetry regressions use provisional weights until the next comparable
     # Windows duration refresh supplies measured timings.
     "tests/test_engine/test_runtime_usage_telemetry.py",
@@ -329,6 +324,11 @@ RECENTLY_ADDED_ACTIVE_TESTS = {
     "tests/test_telemetry_server/test_product_active_pipeline.py",
     "tests/test_telemetry_server/test_product_activity_pipeline.py",
     "tests/test_telemetry_server/test_protocol_upgrade_pipeline.py",
+    # Workspace MD retirement suites use the declared provisional floor until
+    # a comparable three-run Windows refresh supplies measured timings.
+    "tests/test_gateway/test_workspace_md_retirement_rpc.py",
+    "tests/test_identity/test_workspace_md_retirement.py",
+    "tests/test_scheduler/test_heartbeat_retirement.py",
 }
 
 
