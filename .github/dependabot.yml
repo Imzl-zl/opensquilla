@@ -13,6 +13,7 @@ updates:
       security-updates:
         applies-to: security-updates
         patterns: ["*"]
+        update-types: [minor, patch]
   - package-ecosystem: npm
     directory: /opensquilla-webui
     schedule:
@@ -26,6 +27,7 @@ updates:
       security-updates:
         applies-to: security-updates
         patterns: ["*"]
+        update-types: [minor, patch]
   - package-ecosystem: npm
     directory: /desktop/electron
     schedule:
@@ -39,3 +41,4 @@ updates:
       security-updates:
         applies-to: security-updates
         patterns: ["*"]
+        update-types: [minor, patch]

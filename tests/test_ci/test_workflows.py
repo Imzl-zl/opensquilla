@@ -135,7 +135,9 @@ def test_dependabot_keeps_major_version_updates_separate_from_weekly_compatible_
         assert groups["compatible-updates"] == {
             "applies-to": "version-updates", "patterns": ["*"], "update-types": ["minor", "patch"],
         }
-        assert groups["security-updates"] == {"applies-to": "security-updates", "patterns": ["*"]}
+        assert groups["security-updates"] == {
+            "applies-to": "security-updates", "patterns": ["*"], "update-types": ["minor", "patch"],
+        }
 
 
 @pytest.mark.parametrize("scenario", ["failure", "duplicate", "foreign", "bad-branch"])
