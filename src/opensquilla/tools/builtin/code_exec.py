@@ -916,7 +916,7 @@ def _runtime_path_variants(path: Path) -> tuple[Path, ...]:
     return tuple(dict.fromkeys((lexical, canonical)))
 
 
-def _current_python_runtime_roots() -> tuple[Path, ...]:
+def _current_python_runtime_roots(*, workspace: Path | None = None) -> tuple[Path, ...]:
     """Return the current interpreter roots needed by an isolated Python run."""
     roots: list[Path] = []
     candidates: list[Path] = []
@@ -924,14 +924,48 @@ def _current_python_runtime_roots() -> tuple[Path, ...]:
         candidates.extend(_runtime_path_variants(prefix))
 
     for executable_path in _runtime_path_variants(Path(sys.executable)):
-        if len(executable_path.parents) > 1:
-            candidates.append(executable_path.parents[1])
+        candidates.append(
+            executable_path.parent.parent
+            if executable_path.parent.name == "bin"
+            else executable_path
+        )
 
+    workspace_variants = _runtime_path_variants(workspace) if workspace is not None else ()
     for candidate in candidates:
         if candidate == Path(candidate.anchor) or candidate in roots or not candidate.exists():
             continue
-        roots.append(candidate)
-    return tuple(roots)
+        if any(
+            path.is_relative_to(root)
+            for path in workspace_variants
+            for root in _runtime_path_variants(candidate)
+        ):
+            # A shared installation prefix can also contain user projects. Protect
+            # its runtime assets without replacing the workspace's write grant.
+            assets = [
+                candidate / name
+                for name in (
+                    "bin", "lib", "lib64", sys.platlibdir, "include", "share", "pyvenv.cfg"
+                )
+            ]
+            assets.extend(
+                executable
+                for executable in _runtime_path_variants(Path(sys.executable))
+                if executable.is_relative_to(candidate)
+            )
+            roots.extend(
+                variant
+                for asset in assets
+                if asset.exists()
+                for variant in _runtime_path_variants(asset)
+                if variant not in roots
+            )
+        else:
+            roots.append(candidate)
+    return tuple(
+        root
+        for root in roots
+        if not any(root != other and root.is_relative_to(other) for other in roots)
+    )
 
 
 def _policy_deny_profile(policy: SandboxPolicy) -> FileSystemPermissionProfile:
@@ -995,6 +1029,7 @@ def _policy_with_bubblewrap_python_runtime(
     *,
     python_bin: str,
     runtime: object | None,
+    workspace: Path | None = None,
 ) -> tuple[str, SandboxPolicy]:
     """Select and expose a policy-compatible Python for this Bubblewrap request."""
     backend = getattr(runtime, "backend", None) if runtime is not None else None
@@ -1008,7 +1043,7 @@ def _policy_with_bubblewrap_python_runtime(
             )
         return system_python, policy
 
-    runtime_roots = _current_python_runtime_roots()
+    runtime_roots = _current_python_runtime_roots(workspace=workspace)
     if _policy_denies_current_python_runtime(policy, runtime_roots):
         system_python = _visible_bubblewrap_system_python(policy)
         if system_python is None:
@@ -1021,6 +1056,14 @@ def _policy_with_bubblewrap_python_runtime(
     runtime_root_variants = {
         variant for root in runtime_roots for variant in _runtime_path_variants(root)
     }
+
+    def inside_runtime(path: Path) -> bool:
+        return any(
+            variant.is_relative_to(root)
+            for variant in _runtime_path_variants(path)
+            for root in runtime_root_variants
+        )
+
     mounts: list[MountSpec] = []
     for mount in policy.mounts:
         host_variants = set(_runtime_path_variants(mount.host_path))
@@ -1029,7 +1072,7 @@ def _policy_with_bubblewrap_python_runtime(
         exact_runtime_mount = host_is_runtime and sandbox_path in runtime_root_variants
         if exact_runtime_mount:
             continue
-        if host_is_runtime and mount.mode == "rw":
+        if mount.mode == "rw" and inside_runtime(mount.host_path):
             mount = mount.with_mode("ro")
         mounts.append(mount)
 
@@ -1049,7 +1092,16 @@ def _policy_with_bubblewrap_python_runtime(
     file_system = policy.file_system or FileSystemPermissionProfile(entries=())
     file_system = dataclasses.replace(
         file_system,
-        entries=(*file_system.entries, *runtime_entries),
+        entries=(
+            *(
+                dataclasses.replace(entry, access=FileSystemAccess.READ)
+                if entry.access is FileSystemAccess.WRITE
+                and any(inside_runtime(Path(path)) for path in (entry.path, entry.lexical_path))
+                else entry
+                for entry in file_system.entries
+            ),
+            *runtime_entries,
+        ),
     )
     return python_bin, dataclasses.replace(
         policy,
@@ -1308,6 +1360,7 @@ async def execute_code(
                     request.policy,
                     python_bin=python_bin,
                     runtime=runtime,
+                    workspace=request.cwd,
                 )
                 backend_policy = _trusted_managed_network_policy(backend_policy, runtime)
                 backend_request = SandboxRequest(

@@ -49,6 +49,17 @@ def _mount_events(argv: list[str]) -> list[tuple[str, str, str]]:
     return events
 
 
+def _last_covering_mount(events: list[tuple[str, str, str]], path: Path) -> str | None:
+    return next(
+        (
+            mode
+            for mode, _source, destination in reversed(events)
+            if path.is_relative_to(Path(destination))
+        ),
+        None,
+    )
+
+
 def test_code_exec_prefers_current_interpreter_when_path_has_no_python(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -316,6 +327,349 @@ def test_code_exec_bubblewrap_removes_duplicate_runtime_rw_mounts_from_final_pla
         if event == ("--ro-bind", str(managed_prefix), str(managed_prefix))
     ]
     assert any(index > workspace_bind_index for index in runtime_read_indexes)
+
+
+@pytest.mark.parametrize("layout", ["same", "project", "nested-venv", "runtime-lib"])
+def test_code_exec_bubblewrap_keeps_workspace_writable_outside_runtime_assets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    layout: str,
+) -> None:
+    from opensquilla.sandbox.backend.bubblewrap import build_bwrap_argv
+    from opensquilla.sandbox.backend.linux_permissions import compile_linux_permissions
+    from opensquilla.sandbox.permissions import FileSystemAccess, FileSystemPermissionProfile
+    from opensquilla.sandbox.types import SandboxRequest
+
+    managed_prefix = tmp_path / "environment"
+    workspace = {
+        "same": managed_prefix,
+        "project": managed_prefix / "project",
+        "nested-venv": tmp_path / "workspace",
+        "runtime-lib": managed_prefix / "lib" / "python3.12" / "site-packages",
+    }[layout]
+    if layout == "nested-venv":
+        managed_prefix = workspace / ".venv"
+    workspace.mkdir(parents=True)
+    python_bin = _make_executable(managed_prefix / "bin" / "python")
+    assets = [python_bin]
+    for name in ("lib", "lib64", "include", "share"):
+        asset = managed_prefix / name / "runtime-data"
+        asset.parent.mkdir(parents=True, exist_ok=True)
+        asset.write_text("runtime", encoding="utf-8")
+        assets.append(asset)
+    config = managed_prefix / "pyvenv.cfg"
+    config.write_text("include-system-site-packages = false\n", encoding="utf-8")
+    assets.append(config)
+    monkeypatch.setattr(sys, "prefix", str(managed_prefix))
+    monkeypatch.setattr(sys, "base_prefix", str(managed_prefix))
+    monkeypatch.setattr(sys, "executable", str(python_bin))
+    policy = replace(
+        _sandbox_policy(MountSpec(workspace, workspace, mode="rw", required=True)),
+        file_system=FileSystemPermissionProfile.workspace(
+            workspace=workspace,
+            host_root_readonly=False,
+            tmp_writable=False,
+            tmpdir_env_writable=False,
+        ),
+    )
+
+    selected, updated = code_exec._policy_with_bubblewrap_python_runtime(
+        policy,
+        python_bin=str(python_bin),
+        runtime=SimpleNamespace(backend=SimpleNamespace(name="bubblewrap")),
+        workspace=workspace,
+    )
+    permissions = compile_linux_permissions(updated)
+    events = _mount_events(
+        build_bwrap_argv(
+            SandboxRequest(
+                argv=(selected, "-c", "print('ok')"),
+                cwd=workspace,
+                action_kind="code.exec",
+                policy=updated,
+            ),
+            binary="bwrap",
+        )
+    )
+
+    assert selected == str(python_bin)
+    assert updated.file_system is not None
+    output = workspace / "result.txt"
+    if layout == "runtime-lib":
+        assert updated.file_system.resolve(output) is FileSystemAccess.READ
+        assert _last_covering_mount(events, output) == "--ro-bind"
+        assert not any(root.host_path == workspace for root in permissions.write_roots)
+    else:
+        assert updated.file_system.resolve(output) is FileSystemAccess.WRITE
+        assert _last_covering_mount(events, output) == "--bind"
+        assert any(root.host_path == workspace for root in permissions.write_roots)
+    for asset in assets:
+        assert updated.file_system.resolve(asset) is FileSystemAccess.READ
+        assert _last_covering_mount(events, asset) == "--ro-bind"
+
+
+@pytest.mark.parametrize("layout", ["same", "project"])
+def test_code_exec_bubblewrap_runtime_overlap_does_not_grant_workspace_writes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    layout: str,
+) -> None:
+    from opensquilla.sandbox.backend.bubblewrap import build_bwrap_argv
+    from opensquilla.sandbox.backend.linux_permissions import compile_linux_permissions
+    from opensquilla.sandbox.permissions import FileSystemAccess, FileSystemPermissionProfile
+    from opensquilla.sandbox.types import SandboxRequest
+
+    managed_prefix = tmp_path / "environment"
+    workspace = managed_prefix if layout == "same" else managed_prefix / "project"
+    workspace.mkdir(parents=True)
+    python_bin = _make_executable(managed_prefix / "bin" / "python")
+    monkeypatch.setattr(sys, "prefix", str(managed_prefix))
+    monkeypatch.setattr(sys, "base_prefix", str(managed_prefix))
+    monkeypatch.setattr(sys, "executable", str(python_bin))
+    policy = replace(
+        _sandbox_policy(MountSpec(workspace, workspace, mode="ro", required=True)),
+        workspace_rw=False,
+        tmp_writable=False,
+        file_system=FileSystemPermissionProfile.read_only(
+            readable_roots=(workspace,),
+            host_root_readonly=False,
+        ),
+    )
+
+    selected, updated = code_exec._policy_with_bubblewrap_python_runtime(
+        policy,
+        python_bin=str(python_bin),
+        runtime=SimpleNamespace(backend=SimpleNamespace(name="bubblewrap")),
+        workspace=workspace,
+    )
+    events = _mount_events(
+        build_bwrap_argv(
+            SandboxRequest(
+                argv=(selected, "-c", "print('ok')"),
+                cwd=workspace,
+                action_kind="code.exec",
+                policy=updated,
+            ),
+            binary="bwrap",
+        )
+    )
+
+    assert updated.file_system is not None
+    assert updated.file_system.resolve(workspace / "result.txt") is FileSystemAccess.READ
+    assert updated.file_system.resolve(python_bin) is FileSystemAccess.READ
+    assert not compile_linux_permissions(updated).write_roots
+    assert _last_covering_mount(events, workspace / "result.txt") == "--ro-bind"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="directory symlink aliases require POSIX")
+@pytest.mark.parametrize("alias_kind", ["workspace", "prefix"])
+def test_code_exec_bubblewrap_runtime_overlap_respects_symlink_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    alias_kind: str,
+) -> None:
+    from opensquilla.sandbox.backend.bubblewrap import build_bwrap_argv
+    from opensquilla.sandbox.backend.linux_permissions import compile_linux_permissions
+    from opensquilla.sandbox.permissions import FileSystemAccess, FileSystemPermissionProfile
+    from opensquilla.sandbox.types import SandboxRequest
+
+    actual_prefix = tmp_path / "environment"
+    actual_python = _make_executable(actual_prefix / "bin" / "python")
+    alias = tmp_path / "environment-link"
+    alias.symlink_to(actual_prefix, target_is_directory=True)
+    workspace = alias if alias_kind == "workspace" else actual_prefix
+    managed_prefix = alias if alias_kind == "prefix" else actual_prefix
+    python_bin = managed_prefix / "bin" / "python"
+    monkeypatch.setattr(sys, "prefix", str(managed_prefix))
+    monkeypatch.setattr(sys, "base_prefix", str(actual_prefix))
+    monkeypatch.setattr(sys, "executable", str(python_bin))
+    policy = replace(
+        _sandbox_policy(MountSpec(workspace, workspace, mode="rw", required=True)),
+        file_system=FileSystemPermissionProfile.workspace(
+            workspace=workspace,
+            host_root_readonly=False,
+            tmp_writable=False,
+            tmpdir_env_writable=False,
+        ),
+    )
+
+    selected, updated = code_exec._policy_with_bubblewrap_python_runtime(
+        policy,
+        python_bin=str(python_bin),
+        runtime=SimpleNamespace(backend=SimpleNamespace(name="bubblewrap")),
+        workspace=workspace,
+    )
+    permissions = compile_linux_permissions(updated)
+    events = _mount_events(
+        build_bwrap_argv(
+            SandboxRequest(
+                argv=(selected, "-c", "print('ok')"),
+                cwd=workspace,
+                action_kind="code.exec",
+                policy=updated,
+            ),
+            binary="bwrap",
+        )
+    )
+
+    assert updated.file_system is not None
+    assert policy.file_system is not None
+    for root in (alias, actual_prefix):
+        output = root / "result.txt"
+        if policy.file_system.resolve(output) is FileSystemAccess.WRITE:
+            assert updated.file_system.resolve(output) is FileSystemAccess.WRITE
+        else:
+            assert updated.file_system.resolve(output) is not FileSystemAccess.WRITE
+        assert updated.file_system.resolve(root / "bin" / "python") is FileSystemAccess.READ
+    assert any(root.host_path == actual_prefix for root in permissions.write_roots)
+    assert _last_covering_mount(events, actual_prefix / "result.txt") == "--bind"
+    assert _last_covering_mount(events, actual_python) == "--ro-bind"
+
+
+@pytest.mark.parametrize("denied_asset", ["lib", "pyvenv.cfg", "bin-glob"])
+def test_code_exec_bubblewrap_overlapping_runtime_assets_respect_denies(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    denied_asset: str,
+) -> None:
+    from opensquilla.sandbox.permissions import FileSystemPermissionProfile
+
+    workspace = tmp_path / "environment"
+    python_bin = _make_executable(workspace / "bin" / "python")
+    (workspace / "lib").mkdir()
+    (workspace / "pyvenv.cfg").write_text("", encoding="utf-8")
+    system_python = _make_executable(tmp_path / "system" / "python3")
+    monkeypatch.setattr(sys, "prefix", str(workspace))
+    monkeypatch.setattr(sys, "base_prefix", str(workspace))
+    monkeypatch.setattr(sys, "executable", str(python_bin))
+    monkeypatch.setattr(code_exec, "_SANDBOX_PYTHON_CANDIDATES", (system_python,))
+    policy = replace(
+        _sandbox_policy(MountSpec(workspace, workspace, mode="rw", required=True)),
+        file_system=FileSystemPermissionProfile.workspace(
+            workspace=workspace,
+            denied_read_roots=(() if denied_asset == "bin-glob" else (workspace / denied_asset,)),
+            denied_read_globs=(str(workspace / "bin" / "**"),)
+            if denied_asset == "bin-glob"
+            else (),
+            host_root_readonly=False,
+            tmp_writable=False,
+            tmpdir_env_writable=False,
+        ),
+    )
+
+    selected, updated = code_exec._policy_with_bubblewrap_python_runtime(
+        policy,
+        python_bin=str(python_bin),
+        runtime=SimpleNamespace(backend=SimpleNamespace(name="bubblewrap")),
+        workspace=workspace,
+    )
+
+    assert selected == str(system_python)
+    assert updated is policy
+    monkeypatch.setattr(code_exec, "_SANDBOX_PYTHON_CANDIDATES", ())
+    with pytest.raises(ToolError, match="denied by sandbox policy"):
+        code_exec._policy_with_bubblewrap_python_runtime(
+            policy,
+            python_bin=str(python_bin),
+            runtime=SimpleNamespace(backend=SimpleNamespace(name="bubblewrap")),
+            workspace=workspace,
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="directory symlink aliases require POSIX")
+def test_code_exec_bubblewrap_rejects_writable_runtime_asset_symlink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from opensquilla.sandbox.backend.bubblewrap import build_bwrap_argv
+    from opensquilla.sandbox.permissions import FileSystemPermissionProfile
+    from opensquilla.sandbox.types import SandboxBackendError, SandboxRequest
+
+    workspace = tmp_path / "environment"
+    python_bin = _make_executable(workspace / "bin" / "python")
+    (workspace / "lib").mkdir()
+    (workspace / "lib64").symlink_to("lib", target_is_directory=True)
+    monkeypatch.setattr(sys, "prefix", str(workspace))
+    monkeypatch.setattr(sys, "base_prefix", str(workspace))
+    monkeypatch.setattr(sys, "executable", str(python_bin))
+    policy = replace(
+        _sandbox_policy(MountSpec(workspace, workspace, mode="rw", required=True)),
+        file_system=FileSystemPermissionProfile.workspace(
+            workspace=workspace,
+            host_root_readonly=False,
+            tmp_writable=False,
+            tmpdir_env_writable=False,
+        ),
+    )
+
+    selected, updated = code_exec._policy_with_bubblewrap_python_runtime(
+        policy,
+        python_bin=str(python_bin),
+        runtime=SimpleNamespace(backend=SimpleNamespace(name="bubblewrap")),
+        workspace=workspace,
+    )
+
+    with pytest.raises(SandboxBackendError, match="crosses writable symlink.*lib64"):
+        build_bwrap_argv(
+            SandboxRequest(
+                argv=(selected, "-c", "print('ok')"),
+                cwd=workspace,
+                action_kind="code.exec",
+                policy=updated,
+            ),
+            binary="bwrap",
+        )
+
+
+def test_code_exec_bubblewrap_standalone_interpreter_keeps_sibling_files_writable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from opensquilla.sandbox.backend.bubblewrap import build_bwrap_argv
+    from opensquilla.sandbox.permissions import FileSystemAccess, FileSystemPermissionProfile
+    from opensquilla.sandbox.types import SandboxRequest
+
+    workspace = tmp_path / "workspace"
+    python_bin = _make_executable(workspace / "scripts" / "python")
+    managed_prefix = tmp_path / "environment"
+    managed_prefix.mkdir()
+    monkeypatch.setattr(sys, "prefix", str(managed_prefix))
+    monkeypatch.setattr(sys, "base_prefix", str(managed_prefix))
+    monkeypatch.setattr(sys, "executable", str(python_bin))
+    policy = replace(
+        _sandbox_policy(MountSpec(workspace, workspace, mode="rw", required=True)),
+        file_system=FileSystemPermissionProfile.workspace(
+            workspace=workspace,
+            host_root_readonly=False,
+            tmp_writable=False,
+            tmpdir_env_writable=False,
+        ),
+    )
+
+    selected, updated = code_exec._policy_with_bubblewrap_python_runtime(
+        policy,
+        python_bin=str(python_bin),
+        runtime=SimpleNamespace(backend=SimpleNamespace(name="bubblewrap")),
+        workspace=workspace,
+    )
+    events = _mount_events(
+        build_bwrap_argv(
+            SandboxRequest(
+                argv=(selected, "-c", "print('ok')"),
+                cwd=workspace,
+                action_kind="code.exec",
+                policy=updated,
+            ),
+            binary="bwrap",
+        )
+    )
+
+    assert updated.file_system is not None
+    for output in (workspace / "result.txt", python_bin.parent / "script.py"):
+        assert updated.file_system.resolve(output) is FileSystemAccess.WRITE
+        assert _last_covering_mount(events, output) == "--bind"
+    assert updated.file_system.resolve(python_bin) is FileSystemAccess.READ
+    assert _last_covering_mount(events, python_bin) == "--ro-bind"
 
 
 @pytest.mark.parametrize("deny_kind", ["same", "ancestor"])
@@ -608,11 +962,30 @@ async def test_code_exec_managed_python_imports_pptx_inside_bubblewrap(
         policy,
         python_bin=python_bin,
         runtime=runtime,
+        workspace=tmp_path,
     )
+    code = """
+import errno
+import sys
+import tempfile
+from pathlib import Path
+
+import pptx
+
+Path("result.txt").write_text("workspace writable", encoding="utf-8")
+try:
+    with tempfile.TemporaryFile(dir=Path(sys.executable).parent):
+        pass
+except OSError as exc:
+    assert exc.errno in (errno.EROFS, errno.EACCES, errno.EPERM), exc
+else:
+    raise AssertionError("Python runtime unexpectedly writable")
+print(pptx.__version__)
+"""
 
     result = await backend.run(
         SandboxRequest(
-            argv=(python_bin, "-c", "import pptx; print(pptx.__version__)"),
+            argv=(python_bin, "-c", code),
             cwd=tmp_path,
             action_kind="code.exec",
             policy=policy,
@@ -621,6 +994,7 @@ async def test_code_exec_managed_python_imports_pptx_inside_bubblewrap(
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip()
+    assert (tmp_path / "result.txt").read_text(encoding="utf-8") == "workspace writable"
 
 
 def test_code_exec_allows_active_workspace_under_sensitive_parent(
