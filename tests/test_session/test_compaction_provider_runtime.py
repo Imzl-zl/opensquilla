@@ -13,6 +13,7 @@ from opensquilla.engine.usage_accounting import (
     bind_usage_accounting_scope,
 )
 from opensquilla.provider.failures import ProviderFailureKind
+from opensquilla.provider.openai import OpenAIProvider
 from opensquilla.provider.protocol import ProviderConnectionConfig, ProviderMetadata
 from opensquilla.provider.selector import ProviderConfig, build_provider_from_config
 from opensquilla.provider.types import (
@@ -31,6 +32,7 @@ from opensquilla.session.compaction import (
     CompactionConfig,
     CompactionRequest,
     CompactionRequestContext,
+    _fit_compaction_input_to_target,
     arm_compaction_deadline,
     build_compaction_config_from_provider,
     call_compaction_provider,
@@ -1296,6 +1298,94 @@ async def test_suffix_multiple_chunks_read_each_complete_source_round_once(
     assert seen_source == [entry["content"] for entry in entries[:4]]
     assert "checkpoint after chunk 1" in provider.calls[1][0][-1].content
     assert result.summary == "checkpoint after chunk 2"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", ["prefix", "suffix"])
+@pytest.mark.parametrize("forced", [False, True])
+@pytest.mark.parametrize("previous_summary", ["", "Earlier checkpoint"])
+@pytest.mark.parametrize("fallback_output_tokens", [None, 2048])
+async def test_later_chunks_reserve_the_next_checkpoint_before_spending_calls(
+    monkeypatch: pytest.MonkeyPatch, layout: str, forced: bool, previous_summary: str,
+    fallback_output_tokens: int | None, _compaction_tokenizer: None,
+) -> None:
+    monkeypatch.setenv("OPENSQUILLA_COMPACTION_PROMPT_LAYOUT", layout)
+    checkpoint = " b" * 900
+    capture = _Provider(lambda: _Stream([
+        TextDeltaEvent(text=checkpoint), DoneEvent(stop_reason="stop"),
+    ]))
+    provider = OpenAIProvider(api_key="synthetic-key")
+    monkeypatch.setattr(provider, "chat", capture.chat)
+    config = _suffix_config(provider, window=24000)
+    config.protected_recent_messages = 2
+    request = CompactionRequest(
+        session_id="rolling-checkpoint-budget", entries=[], context_window_tokens=24000,
+        previous_summary=previous_summary, config=config,
+    )
+    assert config.llm_plan is not None
+    target = config.llm_plan.primary
+    if fallback_output_tokens is not None:
+        config.llm_plan = replace(config.llm_plan, candidates=(
+            target, replace(target, model="fallback-summary", max_output_tokens=2048),
+        ))
+
+    def round_entries(index: int, size: int) -> list[dict[str, Any]]:
+        return [
+            {"role": "user", "content": f"Round {index}:" + " b" * size},
+            {"role": "assistant", "content": f"Completed round {index}"},
+        ]
+
+    # Locate the real adapter's input boundary for both supported estimators.
+    # The first round fills a request; the next two fit only before a
+    # permitted checkpoint grows. No request or token estimate is mocked.
+    low, high = 0, 24000
+    while low < high:
+        size = (low + high + 1) // 2
+        if _fit_compaction_input_to_target(
+            request=request, target=target, previous_summary=previous_summary,
+            chunk=round_entries(0, size),
+        ) is not None:
+            low = size
+        else:
+            high = size - 1
+    first = round_entries(0, low - 100)
+    spare_tokens = 1500 if fallback_output_tokens is not None else 300
+    later = (
+        round_entries(1, (low - spare_tokens) // 2)
+        + round_entries(2, (low - spare_tokens) // 2)
+    )
+    assert _fit_compaction_input_to_target(
+        request=request, target=target, previous_summary=previous_summary, chunk=later,
+    ) is not None
+    assert _fit_compaction_input_to_target(
+        request=request, target=target,
+        previous_summary=" b" * (fallback_output_tokens or 900), chunk=later,
+    ) is None
+    entries = first + later + round_entries(3, 1)
+    request = replace(request, entries=entries, forced_prefix_cut=6 if forced else None)
+
+    result = await compact_context(request)
+
+    if forced:
+        assert capture.calls == []
+        assert result.removed_count == 0
+        assert result.kept_entries == entries
+        assert result.summary == ""
+        assert result.skip_reason == (
+            "suffix_call_budget_exceeded" if layout == "suffix" else "summary_call_budget_exceeded"
+        )
+    else:
+        assert len(capture.calls) == 2
+        assert result.removed_count == 4
+        assert result.kept_entries == entries[4:]
+        assert result.summary == checkpoint.strip()
+        for messages, tools, chat_config in capture.calls:
+            proof = provider.project_final_request(messages, tools, chat_config)
+            assert proof.fits
+            assert proof.proof["fits_token_budget"]
+            assert proof.proof["fits_char_budget"]
+            assert chat_config.max_tokens == 4096
+        assert checkpoint.strip() in capture.calls[1][0][-1].content
 
 
 @pytest.mark.asyncio

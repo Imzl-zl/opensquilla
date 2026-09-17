@@ -1164,7 +1164,7 @@ def _chunk_entries(
     entries: list[dict[str, Any]],
     max_input_tokens: int,
     *,
-    request_fits: Callable[[list[dict[str, Any]]], bool] | None = None,
+    request_fits: Callable[[list[dict[str, Any]], bool], bool] | None = None,
 ) -> list[list[dict[str, Any]]]:
     """Pack complete API rounds within the token and final request limits."""
 
@@ -1178,7 +1178,7 @@ def _chunk_entries(
         group_tokens = _compaction_input_tokens(group)
         if current and (
             current_tokens + group_tokens > token_limit
-            or (request_fits is not None and not request_fits(current + group))
+            or (request_fits is not None and not request_fits(current + group, bool(chunks)))
         ):
             chunks.append(current)
             current = []
@@ -1271,6 +1271,7 @@ def _fit_compaction_input_to_target(
     chunk: list[dict[str, Any]],
     identifier_instruction: str = "",
     custom_instructions: str | None = None,
+    input_reserve_tokens: int = 0,
 ) -> str | None:
     """Replan one summary input against the candidate that will execute it."""
 
@@ -1303,7 +1304,9 @@ def _fit_compaction_input_to_target(
                 provider_request_correlation=request.provider_request_correlation,
             )
             tools = None
-        _compaction_generation_budget(target, messages, tools, config)
+        _compaction_generation_budget(
+            target, messages, tools, config, input_reserve_tokens=input_reserve_tokens,
+        )
     except _CompactionProviderError:
         return None
     return raw
@@ -1912,6 +1915,8 @@ def _compaction_generation_budget(
     messages: list[Message],
     tools: list[ToolDefinition] | None,
     config: ChatConfig,
+    *,
+    input_reserve_tokens: int = 0,
 ) -> int:
     """Check the final input and reserve the adapter's effective generation cap."""
 
@@ -1926,6 +1931,14 @@ def _compaction_generation_budget(
         input_tokens = int(projection.proof.get("estimated_tokens") or 0)
         if input_tokens <= 0:
             input_tokens = _estimate_tokens(_json_text(payload))
+        effective_budget = projection.proof.get("effective_proof_token_budget")
+        if (
+            input_reserve_tokens > 0
+            and isinstance(effective_budget, int)
+            and not isinstance(effective_budget, bool)
+            and input_tokens + input_reserve_tokens > effective_budget
+        ):
+            raise _CompactionProviderError("compaction input leaves insufficient checkpoint budget")
     else:
         # Extension providers may not implement final-request projection. Keep
         # compatibility while accounting for all known input, including tools.
@@ -1941,7 +1954,7 @@ def _compaction_generation_budget(
             raise _CompactionProviderError("compaction request exceeds character limit")
     if generation_budget <= 0 or (
         target.context_window_tokens > 0
-        and input_tokens + generation_budget > target.context_window_tokens
+        and input_tokens + input_reserve_tokens + generation_budget > target.context_window_tokens
     ):
         raise _CompactionProviderError("compaction input leaves insufficient output budget")
     return generation_budget
@@ -2723,20 +2736,26 @@ async def compact_context_new(request: CompactionRequest) -> CompactionResult:
         assert cfg.llm_plan is not None
         primary = cfg.llm_plan.primary
         input_budget = _compaction_target_input_budget(request)
-        first_chunk_budget = max(
-            1,
-            input_budget - min(previous_summary_tokens, input_budget // 2),
+        # Later calls consume the preceding call's output in addition to their
+        # own generation allowance. Keep nonempty checkpoint framing in the
+        # projection even when the operation starts without a checkpoint.
+        planning_summary = prev_summary or " "
+        planning_summary_tokens = _estimate_tokens(planning_summary)
+        rolling_tokens = max(
+            planning_summary_tokens,
+            *(target.max_output_tokens for target in cfg.llm_plan.candidates),
         )
         chunks = _chunk_entries(
             to_compact,
-            first_chunk_budget,
-            request_fits=lambda chunk: _fit_compaction_input_to_target(
+            max(1, input_budget - _estimate_tokens(prev_summary)),
+            request_fits=lambda chunk, later: _fit_compaction_input_to_target(
                 request=request,
                 target=primary,
-                previous_summary=prev_summary,
+                previous_summary=planning_summary if later else prev_summary,
                 chunk=chunk,
                 identifier_instruction=id_instruction,
                 custom_instructions=custom_instructions or None,
+                input_reserve_tokens=(rolling_tokens - planning_summary_tokens if later else 0),
             ) is not None,
         )
     elif legacy_raw:
