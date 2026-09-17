@@ -7,6 +7,7 @@ import os
 import runpy
 import subprocess
 import sys
+import threading
 import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -508,6 +509,10 @@ def test_task_runtime_leak_smoke_is_marked_ci_serial() -> None:
 
 def test_runner_saturated_subprocess_contracts_are_marked_ci_serial() -> None:
     assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/functional/test_gateway_silent_reply_process_e2e.py"),
+        "test_real_gateway_suppresses_goal_sentinel_everywhere",
+    )
+    assert "pytest.mark.ci_serial" in _function_decorators(
         Path("tests/test_ci/test_windows_signatures.py"),
         "test_explicit_invalid_signtool_fails_without_fallback",
     )
@@ -539,6 +544,86 @@ def test_runner_saturated_subprocess_contracts_are_marked_ci_serial() -> None:
         Path("tests/test_recovery/test_transaction.py"),
         "test_transaction_recovery_locks_parked_backup_before_restoring_target",
     )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows process and mapped-file lifecycle")
+@pytest.mark.ci_serial
+def test_gateway_cleanup_waits_for_writer_after_launcher_exit(tmp_path: Path) -> None:
+    harness = runpy.run_path("tests/functional/test_gateway_silent_reply_process_e2e.py")
+    writer = tmp_path / "writer.py"
+    writer.write_text(
+        "import datetime, json, mmap, os, pathlib, sys, time\n"
+        "root = pathlib.Path(sys.argv[1])\n"
+        "with (root / 'mapped.db').open('w+b') as stream:\n"
+        "    stream.truncate(32768)\n"
+        "    with mmap.mmap(stream.fileno(), 0) as mapping:\n"
+        "        mapping[:4] = b'live'\n"
+        "        (root / 'gateway.pid').write_text(json.dumps({\n"
+        "            'pid': os.getpid(),\n"
+        "            'start_ts': datetime.datetime.now(datetime.UTC).isoformat(),\n"
+        "        }), encoding='utf-8')\n"
+        "        (root / 'ready').touch()\n"
+        "        deadline = time.monotonic() + 15\n"
+        "        while not (root / 'release').exists():\n"
+        "            if time.monotonic() >= deadline:\n"
+        "                raise TimeoutError('parent did not release mapped file')\n"
+        "            time.sleep(0.01)\n",
+        encoding="utf-8",
+    )
+    launcher_code = (
+        "import pathlib, subprocess, sys, time\n"
+        "root = pathlib.Path(sys.argv[2])\n"
+        "child = subprocess.Popen([sys.executable, sys.argv[1], str(root)],\n"
+        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "while not (root / 'ready').exists():\n"
+        "    if child.poll() is not None:\n"
+        "        raise RuntimeError('writer exited before ready')\n"
+        "    time.sleep(0.01)\n"
+    )
+    # A direct interpreter gives the fixture a real launcher that can finish
+    # while its child still owns mappings, without depending on uv teardown timing.
+    launcher = subprocess.Popen(
+        [getattr(sys, "_base_executable", sys.executable), "-c", launcher_code,
+         str(writer), str(tmp_path)],
+    )
+    identity = None
+    release = tmp_path / "release"
+    timer = threading.Timer(0.2, release.touch)
+    try:
+        assert launcher.wait(timeout=10) == 0
+        identity = harness["_open_gateway_process_handle"](tmp_path)
+        assert identity is not None
+        kernel32, handle = identity
+        assert kernel32.WaitForSingleObject(handle, 0) == 258
+        with (tmp_path / "mapped.db").open("r+b") as stream, pytest.raises(OSError):
+            stream.truncate(0)
+        timer.start()
+        harness["_stop_process"](launcher, tmp_path)
+        assert kernel32.WaitForSingleObject(handle, 0) == 0
+        with (tmp_path / "mapped.db").open("r+b") as stream:
+            stream.truncate(0)
+    finally:
+        release.touch()
+        timer.cancel()
+        if launcher.poll() is None:
+            launcher.kill()
+            launcher.wait(timeout=10)
+        if identity is not None:
+            kernel32, handle = identity
+            try:
+                assert kernel32.WaitForSingleObject(handle, 10_000) == 0
+            finally:
+                kernel32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows process birth identity")
+def test_gateway_cleanup_ignores_reused_pid(tmp_path: Path) -> None:
+    harness = runpy.run_path("tests/functional/test_gateway_silent_reply_process_e2e.py")
+    (tmp_path / "gateway.pid").write_text(
+        json.dumps({"pid": os.getpid(), "start_ts": "1970-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    assert harness["_open_gateway_process_handle"](tmp_path) is None
 
 
 @pytest.mark.parametrize(
