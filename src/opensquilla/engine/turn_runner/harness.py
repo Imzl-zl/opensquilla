@@ -81,6 +81,7 @@ from opensquilla.engine.turn_runner.turn_finalizer_stage import (
 )
 from opensquilla.engine.usage_accounting import UsageExecutionContext
 from opensquilla.provider.model_catalog import resolve_effective_context_window
+from opensquilla.provider.registry import LOCAL_RUNTIME_PROVIDERS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -592,11 +593,15 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
                 )
             # Per-model [models.*] context_window overrides beat the global
             # llm.context_window_tokens value; the global still beats the catalog.
-            context_window, _context_window_source = resolve_effective_context_window(
+            context_window, context_window_source = resolve_effective_context_window(
                 runner._model_catalog,
                 model_id,
                 provider=provider_name,
                 global_override=user_context_window,
+            )
+            context_window_known = (
+                context_window_source in {"override", "config", "catalog"}
+                or provider_name.strip().lower() in LOCAL_RUNTIME_PROVIDERS
             )
             capabilities = runner._model_catalog.get_capabilities(
                 model_id, provider_name=provider_name, base_url=base_url
@@ -647,6 +652,7 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
             auto_max_tokens = 0
             auto_max_tokens_source = "default"
             context_window = user_context_window if user_context_window > 0 else 200_000
+            context_window_known = user_context_window > 0
             capabilities = None
             tools_capability_verified = False
             vision_support = "unknown"
@@ -655,6 +661,7 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
         return _ResolvedCatalog(
             max_tokens=max_tokens,
             context_window=context_window,
+            context_window_known=context_window_known,
             capabilities=capabilities,
             tools_capability_verified=tools_capability_verified,
             vision_support=cast(Any, vision_support),
@@ -757,6 +764,7 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
         if vision_support not in {"supported", "unsupported", "unknown"}:
             vision_support = "unknown"
         context_window = limits.context_window
+        context_window_known = bool(getattr(limits, "context_window_known", True))
         if include_global_overrides:
             per_model_context = catalog.user_context_window_override(
                 model_id,
@@ -767,12 +775,14 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
             )
             if per_model_context is None and global_context > 0:
                 context_window = global_context
+                context_window_known = True
         max_tokens = limits.max_output_tokens
         if include_global_overrides and configured_max_tokens > 0:
             max_tokens = min(configured_max_tokens, context_window)
         return _ResolvedCatalog(
             max_tokens=max_tokens,
             context_window=context_window,
+            context_window_known=context_window_known,
             capabilities=capabilities,
             tools_capability_verified=tools_capability_verified,
             vision_support=cast(Any, vision_support),
