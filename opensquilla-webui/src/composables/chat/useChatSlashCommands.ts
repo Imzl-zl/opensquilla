@@ -195,6 +195,10 @@ function slashCommandKeys(command: Pick<ChatSlashCommand, 'aliases' | 'cmd' | 'n
     .filter(Boolean)
 }
 
+function isMenuCommand(command: ChatSlashCommand): boolean {
+  return slashCommandKeys(command).some(key => key === '/new' || key === '/meta')
+}
+
 function normalizeSlashCommand(cmd: SlashCommandPayload): ChatSlashCommand {
   const name = cmd?.name || cmd?.cmd || ''
   const rawChoices = Array.isArray((cmd as { argument_choices?: unknown })?.argument_choices)
@@ -384,7 +388,7 @@ export function useChatSlashCommands(options: UseChatSlashCommandsOptions) {
   function updatePalette() {
     if (!queryRange) return
     const query = queryRange.query
-    const commands = slashCmds.value.map(command => ({
+    const commands = slashCmds.value.filter(isMenuCommand).map(command => ({
       ...withLiveDescription(command), searchDescriptions: [command.desc], kind: 'command' as const,
     }))
     const meta = slashCmds.value.flatMap(parent => (parent.argumentChoices || []).map(choice => ({
@@ -677,6 +681,7 @@ export function useChatSlashCommands(options: UseChatSlashCommandsOptions) {
       // Command-name completion: "/me" -> matching commands.
       const query = val.slice(1).toLowerCase()
       const matches = slashCmds.value
+        .filter(isMenuCommand)
         .filter(command =>
           slashCommandKeys(command).some(key => key.slice(1).startsWith(query)),
         )
@@ -693,7 +698,7 @@ export function useChatSlashCommands(options: UseChatSlashCommandsOptions) {
     const partial = val.slice(firstSpace + 1).trimStart().toLowerCase()
     const parent = slashCmds.value.find(c => slashCommandKey(c.name) === slashCommandKey(head))
     const choices = parent?.argumentChoices || []
-    if (parent && choices.length > 0) {
+    if (parent && isMenuCommand(parent) && choices.length > 0) {
       openWith(
         choices
           .filter(ch => ch.value.toLowerCase().startsWith(partial))
