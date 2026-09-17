@@ -544,6 +544,10 @@ def test_runner_saturated_subprocess_contracts_are_marked_ci_serial() -> None:
         Path("tests/test_ci/test_windows_signatures.py"),
         "test_explicit_invalid_signtool_fails_without_fallback",
     )
+    assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/test_desktop/test_gateway_functional_probes.py"),
+        "test_mcp_probe_uses_real_stdio_server_and_gateway",
+    )
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows process and mapped-file lifecycle")
