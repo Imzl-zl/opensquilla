@@ -445,6 +445,95 @@ describe('WorkspaceChangesPanel', () => {
     mounted.unmount()
   })
 
+  it('steps through the changed files with the visible arrows', async () => {
+    const port = reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [
+          entry({ path: 'src/a.ts', changeType: 'modified', staged: false, unstaged: true }),
+          entry({ path: 'src/b.ts', changeType: 'modified', staged: false, unstaged: true }),
+        ],
+        totalCount: 2,
+      })),
+      readDiff: vi.fn(async () => diff()),
+    })
+    const mounted = mountPanel(port)
+    await settle()
+
+    const previous = mounted.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-previous-file"]',
+    )
+    const next = mounted.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-next-file"]',
+    )
+    const position = mounted.element.querySelector('[data-testid="changes-file-position"]')
+
+    // Nothing is selected yet, so the first step is a step forward.
+    expect(previous?.disabled).toBe(true)
+    expect(next?.disabled).toBe(false)
+    expect(position?.textContent?.trim()).toBe('0 of 2')
+
+    next?.click()
+    await settle()
+    expect(port.readDiff).toHaveBeenLastCalledWith({
+      workspaceId: 'workspace-1',
+      path: 'src/a.ts',
+      staged: false,
+    })
+    expect(position?.textContent?.trim()).toBe('1 of 2')
+
+    next?.click()
+    await settle()
+    expect(port.readDiff).toHaveBeenLastCalledWith({
+      workspaceId: 'workspace-1',
+      path: 'src/b.ts',
+      staged: false,
+    })
+    // The last file is the end of the sequence, not a wrap-around.
+    expect(next?.disabled).toBe(true)
+    expect(previous?.disabled).toBe(false)
+
+    previous?.click()
+    await settle()
+    expect(position?.textContent?.trim()).toBe('1 of 2')
+    expect(previous?.disabled).toBe(true)
+    mounted.unmount()
+  })
+
+  it('hides the file arrows when the working tree is clean', async () => {
+    const mounted = mountPanel(reader({
+      readChanges: vi.fn(async () => changes({ totalCount: 0, entries: [] })),
+    }))
+    await settle()
+
+    expect(mounted.element.querySelector('.wb-changes__nav')).toBeNull()
+    mounted.unmount()
+  })
+
+  it('wraps the diff header path with the patch body', async () => {
+    const longPath = `src/${'nested-directory/'.repeat(6)}file.ts`
+    const mounted = mountPanel(reader({
+      readDiff: vi.fn(async () => diff({ path: longPath })),
+    }))
+    await settle()
+    clickEntry(mounted.element, 'src/a.ts')
+    await settle()
+
+    const head = mounted.element.querySelector('.wb-changes__diff-head')
+    // The header used to truncate a path the body wraps; with wrapping on it
+    // takes the same treatment, so the full path stays readable.
+    expect(head?.classList.contains('is-wrapped')).toBe(true)
+    expect(head?.textContent).toContain(longPath)
+
+    const toggle = [...mounted.element.querySelectorAll<HTMLButtonElement>('.wb-changes__action')]
+      .find(button => button.textContent?.includes('Wrap lines'))
+    toggle?.click()
+    await nextTick()
+
+    expect(mounted.element.querySelector('.wb-changes__diff-head')?.classList
+      .contains('is-wrapped')).toBe(false)
+    mounted.unmount()
+  })
+
   it('stays honest when no reader is provided', async () => {
     const mounted = mountPanel(null)
     await settle()

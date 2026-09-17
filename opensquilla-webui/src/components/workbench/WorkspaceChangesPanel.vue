@@ -17,15 +17,52 @@
           <span class="wb-changes__removed">-{{ changes.removedLines }}</span>
         </span>
       </div>
-      <button
-        type="button"
-        class="wb-changes__action"
-        :disabled="loading"
-        @click="reload()"
-      >
-        <Icon name="refresh" :size="13" />
-        <span>{{ t('workbench.changes.refresh') }}</span>
-      </button>
+      <div class="wb-changes__bar-actions">
+        <!-- The arrow keys already step through the list; these are the same
+             step as a button, so a pointer user does not have to hunt for the
+             next file in a long list. -->
+        <div
+          v-if="orderedEntries.length > 0"
+          class="wb-changes__nav"
+          role="group"
+          :aria-label="t('workbench.changes.fileNav')"
+        >
+          <button
+            type="button"
+            class="wb-changes__nav-button"
+            :disabled="!canSelectPrevious"
+            :aria-label="t('workbench.changes.previousFile')"
+            :title="t('workbench.changes.previousFile')"
+            data-testid="changes-previous-file"
+            @click="stepFile(-1)"
+          >
+            <Icon name="chevronDown" :size="12" class="wb-changes__nav-glyph--previous" />
+          </button>
+          <span class="wb-changes__nav-position" data-testid="changes-file-position">
+            {{ positionLabel }}
+          </span>
+          <button
+            type="button"
+            class="wb-changes__nav-button"
+            :disabled="!canSelectNext"
+            :aria-label="t('workbench.changes.nextFile')"
+            :title="t('workbench.changes.nextFile')"
+            data-testid="changes-next-file"
+            @click="stepFile(1)"
+          >
+            <Icon name="chevronDown" :size="12" />
+          </button>
+        </div>
+        <button
+          type="button"
+          class="wb-changes__action"
+          :disabled="loading"
+          @click="reload()"
+        >
+          <Icon name="refresh" :size="13" />
+          <span>{{ t('workbench.changes.refresh') }}</span>
+        </button>
+      </div>
     </header>
 
     <p v-if="loading && !changes" class="wb-changes__note" role="status">
@@ -155,7 +192,7 @@
           {{ t('workbench.changes.diffEmpty') }}
         </p>
         <template v-else-if="diff">
-          <div class="wb-changes__diff-head">
+          <div class="wb-changes__diff-head" :class="{ 'is-wrapped': wrapLines }">
             <span class="wb-changes__diff-path">{{ diff.path }}</span>
             <span class="wb-changes__diff-side">
               {{ diff.staged ? t('workbench.changes.staged') : t('workbench.changes.unstaged') }}
@@ -371,6 +408,38 @@ const divergenceLabel = computed(() => {
   })
 })
 
+// Rendering order, flattened: the file-nav buttons step through exactly the
+// sequence the list shows, so "next" never disagrees with what is below.
+const orderedEntries = computed<WorkspaceChangeEntry[]>(() =>
+  groups.value.flatMap(group => group.entries),
+)
+
+const selectedIndex = computed(() => orderedEntries.value.findIndex(
+  entry => entryKey(entry) === selectedKey.value,
+))
+
+const canSelectPrevious = computed(() => selectedIndex.value > 0)
+const canSelectNext = computed(() => (
+  orderedEntries.value.length > 0
+  && selectedIndex.value < orderedEntries.value.length - 1
+))
+
+const positionLabel = computed(() => {
+  const total = orderedEntries.value.length
+  const current = selectedIndex.value === -1 ? 0 : selectedIndex.value + 1
+  return t('workbench.changes.filePosition', { current, total })
+})
+
+async function stepFile(offset: number) {
+  const entries = orderedEntries.value
+  if (entries.length === 0) return
+  const index = selectedIndex.value === -1 ? -1 : selectedIndex.value
+  const target = entries[Math.min(entries.length - 1, Math.max(0, index + offset))]
+  if (!target || entryKey(target) === selectedKey.value) return
+  await select(target)
+  focusEntry(target)
+}
+
 const groups = computed(() => {
   const value = changes.value
   if (!value) return []
@@ -493,6 +562,12 @@ function hasGutters(line: DiffLine): boolean {
 
 function entryButtons(): HTMLButtonElement[] {
   return [...document.querySelectorAll<HTMLButtonElement>('.wb-changes__entry')]
+}
+
+function focusEntry(entry: WorkspaceChangeEntry) {
+  const buttons = entryButtons()
+  const target = buttons.find(button => button.dataset.entryKey === entryKey(entry))
+  target?.focus()
 }
 
 function focusSibling(entry: WorkspaceChangeEntry, offset: number) {
@@ -631,6 +706,57 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 .wb-changes__count {
   flex: none;
   color: var(--text-muted);
+}
+
+.wb-changes__bar-actions {
+  display: flex;
+  flex: none;
+  gap: 0.375rem;
+  align-items: center;
+}
+
+.wb-changes__nav {
+  display: flex;
+  gap: 0.125rem;
+  align-items: center;
+}
+
+/* The previous/next glyphs are one chevron, so a step up and a step down stay
+   the same shape and weight. */
+.wb-changes__nav-glyph--previous {
+  transform: rotate(180deg);
+}
+
+.wb-changes__nav-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.375rem;
+  height: 1.375rem;
+  padding: 0;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.wb-changes__nav-button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.wb-changes__nav-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.wb-changes__nav-position {
+  min-width: 3ch;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  text-align: center;
 }
 
 .wb-changes__action {
@@ -864,6 +990,16 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   color: var(--text);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* With wrapping on, the path takes the same wrapping the patch body does. A
+   header that truncates a path the body wraps is one inconsistency the reader
+   has to decode, and the full path is the one thing the header is for. */
+.wb-changes__diff-head.is-wrapped .wb-changes__diff-path {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .wb-changes__diff-side {
