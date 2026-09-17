@@ -63,6 +63,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- DeepSeek settings now discover official models for the model picker and expose
+  refresh, loading, and discovery errors in the provider editor. New configurations
+  use `deepseek-flash` with current vision support and peak-rate cost estimates;
+  saved legacy model IDs remain unchanged.
+
 - Python code execution in packaged Gateways now uses the bundled Python runtime,
   allowing tools to create documents with bundled dependencies such as `python-pptx`.
   Linux Bubblewrap also retains read-only access to the selected Python runtime
