@@ -395,6 +395,41 @@ for (const width of [1280, 390]) {
     await expect.poll(() => gateway.editParams.length).toBe(2)
     expect(gateway.editParams[1]?.tokenBudget).toBeNull()
   })
+
+  test(`An existing Goal budgets recorded usage without losing its accounting start at ${width}px`, { tag: '@plan-goal-runtime' }, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 })
+    const gateway = await installFakeGoalGateway(page, { goalRemoval: true })
+    await page.goto(CONTROL_URL + 'chat?session=' + encodeURIComponent(SESSION_KEY))
+    await expect(page.locator('.chat-textarea')).toBeEditable()
+    gateway.emitGoal(goalSnapshot({
+      status: 'paused', activeTaskId: null, executionState: 'idle', stateRevision: 2,
+      usageCoverage: 'partial_history', usageAccountingStartedAtMs: 1800000000000,
+      tokenBudget: null, budgetTokensUsed: 1200, executionPolicy: 'foreground',
+    }))
+    const ribbon = page.locator('.goal-ribbon')
+    await ribbon.getByRole('button', { name: 'Goal actions', exact: true }).click()
+    await ribbon.getByRole('menuitem', { name: 'Edit goal' }).click()
+    const budget = ribbon.getByLabel('Token budget', { exact: true })
+    await expect(budget).toBeEnabled()
+    await expect(ribbon).toContainText('Earlier usage is incomplete and is not counted toward the token budget.')
+    const accountingNote = ribbon.locator('.goal-settings__note').filter({ hasText: 'The token budget counts usage recorded since' })
+    const originalStart = await accountingNote.textContent()
+    expect(originalStart).toBeTruthy()
+    await budget.fill('9000')
+    await ribbon.locator('button[type="submit"]').click()
+    await expect.poll(() => gateway.editParams.length).toBe(1)
+    expect(gateway.editParams[0]).toMatchObject({
+      expectedGoalId: GOAL_ID, expectedStateRevision: 2, tokenBudget: 9000,
+    })
+    await expect(ribbon).toContainText('1,200 / 9,000 tokens')
+    await page.reload()
+    await expect(ribbon).toContainText('1,200 / 9,000 tokens')
+    await ribbon.getByRole('button', { name: 'Goal actions', exact: true }).click()
+    await ribbon.getByRole('menuitem', { name: 'Edit goal' }).click()
+    await expect(budget).toHaveValue('9000')
+    await expect(accountingNote).toHaveText(originalStart!)
+    expect(gateway.setParams).toHaveLength(0)
+  })
 }
 
 test('Refresh after an unknown Goal acceptance restores its subscription without another set', { tag: '@plan-goal-runtime' }, async ({ page }) => {
@@ -428,7 +463,7 @@ test('Goal pause reasons and the accounting coverage start remain visible after 
   await ribbon.getByRole('button', { name: 'Goal actions', exact: true }).click()
   await ribbon.getByRole('menuitem', { name: 'Edit goal' }).click()
   await expect(ribbon.getByLabel('Token budget', { exact: true })).toBeDisabled()
-  await expect(ribbon).toContainText('Usage accounting started at')
+  await expect(ribbon).toContainText('The token budget counts usage recorded since')
   expect(gateway.setParams).toHaveLength(0)
 })
 

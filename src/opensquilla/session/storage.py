@@ -7956,8 +7956,7 @@ class SessionStorage:
             if ("tokenBudget" in settings or resume_requested) and budget_reason == "usage_unknown":
                 raise GoalConflictError(
                     "GOAL_USAGE_INCOMPLETE",
-                    "Token budgets require complete usage; historical usage is incomplete "
-                    "or receipts are missing",
+                    "Token budgets require complete receipts for the current accounting period",
                     current=goal,
                 )
             execution_policy = settings.get(

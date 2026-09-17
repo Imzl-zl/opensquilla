@@ -320,12 +320,18 @@ provider billing cap. Increase or remove an exhausted budget before resuming.
 
 `usageCoverage` is `complete`, `partial_history` for Goals upgraded from older
 settlement accounting, or `partial_usage` when a request has no trustworthy
-receipt. Historical totals are preserved without inventing descendant usage;
-create a new Goal to enable its budget. Missing receipts pause a budgeted Goal
-with `usage_unknown`. Late receipts repair coverage when all unknown calls are
-resolved, but do not resume execution automatically. Setting a budget requires
-complete coverage. A finished request whose receipt could not be saved also
-prevents budgeted continuation; an in-flight child request may finish normally.
+receipt. Historical totals are preserved without inventing descendant usage.
+An upgraded Goal can use a budget: it counts only `budgetTokensUsed` from the
+`usageAccountingStartedAtMs` boundary, excluding earlier historical totals.
+If that timestamp is still `null`, accounting begins with the first newly
+attributed request. Setting or increasing a budget never resets recorded spend.
+Historical coverage remains `partial_history`; it is not relabeled complete.
+Missing receipts within this accounting period prevent setting or resuming a
+budget and pause a budgeted Goal with `usage_unknown`. Late receipts repair
+current coverage when all unknown calls are resolved, returning upgraded Goals
+to `partial_history`, but do not resume execution automatically. A finished
+request whose receipt could not be saved also prevents budgeted continuation;
+an in-flight child request may finish normally.
 Provider account credit exhaustion remains the distinct
 `usage_limited` state.
 

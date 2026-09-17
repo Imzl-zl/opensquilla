@@ -8,21 +8,25 @@
         step="1"
         :value="modelValue.tokenBudget ?? ''"
         :placeholder="t('chat.goal.noTokenBudget')"
-        :disabled="disabled || incompleteUsage"
+        :disabled="disabled || pendingUsage"
         :aria-invalid="!valid"
         @input="updateBudget"
       >
     </label>
     <p v-if="!valid" class="goal-settings__note" role="alert">{{ t('chat.goal.invalidTokenBudget') }}</p>
-    <p v-if="incompleteUsage" class="goal-settings__note">{{ t(usageCoverage === 'partial_usage' ? 'chat.goal.pendingUsageReceipts' : 'chat.goal.partialUsageHistory') }}</p>
+    <p v-if="usageCoverage === 'partial_history'" class="goal-settings__note">{{ t('chat.goal.partialUsageHistory') }}</p>
+    <p v-else-if="pendingUsage" class="goal-settings__note">{{ t('chat.goal.pendingUsageReceipts') }}</p>
     <button
-      v-if="incompleteUsage && existingBudget != null && modelValue.tokenBudget !== null"
+      v-if="pendingUsage && existingBudget != null && modelValue.tokenBudget !== null"
       type="button"
       :disabled="disabled"
       @click="emit('update:modelValue', { ...modelValue, tokenBudget: null })"
     >{{ t('chat.goal.removeTokenBudget') }}</button>
     <p v-if="usageAccountingStartedAtMs != null" class="goal-settings__note">
       {{ t('chat.goal.usageAccountingSince', { time: new Date(usageAccountingStartedAtMs).toLocaleString() }) }}
+    </p>
+    <p v-else-if="usageCoverage === 'partial_history'" class="goal-settings__note">
+      {{ t('chat.goal.usageAccountingPending') }}
     </p>
     <label>
       <span>{{ t('chat.goal.executionPolicy') }}</span>
@@ -54,7 +58,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ 'update:modelValue': [value: GoalExecutionOptions] }>()
 const { t } = useI18n()
-const incompleteUsage = computed(() => props.usageCoverage !== undefined && props.usageCoverage !== 'complete')
+const pendingUsage = computed(() => props.usageCoverage === 'partial_usage')
 const valid = computed(() => goalExecutionOptionsValid(props.modelValue))
 
 function updateBudget(event: Event) {

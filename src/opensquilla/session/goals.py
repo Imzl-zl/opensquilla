@@ -538,7 +538,9 @@ def goal_budget_pause_reason(goal: GoalRecord) -> str | None:
     """Use one budget decision for edits, resume, and ordinary turn admission."""
     if goal.token_budget is None:
         return None
-    if not goal.usage_accounting_version or goal.usage_coverage != "complete":
+    # Historical gaps precede this budget's accounting boundary. Missing
+    # receipts within that boundary still prevent a trustworthy decision.
+    if goal.usage_coverage not in {"complete", "partial_history"}:
         return "usage_unknown"
     if goal.budget_tokens_used >= goal.token_budget:
         return "token_budget"

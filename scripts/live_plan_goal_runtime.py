@@ -2240,21 +2240,135 @@ async def goal_case(case: LiveCase) -> None:
     case.check("goal_usage_accounted", snapshot["goal"]["budgetTokensUsed"] > 0)
 
 
-async def budget_case(case: LiveCase) -> None:
-    key = "agent:main:webchat:live-budget"
+async def seed_historical_budget_goal(case: LiveCase, key: str, objective: str) -> str:
+    """Seed current-schema upgrade accounting, not a retired Goal DDL conversion."""
+    import aiosqlite
+
+    from opensquilla.session.goals import new_goal
+    from opensquilla.session.storage import SessionStorage
+
+    path = usage_ledger_path(case.root / "state")
+    case.check("historical_fixture_database_present", path is not None)
+    assert path is not None
+    async with aiosqlite.connect(path) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        for table in ("agent_tasks", "usage_events", "session_goals"):
+            async with db.execute(f"SELECT COUNT(*) FROM {table}") as cursor:
+                row = await cursor.fetchone()
+            case.check("historical_fixture_database_unused", row == (0,))
+        async with db.execute(
+            "SELECT session_id, epoch FROM sessions WHERE session_key = ?", (key,),
+        ) as cursor:
+            session = await cursor.fetchone()
+        case.check("historical_fixture_session_present", session is not None)
+        assert session is not None
+        goal = new_goal(
+            goal_id=str(uuid.uuid4()), session_key=key, session_id=session[0],
+            session_epoch=session[1], objective=objective,
+        ).model_copy(update={
+            "status": "paused", "pause_reason": "process_restart",
+            "usage_accounting_version": 0, "usage_coverage": "partial_history",
+            "usage_accounting_started_at_ms": None,
+            "input_tokens": 100, "output_tokens": 50, "total_tokens": 150,
+        })
+        await SessionStorage._insert_goal_on_conn(db, goal)
+        await db.commit()
+    return goal.goal_id
+
+
+def historical_budget_evidence(state: Path, key: str) -> dict[str, Any]:
+    path = usage_ledger_path(state)
+    if path is None:
+        raise CaseFailureError("missing_usage_ledger")
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
+        goal = db.execute(
+            "SELECT goal_id, usage_accounting_version, usage_coverage, "
+            "usage_accounting_started_at_ms, budget_tokens_used, "
+            "input_tokens, output_tokens, total_tokens FROM session_goals WHERE session_key = ?",
+            (key,),
+        ).fetchone()
+        if goal is None:
+            raise CaseFailureError("historical_budget_goal_missing")
+        usage = db.execute(
+            "SELECT COUNT(*), MIN(started_at_ms), SUM(input_tokens), SUM(output_tokens), "
+            "SUM(total_tokens), SUM(MAX(0, input_tokens - cache_read_tokens) + output_tokens), "
+            "SUM(status != 'finalized' OR coverage_status = 'usage_missing') "
+            "FROM usage_events WHERE goal_id = ?", (goal[0],),
+        ).fetchone()
+    assert usage is not None
+    return {
+        "fixture_kind": "synthetic_upgraded_goal_accounting",
+        "retired_goal_conversion_tested": False,
+        "accounting_version": goal[1], "coverage": goal[2],
+        "boundary_matches_first_request": goal[3] is not None and goal[3] == usage[1],
+        "physical_receipts": usage[0],
+        "receipts_complete": usage[0] > 0 and usage[6] == 0,
+        "historical_totals_preserved": (
+            goal[5] == 100 + (usage[2] or 0)
+            and goal[6] == 50 + (usage[3] or 0)
+            and goal[7] == 150 + (usage[4] or 0)
+        ),
+        "budget_matches_physical_usage": goal[4] == usage[5] and goal[4] > 0,
+    }
+
+
+async def budget_case(case: LiveCase, *, historical: bool = False) -> None:
+    key = "agent:main:webchat:live-historical-budget" if historical else (
+        "agent:main:webchat:live-budget"
+    )
     release = case.workspace / "release.txt"
     case.check("budget_external_release_initially_absent", not release.exists())
-    task = await case.send(
-        key,
-        "Create a Goal with token budget exactly 1 to inspect release.txt supplied by an "
-        "external operator. Use create_goal with token_budget=1 first, then use read_file "
+    inspection = (
         "to check release.txt and observe its missing-file result. It is initially absent. "
         "Do not create "
         "or modify release.txt or substitute any other evidence. This Goal can only be "
         "complete after the external operator supplies the real release.txt; until then "
         "keep it unfinished and do not call complete or blocked. Report its current state. "
-        "The token budget should pause automatic continuation naturally.",
+        "The token budget should pause automatic continuation naturally."
     )
+    objective = "Inspect release.txt supplied by an external operator. Use read_file " + inspection
+    if historical:
+        await case.rpc("plans.setMode", sessionKey=key, mode="default", expectedRevision=0)
+        await case.subscribe(key)
+        goal_id = await seed_historical_budget_goal(case, key, objective)
+        initial = await case.snapshot(key)
+        goal = initial.get("goal") or {}
+        case.check(
+            "historical_fixture_hydrated",
+            goal.get("goalId") == goal_id and goal.get("status") == "paused"
+            and goal.get("usageCoverage") == "partial_history"
+            and goal.get("usageAccountingStartedAtMs") is None
+            and goal.get("budgetTokensUsed") == 0
+            and (goal.get("usage") or {}).get("totalTokens") == 150,
+        )
+        edited = await case.rpc(
+            "goals.edit", sessionKey=key, expectedGoalId=goal_id,
+            expectedStateRevision=goal["stateRevision"], clientRequestId=str(uuid.uuid4()),
+            objective=goal["objective"], tokenBudget=1,
+        )
+        goal = edited["goal"]
+        case.check(
+            "historical_budget_set_without_resuming",
+            goal["status"] == "paused" and goal["tokenBudget"] == 1
+            and goal["budgetTokensUsed"] == 0 and goal["usageAccountingStartedAtMs"] is None,
+        )
+        await case.rpc(
+            "goals.resume", sessionKey=key, expectedGoalId=goal_id,
+            expectedStateRevision=goal["stateRevision"], clientRequestId=str(uuid.uuid4()),
+        )
+        # Resume schedules ordinary admission; its RPC receipt has no task id.
+        # Wait for the actual task, including a task already terminal at hydrate.
+        started = await case.until(key, lambda s: bool(s.get("tasks")))
+        tasks = started["tasks"]
+        task = str(tasks[0].get("task_id") or "")
+        case.check("historical_budget_resumed_task", len(tasks) == 1 and bool(task))
+    else:
+        task = await case.send(
+            key,
+            "Create a Goal with token budget exactly 1 to inspect release.txt supplied by an "
+            "external operator. Use create_goal with token_budget=1 first, then use read_file "
+            + inspection,
+        )
     initial = await case.done(key, task)
     case.check("budget_goal_created", isinstance(initial.get("goal"), dict))
     snapshot = await case.until(
@@ -2287,6 +2401,16 @@ async def budget_case(case: LiveCase) -> None:
     case.check(
         "budget_no_continuation", case.guard.snapshot()["counts"].get("physical_calls", 0) == calls
     )
+    if historical:
+        proof = historical_budget_evidence(case.root / "state", key)
+        case.evidence["historical_budget"] = proof
+        case.check("historical_coverage_not_rewritten", proof["accounting_version"] == 0
+                   and proof["coverage"] == "partial_history")
+        for field in ("boundary_matches_first_request", "receipts_complete",
+                      "historical_totals_preserved", "budget_matches_physical_usage"):
+            case.check("historical_" + field, proof[field])
+        case.check("historical_budget_single_root",
+                   case.guard.snapshot()["counts"].get("root_turns") == 1)
 
 
 async def childbudget_case(case: LiveCase) -> None:
@@ -2553,6 +2677,8 @@ async def run_case(
             await case.start()
             if name in {"wait", "cancel"}:
                 await wait_case(case, cancel=name == "cancel")
+            elif name == "historical-budget":
+                await budget_case(case, historical=True)
             else:
                 await {
                     "plan": plan_case,
@@ -2670,7 +2796,7 @@ async def run(
         return result
     result["source_start"] = execution_source_fingerprint()
     secrets = {spec.env_key: secret}
-    names = (
+    names = ("historical-budget",) if scenario == "historical-budget" else (
         tuple(dict.fromkeys(n for group in SCENARIOS.values() for n in group))
         if scenario == "all"
         else SCENARIOS[scenario]
@@ -2703,7 +2829,9 @@ async def run(
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider", choices=tuple(MODELS), required=True)
-    parser.add_argument("--scenario", choices=(*SCENARIOS, "all"), default="all")
+    parser.add_argument(
+        "--scenario", choices=(*SCENARIOS, "historical-budget", "all"), default="all",
+    )
     parser.add_argument("--output", type=Path)
     parser.add_argument("--thinking", choices=("off", "low", "medium", "high"), default="off")
     parser.add_argument(

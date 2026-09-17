@@ -648,8 +648,9 @@ async def test_goal_usage_observer_failure_does_not_retry_committed_accounting(
 
 
 @pytest.mark.parametrize("unknown_write_fails", [False, True])
+@pytest.mark.parametrize("historical", [False, True])
 async def test_failed_finalize_marks_goal_usage_unknown_without_losing_late_receipt(
-    monkeypatch, unknown_write_fails,
+    monkeypatch, unknown_write_fails, historical,
 ):
     from opensquilla.session.models import AgentTaskStatus, SessionNode
     from tests.test_session.test_goal_storage import (
@@ -669,6 +670,12 @@ async def test_failed_finalize_marks_goal_usage_unknown_without_losing_late_rece
         await storage.update_agent_task(
             "task-1", status=AgentTaskStatus.RUNNING, started_at=1000,
         )
+        if historical:
+            await storage.conn.execute(
+                "UPDATE session_goals SET usage_accounting_version = 0, "
+                "usage_coverage = 'partial_history', usage_accounting_started_at_ms = NULL"
+            )
+            await storage.conn.commit()
         await storage.edit_goal(
             session_key=SESSION_KEY, expected=_expected(accepted.goal),
             objective=accepted.goal.objective, settings={"tokenBudget": 100},
@@ -707,7 +714,7 @@ async def test_failed_finalize_marks_goal_usage_unknown_without_losing_late_rece
         await sink.finalize(call, _result())
         settled = await storage.get_goal(SESSION_KEY)
         assert settled is not None
-        assert settled.usage_coverage == "complete"
+        assert settled.usage_coverage == ("partial_history" if historical else "complete")
         assert settled.budget_tokens_used == 16
         assert settled.status == "paused"
     finally:

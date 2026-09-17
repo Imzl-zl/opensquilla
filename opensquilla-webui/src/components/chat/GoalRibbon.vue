@@ -265,7 +265,7 @@ const pauseReasonText = computed(() => {
     case 'user':
     case 'user_paused': return t('chat.goal.pausedByUser')
     case 'token_budget': return t('chat.goal.tokenBudgetReached')
-    case 'usage_unknown': return t(props.goal.usageCoverage === 'complete'
+    case 'usage_unknown': return t(props.goal.usageCoverage !== 'partial_usage'
       ? 'chat.goal.usageReceiptsRecovered' : 'chat.goal.pendingUsageReceipts')
     case 'empty_continuations': return t('chat.goal.emptyContinuations')
     case 'turn_limit': return t('chat.goal.turnLimitReached')
@@ -327,7 +327,7 @@ function beginEdit() {
   editText.value = props.goal.objective
   editSettings.value = {
     executionPolicy: props.goal.executionPolicy ?? 'foreground',
-    ...(props.goal.usageCoverage === 'complete' ? { tokenBudget: props.goal.tokenBudget ?? null } : {}),
+    ...(props.goal.usageCoverage !== 'partial_usage' ? { tokenBudget: props.goal.tokenBudget ?? null } : {}),
   }
   editing.value = true
   void nextTick(() => {

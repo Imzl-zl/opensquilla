@@ -540,7 +540,9 @@ Goal token budgets are disabled by default and are configured per Goal with
 optional `tokenBudget`, not through a global TOML ceiling. Budget usage is
 `max(0, input_tokens - cache_read_tokens) + output_tokens`, counted once per
 physical root/descendant request at finalization, including late receipts.
-Historical or missing receipt coverage cannot support a new token budget.
+Upgraded Goals can set a budget for usage recorded after the accounting boundary;
+earlier incomplete history is not included. Missing receipts within the current
+accounting period prevent setting a budget or resuming a budgeted Goal.
 Snapshots expose `usageAccountingStartedAtMs`: the creation time for new Goals,
 or the first newly attributed request time for upgraded Goals (`null` until then).
 This boundary does not make an upgraded Goal's earlier history complete.

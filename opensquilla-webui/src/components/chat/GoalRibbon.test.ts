@@ -108,8 +108,8 @@ describe('GoalRibbon', () => {
     expect(onEdit.mock.calls[0]?.[2]).toEqual({ tokenBudget: null, executionPolicy: 'foreground' })
   })
 
-  it('offers manual resume after late receipts complete the accounting', () => {
-    const host = mountRibbon({ goal: goal({ status: 'paused', usageCoverage: 'complete', pauseReason: 'usage_unknown' }) })
+  it.each(['complete', 'partial_history'] as const)('offers manual resume after late receipts restore %s accounting', usageCoverage => {
+    const host = mountRibbon({ goal: goal({ status: 'paused', usageCoverage, pauseReason: 'usage_unknown' }) })
     expect(host.textContent).toContain('Usage receipts are complete. Resume the Goal when ready.')
     expect(host.textContent).not.toContain('Waiting for usage receipts')
     expect(host.querySelector('[data-action="resume"]')).not.toBeNull()
@@ -292,9 +292,9 @@ describe('GoalRibbon', () => {
     expect(host.textContent).not.toContain('Goal paused')
   })
 
-  it('edits budget and execution policy through the same goal mutation', async () => {
+  it.each(['complete', 'partial_history'] as const)('edits an existing %s budget and execution policy through the same goal mutation', async usageCoverage => {
     const onEdit = vi.fn((_objective: string, settle: (accepted: boolean) => void, _options?: import('@/modules/goalCenter').GoalExecutionOptions) => settle(true))
-    const host = mountRibbon({ goal: goal({ usageCoverage: 'complete', tokenBudget: 5000, budgetTokensUsed: 1200 }), onEdit })
+    const host = mountRibbon({ goal: goal({ usageCoverage, tokenBudget: 5000, budgetTokensUsed: 1200, usageAccountingStartedAtMs: 1800000000000 }), onEdit })
     expect(host.textContent).toContain('1,200 / 5,000 tokens')
     await openActions(host)
     host.querySelector<HTMLButtonElement>('[role="menuitem"]')?.click()
@@ -312,15 +312,26 @@ describe('GoalRibbon', () => {
     expect(onEdit.mock.calls[0]?.[2]).toEqual({ tokenBudget: 9000, executionPolicy: 'background' })
   })
 
-  it('keeps the token budget unavailable for incomplete historic usage while allowing background execution', async () => {
-    const host = mountRibbon({ goal: goal({ usageCoverage: 'partial_history', usageAccountingStartedAtMs: 1800000000000 }) })
+  it.each([null, 1800000000000])('sets a budget for recorded usage with accounting start %s', async usageAccountingStartedAtMs => {
+    const onEdit = vi.fn()
+    const host = mountRibbon({ goal: goal({ usageCoverage: 'partial_history', usageAccountingStartedAtMs }), onEdit })
     await openActions(host)
     host.querySelector<HTMLButtonElement>('[role="menuitem"]')?.click()
     await nextTick()
-    expect(host.querySelector<HTMLInputElement>('input[type="number"]')?.disabled).toBe(true)
+    const budget = host.querySelector<HTMLInputElement>('input[type="number"]')!
+    expect(budget.disabled).toBe(false)
     expect(host.querySelector<HTMLSelectElement>('select')?.disabled).toBe(false)
-    expect(host.textContent).toContain('Earlier usage is incomplete')
-    expect(host.textContent).toContain('Usage accounting started at')
+    expect(host.textContent).toContain('Earlier usage is incomplete and is not counted toward the token budget.')
+    if (usageAccountingStartedAtMs === null) {
+      expect(host.textContent).toContain('Budget accounting starts with the next model request.')
+    } else {
+      expect(host.textContent).toContain(`The token budget counts usage recorded since ${new Date(usageAccountingStartedAtMs).toLocaleString()}.`)
+    }
+    budget.value = '8000'
+    budget.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    host.querySelector<HTMLButtonElement>('button[type="submit"]')?.click()
+    expect(onEdit.mock.calls[0]?.[2]).toEqual({ tokenBudget: 8000, executionPolicy: 'foreground' })
   })
 
   it('explains token-budget pauses before usage and background metadata', () => {
