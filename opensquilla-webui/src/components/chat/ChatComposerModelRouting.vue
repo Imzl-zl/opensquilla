@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import type { ModelDescriptor, ProviderListError } from '@/modules/providerConfiguration'
 import type { ModelRoutingMode } from '@/types/modelRouting'
+import { calculateModelRoutingPlacement } from './modelRoutingPlacement'
 const props = withDefaults(
   defineProps<{
     anchor?: HTMLElement | null
@@ -13,6 +14,8 @@ const props = withDefaults(
     newTaskModelAvailable?: boolean
     newTaskModels?: readonly ModelDescriptor[]
     newTaskModelSelection?: { model: string; provider: string } | null
+    newTaskDefaultModel?: { model: string; provider: string } | null
+    sessionModelName?: string | null
     newTaskModelsLoading?: boolean
     newTaskModelsError?: string | null
     newTaskModelsProviderErrors?: readonly ProviderListError[]
@@ -37,7 +40,9 @@ const search = ref('')
 const submenuOpen = ref(false)
 const activeModel = ref(-1)
 const compact = ref(false)
-const position = ref({ left: '12px', top: '12px', '--routing-height': '400px' })
+const position = ref({ left: '12px', bottom: '12px', width: '224px', '--routing-height': '400px' })
+const submenuPosition = ref({ left: '12px', top: '12px', height: '360px' })
+const submenuSide = ref<'left' | 'right' | 'compact'>('right')
 const hasModelPicker = computed(() =>
   Boolean(props.newTaskModelAvailable || props.newTaskModelSelection),
 )
@@ -98,6 +103,26 @@ const models = computed(() => {
     ...catalog.values(),
   ]
 })
+const defaultModelName = computed(() => {
+  const model = props.newTaskDefaultModel
+  return model
+    ? props.newTaskModels?.find(
+        (item) => item.id === model.model && item.provider === model.provider,
+      )?.name || model.model
+    : ''
+})
+const selectedModelLabel = computed(() => {
+  if (props.modelRoutingMode !== 'off') return undefined
+  if (!hasModelPicker.value) return props.sessionModelName || t('chat.modelRouting.sessionModelFallback')
+  return props.newTaskModelSelection
+    ? models.value.find((model) => model.key === selectedKey.value)?.label
+    : defaultModelName.value || t('chat.newTaskModel.gatewayDefault')
+})
+const defaultModelHint = computed(() =>
+  defaultModelName.value
+    ? `${defaultModelName.value} · ${props.newTaskDefaultModel!.provider}`
+    : t('chat.newTaskModel.gatewayDefaultHint'),
+)
 const filteredModels = computed(() =>
   models.value.filter((model) =>
     `${model.label} ${model.provider} ${model.model}`
@@ -145,9 +170,8 @@ async function openModels(focus = false) {
     searchRef.value?.focus()
   }
 }
-function onModePointerEnter(event: PointerEvent, index: number) {
-  // A touch enter must not hide its own click target in the compact drilldown.
-  if (index === 0 && !compact.value && event.pointerType !== 'touch') void openModels()
+function onSinglePointerEnter(event: PointerEvent) {
+  if (event.pointerType === 'mouse' && !compact.value) void openModels()
 }
 function closeModels(focus = true) {
   submenuOpen.value = false
@@ -197,9 +221,11 @@ function onSearchKey(event: KeyboardEvent) {
     next = available[(available.indexOf(next) + 1) % available.length] ?? -1
   else if (event.key === 'ArrowUp') {
     const current = available.indexOf(next)
-    next = available[current < 0 ? available.length - 1 : (current - 1 + available.length) % available.length] ?? -1
-  }
-  else if (event.key === 'Home' && event.ctrlKey) next = available[0] ?? -1
+    next =
+      available[
+        current < 0 ? available.length - 1 : (current - 1 + available.length) % available.length
+      ] ?? -1
+  } else if (event.key === 'Home' && event.ctrlKey) next = available[0] ?? -1
   else if (event.key === 'End' && event.ctrlKey) next = available[available.length - 1] ?? -1
   else return
   event.preventDefault()
@@ -226,42 +252,76 @@ watch(search, () => {
 watch(filteredModels, () => {
   if (activeModel.value >= filteredModels.value.length) activeModel.value = -1
 })
+// Sample only while this popover is mounted: position can change without the
+// trigger resizing (sidebar, composer growth, client zoom, visual viewport pan).
+let frame = 0
+let primaryHeight = 0
 function placeMenu() {
   const viewport = window.visualViewport
   const width = viewport?.width ?? window.innerWidth
   const height = viewport?.height ?? window.innerHeight
-  const offsetTop = viewport?.offsetTop ?? 0
-  const offsetLeft = viewport?.offsetLeft ?? 0
-  compact.value = width < 600
-  const anchor = props.anchor?.getBoundingClientRect()
-  const menuWidth = compact.value ? Math.min(352, width - 24) : hasModelPicker.value ? 560 : 236
-  const bottom = Math.min(anchor?.top ?? height - 24, offsetTop + height - 12) - 10
-  const menuHeight = Math.max(0, Math.min(420, bottom - offsetTop - 12))
-  position.value = {
-    left: `${Math.max(offsetLeft + 12, Math.min((anchor?.right ?? width - 12) - menuWidth, offsetLeft + width - menuWidth - 12))}px`,
-    top: `${Math.max(offsetTop + 12, bottom - menuHeight)}px`,
-    '--routing-height': `${menuHeight}px`,
+  const left = viewport?.offsetLeft ?? 0
+  const top = viewport?.offsetTop ?? 0
+  const anchor = props.anchor?.getBoundingClientRect() ?? {
+    left: left + width - 12,
+    right: left + width - 12,
+    top: top + height - 24,
+    bottom: top + height - 24,
   }
+  const primary = primaryRef.value?.getBoundingClientRect()
+  // A drilled-in mobile menu hides the primary; retain its last visible height.
+  if (primary?.height) primaryHeight = primary.height
+  const single = singleRef.value?.getBoundingClientRect()
+  const placement = calculateModelRoutingPlacement({
+    viewport: { left, top, width, height },
+    anchor,
+    primaryHeight,
+    singleRowTop: single?.height ? single.top : undefined,
+  })
+  compact.value = placement.compact
+  submenuSide.value = placement.submenuSide
+  const nextPosition = {
+    left: `${placement.primaryLeft}px`,
+    bottom: `${window.innerHeight - placement.primaryBottom}px`,
+    width: `${placement.width}px`,
+    '--routing-height': `${placement.availableHeight}px`,
+  }
+  const nextSubmenuPosition = {
+    left: `${placement.submenuLeft}px`,
+    top: `${placement.submenuTop}px`,
+    height: `${placement.submenuHeight}px`,
+  }
+  if (
+    Object.entries(nextPosition).some(
+      ([name, value]) => position.value[name as keyof typeof nextPosition] !== value,
+    )
+  )
+    position.value = nextPosition
+  if (
+    Object.entries(nextSubmenuPosition).some(
+      ([name, value]) => submenuPosition.value[name as keyof typeof nextSubmenuPosition] !== value,
+    )
+  )
+    submenuPosition.value = nextSubmenuPosition
 }
-let observer: ResizeObserver | undefined
-onMounted(() => {
+function followAnchor() {
   placeMenu()
-  submenuOpen.value = !compact.value && props.modelRoutingMode === 'off' && hasModelPicker.value
-  singleRef.value?.focus()
-  window.addEventListener('resize', placeMenu)
-  window.addEventListener('scroll', placeMenu, true)
-  window.visualViewport?.addEventListener('resize', placeMenu)
-  if (typeof ResizeObserver !== 'undefined' && props.anchor) {
-    observer = new ResizeObserver(placeMenu)
-    observer.observe(props.anchor)
-  }
+  frame = requestAnimationFrame(followAnchor)
+}
+watch(hasModelPicker, (available) => {
+  if (!available) closeModels(false)
 })
-onBeforeUnmount(() => {
-  window.removeEventListener('resize', placeMenu)
-  window.removeEventListener('scroll', placeMenu, true)
-  window.visualViewport?.removeEventListener('resize', placeMenu)
-  observer?.disconnect()
+watch(compact, (isCompact) => {
+  if (isCompact && submenuOpen.value && primaryRef.value?.contains(document.activeElement))
+    nextTick(() => searchRef.value?.focus())
 })
+onMounted(() => {
+  followAnchor()
+  primaryRef.value
+    ?.querySelector<HTMLButtonElement>(`[data-mode="${props.modelRoutingMode}"]`)
+    ?.focus()
+})
+onBeforeUnmount(() => cancelAnimationFrame(frame))
 defineExpose({ element: () => rootRef.value })
 </script>
 
@@ -270,7 +330,7 @@ defineExpose({ element: () => rootRef.value })
     <div
       ref="rootRef"
       class="composer-model-routing"
-      :class="{ 'is-compact': compact, 'is-drilled': compact && submenuOpen }"
+      :class="{ 'is-compact': compact, 'is-drilled': compact && submenuOpen && hasModelPicker }"
       :style="position"
       role="dialog"
       :aria-label="t('chat.modelRouting.title')"
@@ -306,6 +366,8 @@ defineExpose({ element: () => rootRef.value })
               "
               type="button"
               class="routing-mode"
+              :data-mode="option.value"
+              :aria-description="option.description"
               :class="{
                 'is-selected': modelRoutingMode === option.value,
                 'is-expanded': index === 0 && submenuOpen,
@@ -318,15 +380,33 @@ defineExpose({ element: () => rootRef.value })
               :aria-expanded="index === 0 && hasModelPicker ? submenuOpen : undefined"
               :aria-controls="index === 0 && hasModelPicker ? `${id}-models` : undefined"
               :aria-disabled="busy || (!routingAvailable && !(index === 0 && hasModelPicker))"
-              @pointerenter="onModePointerEnter($event, index)"
+              @pointerenter="index === 0 && onSinglePointerEnter($event)"
               @click="index === 0 && hasModelPicker ? openModels(true) : selectMode(option.value)"
             >
               <span class="routing-mode__top">
                 <span>{{ option.label }}</span>
-                <Icon v-if="index === 0 && hasModelPicker" name="chevronRight" :size="15" />
-                <Icon v-else-if="modelRoutingMode === option.value" name="check" :size="15" />
+                <span class="routing-mode__indicators">
+                  <Icon v-if="modelRoutingMode === option.value" name="check" :size="14" />
+                  <Icon
+                    v-if="index === 0 && hasModelPicker"
+                    :name="submenuSide === 'left' ? 'chevronLeft' : 'chevronRight'"
+                    :size="15"
+                  />
+                </span>
               </span>
-              <span class="routing-mode__description">{{ option.description }}</span>
+              <span
+                v-if="index === 0 && selectedModelLabel"
+                class="routing-mode__model"
+                :title="selectedModelLabel"
+              >
+                <span class="routing-mode__model-dot" aria-hidden="true" />
+                <span class="routing-mode__model-name">{{ selectedModelLabel }}</span>
+                <span
+                  v-if="hasModelPicker && !newTaskModelSelection && defaultModelName"
+                  class="routing-mode__default"
+                  >{{ t('chat.newTaskModel.defaultBadge') }}</span
+                >
+              </span>
             </button>
           </div>
           <button
@@ -347,6 +427,8 @@ defineExpose({ element: () => rootRef.value })
       <section
         v-if="submenuOpen && hasModelPicker"
         class="new-task-model-menu"
+        :data-side="submenuSide"
+        :style="compact ? undefined : submenuPosition"
         :aria-label="t('chat.newTaskModel.title')"
       >
         <header class="routing-heading">
@@ -402,12 +484,13 @@ defineExpose({ element: () => rootRef.value })
             @click="selectModel(index)"
           >
             <span class="routing-model__avatar" aria-hidden="true">
-              {{ model.key === 'default' ? 'O' : model.label.charAt(0).toUpperCase() }}
+              <Icon v-if="model.key === 'default'" name="settings" :size="15" />
+              <template v-else>{{ model.label.charAt(0).toUpperCase() }}</template>
             </span>
             <span class="routing-model__copy">
               <span class="routing-model__name">{{ model.label }}</span>
               <span class="routing-model__provider">
-                {{ model.provider || t('chat.newTaskModel.gatewayDefaultHint') }}
+                {{ model.key === 'default' ? defaultModelHint : model.provider }}
               </span>
             </span>
             <Icon
@@ -444,10 +527,7 @@ defineExpose({ element: () => rootRef.value })
 .composer-model-routing {
   position: fixed;
   z-index: var(--z-popover, 1200);
-  display: flex;
-  align-items: stretch;
-  gap: 8px;
-  height: var(--routing-height);
+  max-height: var(--routing-height);
   max-width: calc(100vw - 24px);
   color: var(--text);
   font-family: var(--font-sans);
@@ -464,11 +544,13 @@ defineExpose({ element: () => rootRef.value })
   overflow: hidden;
 }
 .routing-primary {
-  width: 236px;
-  flex: 0 0 236px;
+  width: 100%;
+  max-height: var(--routing-height);
 }
 .new-task-model-menu {
+  position: fixed;
   width: 316px;
+  height: min(360px, var(--routing-height));
   animation: routing-submenu-in var(--dur-fast) var(--ease-out);
 }
 .routing-heading {
@@ -476,8 +558,8 @@ defineExpose({ element: () => rootRef.value })
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
-  min-height: 48px;
-  padding: 10px 14px;
+  min-height: 38px;
+  padding: 7px 12px;
   font-size: var(--fs-sm);
 }
 .routing-heading strong {
@@ -518,11 +600,10 @@ defineExpose({ element: () => rootRef.value })
 .routing-mode {
   display: flex;
   flex-direction: column;
-  gap: 5px;
   flex-shrink: 0;
   width: 100%;
-  padding: 11px 10px;
-  margin-bottom: 4px;
+  padding: 9px 10px;
+  margin-bottom: 2px;
   border: 1px solid transparent;
   border-radius: var(--radius-control);
   text-align: left;
@@ -531,17 +612,50 @@ defineExpose({ element: () => rootRef.value })
   cursor: pointer;
 }
 .routing-mode__top {
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   font-size: var(--fs-sm);
-  font-weight: 600;
+  font-weight: 500;
 }
-.routing-mode__description {
+.routing-mode__indicators {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+}
+.routing-mode__model {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 3px;
   color: var(--text-muted);
   font-size: var(--fs-xs);
-  line-height: 1.5;
+  line-height: 1.4;
+  min-height: calc(1.4em + 2px);
+}
+.routing-mode__model-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.routing-mode__default {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-dim);
+}
+.routing-mode__model-dot {
+  flex: 0 0 4px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 .routing-mode:hover,
 .routing-mode.is-expanded {
@@ -561,8 +675,8 @@ defineExpose({ element: () => rootRef.value })
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 12px 10px;
-  margin-top: auto;
+  padding: 10px;
+  margin-top: 4px;
   flex-shrink: 0;
   border: 0;
   border-top: 1px solid var(--border);
@@ -713,13 +827,9 @@ button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
-.composer-model-routing.is-compact {
-  width: min(352px, calc(100vw - 24px));
-}
-.is-compact .routing-primary,
 .is-compact .new-task-model-menu {
+  position: static;
   width: 100%;
-  flex-basis: 100%;
 }
 .is-drilled .routing-primary {
   display: none;

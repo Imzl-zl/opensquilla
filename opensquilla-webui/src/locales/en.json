@@ -4460,16 +4460,17 @@
     "newTaskModel": {
       "title": "New task model",
       "catalog": "Gateway model catalog",
-      "gatewayDefault": "Gateway default",
-      "gatewayDefaultHint": "Use the gateway’s default model",
+      "gatewayDefault": "Default model",
+      "gatewayDefaultHint": "Use the default from model settings",
+      "defaultBadge": "Default",
       "search": "Search models or providers…",
       "loading": "Loading models…",
       "empty": "No matching models",
       "retry": "Retry",
       "scope": "Applies only to this new task. Global settings stay unchanged.",
       "partialFailure": "Some providers could not load: {providers}",
-      "routingConflict": "A specific model requires direct routing. Choose the gateway default or switch routing explicitly.",
-      "unavailable": "Model selection is unavailable on this connection. Reconnect or choose the gateway default."
+      "routingConflict": "An explicit model requires single-model mode. Clear it or choose a routing mode.",
+      "unavailable": "Model selection is unavailable on this connection. Reconnect or clear the explicit model."
     },
     "modelRouting": {
       "updateFailed": "Couldn't switch model routing — reverted. The change is temporarily unavailable.",
@@ -4478,6 +4479,7 @@
       "back": "Back to routing modes",
       "title": "Models & routing",
       "direct": "Single model",
+      "sessionModelFallback": "Use this task’s model",
       "router": "Smart routing",
       "ensemble": "Multi-model"
     },

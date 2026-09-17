@@ -13,7 +13,7 @@ afterEach(() => {
   apps.splice(0).forEach((app) => app.unmount())
   vi.restoreAllMocks()
 })
-async function mount(overrides: Record<string, unknown> = {}) {
+async function mount(overrides: Record<string, unknown> = {}, openModels = true) {
   const selected = vi.fn(),
     mode = vi.fn(),
     close = vi.fn(),
@@ -23,6 +23,7 @@ async function mount(overrides: Record<string, unknown> = {}) {
     modelRoutingMode: 'off',
     busy: false,
     newTaskModelAvailable: true,
+    newTaskModelSelection: null as { model: string; provider: string } | null,
     newTaskModels: [
       { id: 'shared-model', name: 'Model Alpha', provider: 'provider-a' },
       { id: 'shared-model', name: 'Model Beta', provider: 'provider-b' },
@@ -41,6 +42,10 @@ async function mount(overrides: Record<string, unknown> = {}) {
   app.use(i18n)
   app.mount(el)
   await nextTick()
+  if (openModels && document.querySelector('[aria-haspopup="listbox"]')) {
+    document.querySelector<HTMLButtonElement>('.routing-mode')!.click()
+    await nextTick()
+  }
   return { props, selected, mode, close, settings, refresh }
 }
 const query = <T extends HTMLElement = HTMLElement>(selector: string) =>
@@ -58,9 +63,18 @@ async function search(value: string) {
 }
 
 describe('Native cascading model routing menu', () => {
+  it.each(['off', 'squilla_router', 'llm_ensemble'])(
+    'starts with only the primary menu in %s mode',
+    async (modelRoutingMode) => {
+      await mount({ modelRoutingMode }, false)
+      expect(query('[role="listbox"]')).toBeNull()
+      expect(query('.routing-primary')).toBeTruthy()
+      expect(document.activeElement?.getAttribute('data-mode')).toBe(modelRoutingMode)
+    },
+  )
   it('keeps the compact primary target mounted until a tap or click activates it', async () => {
     vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(390)
-    await mount()
+    await mount({}, false)
     const single = query<HTMLButtonElement>('.routing-mode')
     single.dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'touch' }))
     await nextTick()
@@ -91,12 +105,50 @@ describe('Native cascading model routing menu', () => {
     expect(selected).toHaveBeenCalledWith({ model: 'shared-model', provider: 'provider-b' })
   })
   it('does not change routing when merely opening or hovering the model submenu', async () => {
-    const { selected, mode } = await mount({ modelRoutingMode: 'squilla_router' })
-    query('.routing-mode').dispatchEvent(new Event('pointerenter'))
+    const { selected, mode } = await mount({ modelRoutingMode: 'squilla_router' }, false)
+    const focused = document.activeElement
+    query('.routing-mode').dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'mouse' }))
+    await nextTick()
+    expect(query('[role="listbox"]')).toBeTruthy()
+    expect(document.activeElement).toBe(focused)
+    query('.routing-mode').dispatchEvent(new PointerEvent('pointerleave', { pointerType: 'mouse' }))
     await nextTick()
     expect(query('[role="listbox"]')).toBeTruthy()
     expect(selected).not.toHaveBeenCalled()
     expect(mode).not.toHaveBeenCalled()
+  })
+  it('shows the selected provider-specific model in the primary menu and updates it', async () => {
+    const { props } = await mount(
+      { newTaskModelSelection: { model: 'shared-model', provider: 'provider-b' } },
+      false,
+    )
+    expect(query('.routing-mode__model').textContent).toContain('Model Beta')
+    props.newTaskModelSelection = { model: 'shared-model', provider: 'provider-a' }
+    await nextTick()
+    expect(query('.routing-mode__model').textContent).toContain('Model Alpha')
+    props.newTaskModelSelection = null
+    await nextTick()
+    expect(query('.routing-mode__model').textContent).toContain('Default model')
+    props.modelRoutingMode = 'squilla_router'
+    await nextTick()
+    expect(query('.routing-mode__model')).toBeNull()
+  })
+  it('distinguishes the configured default from an explicit pin to the same model', async () => {
+    const { props } = await mount({
+      newTaskDefaultModel: { model: 'shared-model', provider: 'provider-b' },
+    })
+    expect(query('.routing-mode__model-name').textContent).toBe('Model Beta')
+    expect(query('.routing-mode__default').textContent).toBe('Default')
+    expect(query('[role="option"]').getAttribute('aria-selected')).toBe('true')
+    expect(query('[role="option"] .routing-model__provider').textContent).toContain(
+      'Model Beta · provider-b',
+    )
+    props.newTaskModelSelection = { model: 'shared-model', provider: 'provider-b' }
+    await nextTick()
+    expect(query('.routing-mode__model-name').textContent).toBe('Model Beta')
+    expect(query('.routing-mode__default')).toBeNull()
+    expect(query('[role="option"]').getAttribute('aria-selected')).toBe('false')
+    expect(query('[aria-selected="true"]').textContent).toContain('Model Beta')
   })
   it('lets a model selection request the direct-mode handoff from router mode', async () => {
     const { selected } = await mount({
@@ -158,7 +210,9 @@ describe('Native cascading model routing menu', () => {
     expect(selected).not.toHaveBeenCalled()
   })
   it('retains all routing modes and settings for an existing task without exposing a new-task picker', async () => {
-    const { mode, settings } = await mount({ newTaskModelAvailable: false })
+    const { mode, settings } = await mount({ newTaskModelAvailable: false, sessionModelName: 'session-bound-model' })
+    expect(query('.routing-mode__model-name').textContent).toBe('session-bound-model')
+    expect(query('.routing-mode__default')).toBeNull()
     expect(document.querySelectorAll('[role="menuitemradio"]')).toHaveLength(3)
     expect(query('[role="listbox"]')).toBeNull()
     query<HTMLButtonElement>('.routing-mode').click()

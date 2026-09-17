@@ -639,9 +639,11 @@
       :session-routing-busy="modelRoutingMutationBusy"
       :session-routing-control-blocked="goalBusy || modelRoutingSettingsBusy"
       :session-routing-available="sessionRoutingAvailable"
+      :session-model-name="sessionModelName"
       :new-task-model-available="newTaskModelAvailable"
       :new-task-models="newTaskModels"
       :new-task-model-selection="newTaskModelSelection"
+      :new-task-default-model="newTaskDefaultModel"
       :new-task-models-loading="newTaskModelsLoading"
       :new-task-models-error="newTaskModelsError"
       :new-task-models-provider-errors="newTaskModelsProviderErrors"
@@ -686,7 +688,7 @@
       @set-run-mode="setComposerRunMode"
       @set-session-routing-mode="setComposerSessionRoutingMode"
       @select-new-task-model="setComposerNewTaskModel"
-      @refresh-new-task-models="void newTaskModel.refresh()"
+      @refresh-new-task-models="refreshComposerModels"
       @open-model-settings="openComposerModelSettings"
       @set-coding-mode-enabled="setComposerCodingModeEnabled"
       @set-collaboration-mode="setCollaborationMode"
@@ -960,6 +962,7 @@ import { useChatStream } from '@/composables/chat/useChatStream'
 import { useComposerFloatingPreference } from '@/composables/useComposerFloatingPreference'
 import { useChatTextRendering } from '@/composables/chat/useChatTextRendering'
 import { useChatUsageWidget } from '@/composables/chat/useChatUsageWidget'
+import { useChatSessionModel } from '@/composables/chat/useChatSessionModel'
 import { useSessionArtifacts } from '@/composables/chat/useSessionArtifacts'
 import { useVoiceInput } from '@/composables/chat/useVoiceInput'
 import { AUDIO_TRANSCRIPTION_KEY } from '@/modules/audioTranscription'
@@ -2124,6 +2127,8 @@ const chatFeatureToggles = useChatFeatureToggles({
   appSettings: injectedAppSettings,
   modelRouting: injectedProviderConfiguration,
   readOptions: optionalSessionReadOptions,
+  connectionEpoch: computed(() => gatewayAccess.subscriptionEpoch),
+  connectionAvailable: computed(() => gatewayAccess.isAvailable && gatewayAccess.isAuthenticated),
   setGlobalElevatedMode,
   loadCurrentSessionUsage,
 })
@@ -2139,10 +2144,24 @@ const {
   codingModeEnabled,
   codingModeSettingsBusy,
   routerTierConfigs,
+  defaultModelForAgent,
   loadFeatureToggles,
   setCodingModeEnabled,
   bindFeatureRefresh,
 } = chatFeatureToggles
+
+const newTaskDefaultModel = computed(() => (
+  isProvisionalDraftSession() ? defaultModelForAgent(draftAgentId()) : null
+))
+
+const chatSessionModel = useChatSessionModel({
+  directory: sessionDirectory,
+  sessionKey,
+  isDraft: isDraftSurface,
+  available: computed(() => gatewayAccess.isAvailable && gatewayAccess.isAuthenticated),
+  connectionEpoch: computed(() => gatewayAccess.subscriptionEpoch),
+})
+const { modelName: sessionModelName } = chatSessionModel
 
 const sessionRoutingAvailable = computed(() => {
   return gatewayAccess.isAvailable
@@ -4908,6 +4927,12 @@ async function setComposerSessionRoutingMode(mode: ModelRoutingMode) {
 async function setComposerNewTaskModel(selection: NewTaskModelSelection | null) {
   if (goalBusy.value) return
   await newTaskModel.selectWithRouting(selection, chatSessionRouting.setMode)
+}
+
+async function refreshComposerModels() {
+  await Promise.allSettled([
+    newTaskModel.refresh(), loadFeatureToggles(), chatSessionModel.refresh(),
+  ])
 }
 
 function openComposerModelSettings() {

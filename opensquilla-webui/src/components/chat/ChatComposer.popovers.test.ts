@@ -66,6 +66,33 @@ beforeEach(() => {
 })
 
 describe('ChatComposer popovers', () => {
+  it.each([
+    { mode: 'off', pin: null, defaultModel: { model: 'base', provider: 'provider-a' }, label: 'Base model', badge: true },
+    { mode: 'off', pin: { model: 'base', provider: 'provider-a' }, defaultModel: { model: 'base', provider: 'provider-a' }, label: 'Base model', badge: false },
+    { mode: 'squilla_router', pin: null, defaultModel: { model: 'base', provider: 'provider-a' }, label: 'Smart routing', badge: false },
+    { mode: 'llm_ensemble', pin: null, defaultModel: { model: 'base', provider: 'provider-a' }, label: 'Multi-model', badge: false },
+    { mode: 'off', pin: null, defaultModel: null, label: 'Single model', badge: true },
+  ])('shows the active selection without confusing defaults and pins: $mode / $label / $badge', async ({ mode, pin, defaultModel, label, badge }) => {
+    const { app, el } = await mountComposer({
+      newTaskModelAvailable: true,
+      newTaskModels: [{ id: 'base', provider: 'provider-a', name: 'Base model' }],
+      newTaskModelSelection: pin,
+      newTaskDefaultModel: defaultModel,
+      sessionRoutingMode: mode,
+    })
+    expect(el.querySelector('.chat-model-routing-btn__label')?.textContent).toBe(label)
+    expect(Boolean(el.querySelector('.chat-model-routing-btn__default'))).toBe(badge)
+    app.unmount()
+  })
+  it('shows a persisted session model without a default badge or new-task selector', async () => {
+    const { app, el } = await mountComposer({ newTaskModelAvailable: false, sessionModelName: 'bound-model' })
+    expect(el.querySelector('.chat-model-routing-btn__label')?.textContent).toBe('bound-model')
+    expect(el.querySelector('.chat-model-routing-btn__default')).toBeNull()
+    await clickButton(el, 'Models & routing')
+    expect(document.body.querySelector('.routing-mode__model-name')?.textContent).toBe('bound-model')
+    expect(document.body.querySelector('[aria-haspopup="listbox"]')).toBeNull()
+    app.unmount()
+  })
   it('keeps the focused routing option mounted while a mutation is busy', async () => {
     const setMode = vi.fn()
     const props = reactive({

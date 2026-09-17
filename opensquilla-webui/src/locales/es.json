@@ -4375,16 +4375,17 @@
     "newTaskModel": {
       "title": "Modelo de la nueva tarea",
       "catalog": "Catálogo de la pasarela",
-      "gatewayDefault": "Predeterminado",
-      "gatewayDefaultHint": "Usar el modelo predeterminado del gateway",
+      "gatewayDefault": "Modelo predeterminado",
+      "gatewayDefaultHint": "Usar el modelo predeterminado de los ajustes",
+      "defaultBadge": "Predeterminado",
       "search": "Buscar modelos o proveedores…",
       "loading": "Cargando modelos…",
       "empty": "No hay modelos coincidentes",
       "retry": "Reintentar",
       "scope": "Solo se aplica a esta nueva tarea. No cambia la configuración global.",
       "partialFailure": "No se pudieron cargar algunos proveedores: {providers}",
-      "routingConflict": "Un modelo específico requiere enrutamiento directo. Elija el predeterminado o cambie el enrutamiento explícitamente.",
-      "unavailable": "La selección no está disponible en esta conexión. Vuelva a conectar o elija el predeterminado."
+      "routingConflict": "Un modelo específico requiere el modo de modelo único. Borra la selección o elige un modo de enrutamiento.",
+      "unavailable": "La selección no está disponible en esta conexión. Vuelve a conectarte o borra el modelo seleccionado."
     },
     "modelRouting": {
       "updateFailed": "No se pudo cambiar el enrutamiento de modelos — revertido. El cambio no está disponible temporalmente.",
@@ -4393,6 +4394,7 @@
       "back": "Volver a modos de enrutamiento",
       "title": "Modelos y enrutamiento",
       "direct": "Un modelo",
+      "sessionModelFallback": "Usar el modelo de esta tarea",
       "router": "Enrutamiento inteligente",
       "ensemble": "Varios modelos"
     },

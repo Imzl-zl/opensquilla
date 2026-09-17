@@ -106,7 +106,7 @@ describe('ChatComposer model routing contract', () => {
 
   it('threads the independent model-routing control through ChatComposer and ChatView', () => {
     expect(composerSource).toContain('ChatComposerModelRouting')
-    expect(composerSource).toContain('<Icon name="router"')
+    expect(composerSource).toContain('<Icon v-if="sessionRoutingMode === \'squilla_router\'" name="router"')
     expect(composerSource).toContain('chat-model-routing-btn--${sessionRoutingMode}')
     expect(composerSource).toContain("'is-active': modelRoutingOpen || sessionRoutingMode !== 'off'")
     expect(composerSource).toContain(':model-routing-mode="sessionRoutingMode"')

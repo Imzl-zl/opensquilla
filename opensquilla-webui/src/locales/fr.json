@@ -4375,16 +4375,17 @@
     "newTaskModel": {
       "title": "Modèle de la nouvelle tâche",
       "catalog": "Catalogue de la passerelle",
-      "gatewayDefault": "Par défaut",
-      "gatewayDefaultHint": "Utiliser le modèle par défaut de la passerelle",
+      "gatewayDefault": "Modèle par défaut",
+      "gatewayDefaultHint": "Utiliser le modèle par défaut des paramètres",
+      "defaultBadge": "Par défaut",
       "search": "Rechercher un modèle ou fournisseur…",
       "loading": "Chargement des modèles…",
       "empty": "Aucun modèle correspondant",
       "retry": "Réessayer",
       "scope": "Uniquement pour cette nouvelle tâche. Les paramètres globaux restent inchangés.",
       "partialFailure": "Certains fournisseurs sont indisponibles : {providers}",
-      "routingConflict": "Un modèle précis nécessite un routage direct. Choisissez la valeur par défaut ou modifiez explicitement le routage.",
-      "unavailable": "Sélection indisponible avec cette connexion. Reconnectez-vous ou choisissez la valeur par défaut."
+      "routingConflict": "Un modèle précis nécessite le mode à modèle unique. Effacez ce choix ou choisissez un mode de routage.",
+      "unavailable": "La sélection est indisponible sur cette connexion. Reconnectez-vous ou effacez le modèle choisi."
     },
     "modelRouting": {
       "updateFailed": "Impossible de changer le routage des modèles — rétabli. La modification est temporairement indisponible.",
@@ -4393,6 +4394,7 @@
       "back": "Retour aux modes de routage",
       "title": "Modèles et routage",
       "direct": "Modèle unique",
+      "sessionModelFallback": "Utiliser le modèle de cette tâche",
       "router": "Routage intelligent",
       "ensemble": "Plusieurs modèles"
     },

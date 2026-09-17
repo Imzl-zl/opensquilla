@@ -4375,16 +4375,17 @@
     "newTaskModel": {
       "title": "Modell für die neue Aufgabe",
       "catalog": "Modellkatalog des Gateways",
-      "gatewayDefault": "Gateway-Standard",
-      "gatewayDefaultHint": "Standardmodell des Gateways verwenden",
+      "gatewayDefault": "Standardmodell",
+      "gatewayDefaultHint": "Das Standardmodell aus den Modelleinstellungen verwenden",
+      "defaultBadge": "Standard",
       "search": "Modelle oder Anbieter suchen…",
       "loading": "Modelle werden geladen…",
       "empty": "Keine passenden Modelle",
       "retry": "Erneut versuchen",
       "scope": "Gilt nur für diese neue Aufgabe. Globale Einstellungen bleiben unverändert.",
       "partialFailure": "Einige Anbieter konnten nicht geladen werden: {providers}",
-      "routingConflict": "Ein bestimmtes Modell erfordert direktes Routing. Wählen Sie den Standard oder ändern Sie das Routing ausdrücklich.",
-      "unavailable": "Modellauswahl für diese Verbindung nicht verfügbar. Neu verbinden oder den Standard wählen."
+      "routingConflict": "Ein festgelegtes Modell erfordert den Einzelmodellmodus. Heben Sie die Auswahl auf oder wählen Sie einen Routingmodus.",
+      "unavailable": "Die Modellauswahl ist für diese Verbindung nicht verfügbar. Verbinden Sie sich erneut oder heben Sie die Modellauswahl auf."
     },
     "modelRouting": {
       "updateFailed": "Modell-Routing konnte nicht umgeschaltet werden – zurückgesetzt. Die Änderung ist vorübergehend nicht verfügbar.",
@@ -4393,6 +4394,7 @@
       "back": "Zurück zu Routing-Modi",
       "title": "Modelle und Routing",
       "direct": "Einzelmodell",
+      "sessionModelFallback": "Modell dieser Aufgabe verwenden",
       "router": "Intelligentes Routing",
       "ensemble": "Mehrere Modelle"
     },

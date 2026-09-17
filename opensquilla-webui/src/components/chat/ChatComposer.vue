@@ -375,14 +375,18 @@
                   `chat-model-routing-btn--${sessionRoutingMode}`,
                   { 'is-active': modelRoutingOpen || sessionRoutingMode !== 'off' },
                 ]"
-                :title="t('chat.modelRouting.title')"
+                :title="`${t('chat.modelRouting.title')}: ${modelRoutingTriggerLabel}${modelRoutingUsesDefault ? ` · ${t('chat.newTaskModel.defaultBadge')}` : ''}`"
                 :aria-label="t('chat.modelRouting.title')"
+                :aria-description="`${modelRoutingTriggerLabel}${modelRoutingUsesDefault ? ` · ${t('chat.newTaskModel.defaultBadge')}` : ''}`"
                 :aria-expanded="modelRoutingOpen ? 'true' : 'false'"
                 :aria-disabled="sessionRoutingControlBlocked ? 'true' : 'false'"
                 @click="toggleModelRouting"
               >
-                <Icon name="router" :size="17" />
+                <Icon v-if="sessionRoutingMode === 'squilla_router'" name="router" :size="17" />
+                <Icon v-else-if="sessionRoutingMode === 'llm_ensemble'" name="fork" :size="17" />
+                <span v-else class="chat-model-routing-btn__dot" aria-hidden="true" />
                 <span class="chat-model-routing-btn__label">{{ modelRoutingTriggerLabel }}</span>
+                <span v-if="modelRoutingUsesDefault" class="chat-model-routing-btn__default">{{ t('chat.newTaskModel.defaultBadge') }}</span>
                 <Icon name="chevronDown" :size="12" />
                 <span
                   v-if="showRouterNewBadge"
@@ -400,6 +404,8 @@
                 :new-task-model-available="newTaskModelAvailable"
                 :new-task-models="newTaskModels"
                 :new-task-model-selection="newTaskModelSelection"
+                :new-task-default-model="newTaskDefaultModel"
+                :session-model-name="sessionModelName"
                 :new-task-models-loading="newTaskModelsLoading"
                 :new-task-models-error="newTaskModelsError"
                 :new-task-models-provider-errors="newTaskModelsProviderErrors"
@@ -534,6 +540,8 @@ const props = withDefaults(defineProps<{
   newTaskModelAvailable?: boolean
   newTaskModels?: readonly ModelDescriptor[]
   newTaskModelSelection?: { model: string; provider: string } | null
+  newTaskDefaultModel?: { model: string; provider: string } | null
+  sessionModelName?: string | null
   newTaskModelsLoading?: boolean
   newTaskModelsError?: string | null
   newTaskModelsProviderErrors?: readonly ProviderListError[]
@@ -661,8 +669,11 @@ const modelRoutingTriggerLabel = computed(() => {
   if (props.sessionRoutingMode === 'llm_ensemble') return t('chat.modelRouting.ensemble')
   const pin = props.newTaskModelSelection
   if (pin) return props.newTaskModels?.find(model => model.id === pin.model && model.provider === pin.provider)?.name || pin.model
-  return props.newTaskModelAvailable ? t('chat.newTaskModel.gatewayDefault') : t('chat.modelRouting.direct')
+  const defaultModel = props.newTaskModelAvailable && props.newTaskDefaultModel
+  if (defaultModel) return props.newTaskModels?.find(model => model.id === defaultModel.model && model.provider === defaultModel.provider)?.name || defaultModel.model
+  return props.sessionModelName || t('chat.modelRouting.direct')
 })
+const modelRoutingUsesDefault = computed(() => props.sessionRoutingMode === 'off' && props.newTaskModelAvailable && !props.newTaskModelSelection)
 useDialogLayer(modelRoutingOpen)
 watch(modelRoutingVisible, visible => { if (!visible) modelRoutingOpen.value = false })
 function closeModelRouting(restoreFocus = true) {
@@ -1605,7 +1616,8 @@ button.attachment-chip__primary:focus-visible {
 
 .chat-input-footer {
   justify-content: space-between;
-  gap: 0.75rem;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
   padding: 0.25rem 0.625rem 0.625rem;
 }
 
@@ -1701,8 +1713,16 @@ button.attachment-chip__primary:focus-visible {
   background: var(--danger);
 }
 
+.chat-input-actions--left {
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
 .chat-input-actions--right {
   flex-shrink: 0;
+  margin-left: auto;
+  max-width: 100%;
 }
 
 .chat-input-wrap {
@@ -1787,6 +1807,24 @@ button.attachment-chip__primary:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--fs-xs);
+}
+
+.chat-model-routing-btn__dot {
+  flex: 0 0 5px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.chat-model-routing-btn__default {
+  flex-shrink: 0;
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  line-height: 1.2;
 }
 
 .chat-model-routing-btn__new {
