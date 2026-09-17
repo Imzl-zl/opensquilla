@@ -1,37 +1,64 @@
-"""Text scrubbing for user-shareable diagnostic artifacts.
+"""Structured and text scrubbing for user-shareable diagnostic artifacts.
 
-Belt-and-braces layer under the structured config redaction
-(``gateway.config.redact_public_config``): free text (tracebacks, log lines)
-can echo secrets in ``key=value`` or header form, so shareable artifacts pass
-through :func:`scrub_text` before leaving the machine.
+JSON objects pass through :func:`scrub_json` before serialization to preserve
+metadata types and JSON syntax. Free text uses :func:`scrub_text` to mask
+credential assignments, headers and recognizable token values.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 _REDACTED = "[redacted]"
 
 # key=value / key: value / "key": "value" where the key looks secret-shaped.
-# Mirrors gateway.config._PUBLIC_SECRET_EXACT_KEYS + suffixes for free text.
+# Include prefixed credential names only at identifier-component boundaries.
 # No blanket `_key` suffix: benign identifiers like `session_key` must stay
 # readable in diagnostics.
-# The suffix branch anchors its `[a-z0-9_]*` prefix with a negative lookbehind
-# so it is only attempted at word-run starts: without the anchor the engine
-# rescans the run once per character (quadratic — megabyte base64/hex runs in
-# log tails take hours). Matches are unchanged since the star can always start
-# from the run boundary.
-_SECRET_KEY = (
-    r"(?:api[_-]?key|token|secret[_-]?access[_-]?key|secret[_-]?key|secret|password"
+_SECRET_KEY_RE = re.compile(
+    r"(?:[a-z0-9_]*_)?"
+    r"(?:api_?key|token|secret_?access_?key|secret_?key|secret|password"
     r"|authorization|signing[_-]?secret|private[_-]?key"
-    r"|app[_-]?secret|verification[_-]?token|encrypt[_-]?key|encoding[_-]?aes[_-]?key"
-    r"|(?<![a-z0-9_])[a-z0-9_]*(?:_token|_secret|_password|_api_key))"
+    r"|app[_-]?secret|verification[_-]?token|encrypt[_-]?key|encoding[_-]?aes[_-]?key)",
+    re.IGNORECASE,
 )
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _is_secret_key(key: str) -> bool:
+    normalized = _CAMEL_BOUNDARY_RE.sub("_", key).replace("-", "_").lower()
+    # Also retain literal case-insensitive spellings: unusual casing such as
+    # aPiKeY must not turn one recognized credential name into unrelated words.
+    literal = key.replace("-", "_").lower()
+    # Capability predicates describe credentials without containing them.
+    # Terminal metadata (apiKeyEnv, apiKeyConfigured, tokenCount) fails the
+    # whole-key match below, as do unrelated words ending in "secret".
+    predicates = ("requires_", "has_", "is_", "supports_")
+    if normalized.startswith(predicates) or literal.startswith(predicates):
+        return False
+    return (
+        _SECRET_KEY_RE.fullmatch(normalized) is not None
+        or _SECRET_KEY_RE.fullmatch(literal) is not None
+    )
+
+
 # Common Authorization credential schemes; the scheme word plus its payload is
 # masked as one value (Basic base64, opaque Token blobs, Digest params, ...).
 _AUTH_SCHEME = r"(?:bearer|basic|token|digest)"
-# Notes on shape:
+# Scan assignment prefixes separately from their values. A benign outer field
+# (message="api_key=...") must not consume the nested secret assignment. A
+# matched credential value is consumed once, without recursive text scrubbing.
+# The left boundary prevents retrying an identifier at each character, keeping
+# long unbroken log runs linear.
+_ASSIGNMENT_RE = re.compile(
+    r"""(?ix)
+    (?<![\w-])
+    ["']?(?P<key>[a-z0-9_][a-z0-9_-]*)["']?[ \t]*[=:][ \t]*
+    """,
+)
+# Notes on value shape:
 # - Separators use [ \t]* (never \s*) so a bare trailing label like
 #   "password:\n" cannot swallow the first word of the next line.
 # - <quote> is an *optional group* (not a group matching an optional char) so
@@ -40,13 +67,13 @@ _AUTH_SCHEME = r"(?:bearer|basic|token|digest)"
 # - The value alternation matches the [redacted] sentinel wholly first, making
 #   scrubbing idempotent (re-scrubbing an already-scrubbed artifact is a no-op
 #   instead of stacking stray "]" characters).
-_ASSIGNMENT_RE = re.compile(
+_ASSIGNMENT_VALUE_RE = re.compile(
     rf"""(?ix)
-    (?P<prefix>["']?{_SECRET_KEY}["']?[ \t]*[=:][ \t]*)
     (?P<quote>["'])?
     (?P<value>
         \[redacted\](?![^"'\s,}}\]])
-        |(?(quote)[^"'\n]+|(?:{_AUTH_SCHEME}[ \t]+)?[^"'\s,}}\]]+)
+        |(?(quote)(?:\\[^\r\n]|(?!(?P=quote))[^\\\r\n])+|
+            (?:{_AUTH_SCHEME}[ \t]+)?[^"'\s,}}\]]+)
     )
     """,
 )
@@ -89,9 +116,19 @@ _SLACK_WEBHOOK_RE = re.compile(
 
 def scrub_text(text: str) -> str:
     """Mask secret-shaped values and normalize the home directory to ``~``."""
-    scrubbed = _ASSIGNMENT_RE.sub(
-        lambda m: f"{m.group('prefix')}{m.group('quote') or ''}{_REDACTED}", text
-    )
+    parts: list[str] = []
+    cursor = search_from = 0
+    while assignment := _ASSIGNMENT_RE.search(text, search_from):
+        search_from = assignment.end()
+        if not _is_secret_key(assignment.group("key")):
+            continue
+        value = _ASSIGNMENT_VALUE_RE.match(text, search_from)
+        if value is None:
+            continue
+        parts.extend((text[cursor:value.start("value")], _REDACTED))
+        cursor = search_from = value.end()
+    parts.append(text[cursor:])
+    scrubbed = "".join(parts)
     scrubbed = _BEARER_RE.sub(lambda m: f"{m.group('prefix')}{_REDACTED}", scrubbed)
     scrubbed = _BARE_TOKEN_RE.sub(_REDACTED, scrubbed)
     scrubbed = _SLACK_WEBHOOK_RE.sub(lambda m: f"{m.group('prefix')}{_REDACTED}", scrubbed)
@@ -99,3 +136,26 @@ def scrub_text(text: str) -> str:
     if home and home != "/":
         scrubbed = scrubbed.replace(home, "~")
     return scrubbed
+
+
+def scrub_json(value: Any) -> Any:
+    """Copy JSON data, masking secret fields and scrubbing only string leaves.
+
+    Benign booleans, numbers and null retain their types. A credential field
+    is masked as a whole even when its value is numeric or a container. This
+    must run before serialization; text scrubbing is not a JSON transformation.
+    Unknown values retain the bundle's historical string conversion, with the
+    resulting string scrubbed too.
+    """
+    if isinstance(value, dict):
+        return {
+            scrub_text(key) if isinstance(key, str) else key: (
+                _REDACTED if isinstance(key, str) and _is_secret_key(key) else scrub_json(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [scrub_json(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return scrub_text(value if isinstance(value, str) else str(value))

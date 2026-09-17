@@ -2,11 +2,40 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from copy import deepcopy
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from opensquilla.observability.redact import scrub_text
+import pytest
+
+from opensquilla.observability.redact import scrub_json, scrub_text
 
 FAKE_KEY = "sk-FAKE1234567890abcdef"
+
+
+@pytest.mark.parametrize("key", [
+    "requiresApiKey", "REQUIRESAPIKEY", "requires_api_key", "requires-api-key",
+    "apiKeyConfigured", "APIKEYConfigured", "apiKeyEnv", "ApiKeyEnv", "api_key_env",
+    "hasToken", "isSecret",
+    "tokenCount", "session_key", "monkey", "notasecret",
+    "rEqUiReS_api_key", "hAs_Api_KEY", "iS_Password", "sUpPoRtS_PRIVATE_KEY",
+])
+def test_metadata_assignments_keep_complete_key_boundaries(key: str) -> None:
+    text = f'{key}=true "{key}": false {key}: null'
+    assert scrub_text(text) == text
+    assert scrub_json({key: True}) == {key: True}
+
+
+@pytest.mark.parametrize("key", [
+    "apiKey", "API_KEY", "api-key", "Authorization", "accessToken",
+    "PROVIDER_API_KEY", "providerApiKey", "clientSecret", "client-secret",
+    "AWS_SECRET_ACCESS_KEY", "aws_secret_access_key", "awsSecretAccessKey",
+    "sshPrivateKey", "providerSecretKey", "x-api-key", "providerEncryptKey",
+    "channelEncodingAesKey", "proxy-authorization", "_token", "_api_key",
+    "aPiKeY", "sEcReT", "API_kEy", "aWs_sEcReT_aCcEsS_kEy", "pRiVaTe_KeY",
+])
+def test_complete_secret_assignments_remain_redacted(key: str) -> None:
+    assert scrub_text(f'{key}="synthetic credential"') == f'{key}="[redacted]"'
+    assert scrub_json({key: "synthetic credential"}) == {key: "[redacted]"}
 
 # Synthetic bare tokens (no key=value structure around them), as they appear
 # verbatim inside provider/channel error messages.
@@ -195,3 +224,112 @@ def test_bare_token_masking_is_idempotent() -> None:
         text = f"log line with {token} embedded"
         once = scrub_text(text)
         assert scrub_text(once) == once, f"double scrub diverged for {token!r}"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ('message="api_key=synthetic-credential" status=ok',
+     'message="api_key=[redacted]" status=ok'),
+    ('{"message": "upstream password=synthetic-credential"}',
+     '{"message": "upstream password=[redacted]"}'),
+    ('message="prefix apiKey=\'synthetic credential\' suffix"',
+     'message="prefix apiKey=\'[redacted]\' suffix"'),
+    ("message=api_key=synthetic-credential", "message=api_key=[redacted]"),
+    ("context: detail: api_key=synthetic-credential", "context: detail: api_key=[redacted]"),
+    ('message="api_key=synthetic-one auth_token=synthetic-two"',
+     'message="api_key=[redacted] auth_token=[redacted]"'),
+])
+def test_secret_assignments_inside_benign_values(text: str, expected: str) -> None:
+    assert scrub_text(text) == expected
+    assert scrub_text(expected) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    (r'password="synthetic \"quoted\" value" status=ok', 'password="[redacted]" status=ok'),
+    ('password="synthetic \'quoted\' value" status=ok', 'password="[redacted]" status=ok'),
+    (r"password='synthetic \'quoted\' value' status=ok", "password='[redacted]' status=ok"),
+    ('password="synthetic credential\r\nstatus=ok', 'password="[redacted]\r\nstatus=ok'),
+    ("password:\r\nstatus=ok", "password:\r\nstatus=ok"),
+    ('password="[redacted]suffix"', 'password="[redacted]"'),
+])
+def test_secret_value_quoting_and_line_boundaries(text: str, expected: str) -> None:
+    assert scrub_text(text) == expected
+    assert scrub_text(expected) == expected
+
+
+def test_long_assignment_runs_and_nested_labels() -> None:
+    # Large identifier runs and many benign labels must not trigger recursive
+    # processing or retry the suffix match from every character in a run.
+    ordinary = "a" * 100_000
+    labels = "message=" * 2_000
+    assert scrub_text(ordinary) == ordinary
+    assert scrub_text(labels + "api_key=" + ordinary) == labels + "api_key=[redacted]"
+
+
+def test_scrub_json_copies_nested_values_and_retains_metadata_types() -> None:
+    original = {
+        "providers": [{
+            "requiresApiKey": True,
+            "apiKeyConfigured": False,
+            "apiKeyEnv": "SYNTHETIC_API_KEY",
+            "apiKeyEnvPool": ["SYNTHETIC_POOL_A", "SYNTHETIC_POOL_B"],
+            "attempts": 2,
+            "fraction": 0.25,
+            "missing": None,
+            "clientAPIKey": "synthetic-secret",
+            "Authorization": {"nested": ["synthetic-credential"]},
+            "password": 12345,
+            "message": 'context="token=synthetic-credential"',
+        }],
+        "tuple": (False, 0, None, {"app-secret": ["synthetic-one", "synthetic-two"]}),
+    }
+    before = deepcopy(original)
+
+    scrubbed = scrub_json(original)
+
+    assert original == before
+    assert scrubbed["providers"][0] == {
+        "requiresApiKey": True,
+        "apiKeyConfigured": False,
+        "apiKeyEnv": "SYNTHETIC_API_KEY",
+        "apiKeyEnvPool": ["SYNTHETIC_POOL_A", "SYNTHETIC_POOL_B"],
+        "attempts": 2,
+        "fraction": 0.25,
+        "missing": None,
+        "clientAPIKey": "[redacted]",
+        "Authorization": "[redacted]",
+        "password": "[redacted]",
+        "message": 'context="token=[redacted]"',
+    }
+    assert scrubbed["tuple"] == [False, 0, None, {"app-secret": "[redacted]"}]
+    assert scrub_json(scrubbed) == scrubbed
+
+
+@pytest.mark.parametrize("value", [True, False, 17, 1.25, None])
+@pytest.mark.parametrize("key", [
+    "requiresApiKey", "requires_api_key", "apiKeyConfigured", "APIKEYConfigured", "ApiKeyEnv",
+])
+def test_scrub_json_keeps_metadata_scalar_types(key: str, value) -> None:
+    result = scrub_json({"nested": [{key: value}]})["nested"][0][key]
+    assert result == value
+    assert type(result) is type(value)
+
+
+@pytest.mark.parametrize("home", [
+    PurePosixPath("/home/synthetic"), PureWindowsPath(r"Q:\synthetic-home"),
+])
+def test_scrub_json_normalizes_paths_before_serialization(home, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    file_path = home / "diagnostics" / "status.json"
+    suffix = str(file_path)[len(str(home)):]
+    assert scrub_json({"path": file_path, "message": f"loaded {file_path}"}) == {
+        "path": "~" + suffix,
+        "message": "loaded ~" + suffix,
+    }
+
+
+def test_scrub_json_scrubs_fallback_string_values() -> None:
+    class DiagnosticValue:
+        def __str__(self) -> str:
+            return "password=synthetic-fallback"
+
+    assert scrub_json({"value": DiagnosticValue()}) == {"value": "password=[redacted]"}
