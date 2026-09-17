@@ -509,14 +509,6 @@ def test_task_runtime_leak_smoke_is_marked_ci_serial() -> None:
 
 def test_runner_saturated_subprocess_contracts_are_marked_ci_serial() -> None:
     assert "pytest.mark.ci_serial" in _function_decorators(
-        Path("tests/functional/test_gateway_silent_reply_process_e2e.py"),
-        "test_real_gateway_suppresses_goal_sentinel_everywhere",
-    )
-    assert "pytest.mark.ci_serial" in _function_decorators(
-        Path("tests/test_ci/test_windows_signatures.py"),
-        "test_explicit_invalid_signtool_fails_without_fallback",
-    )
-    assert "pytest.mark.ci_serial" in _function_decorators(
         Path("tests/test_ci/test_windows_signed_update_audit.py"),
         "test_real_node_and_frozen_python_complete_only_in_new_temporary_parent",
     )
@@ -543,6 +535,14 @@ def test_runner_saturated_subprocess_contracts_are_marked_ci_serial() -> None:
     assert "pytest.mark.ci_serial" in _function_decorators(
         Path("tests/test_recovery/test_transaction.py"),
         "test_transaction_recovery_locks_parked_backup_before_restoring_target",
+    )
+    assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/functional/test_gateway_silent_reply_process_e2e.py"),
+        "test_real_gateway_suppresses_goal_sentinel_everywhere",
+    )
+    assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/test_ci/test_windows_signatures.py"),
+        "test_explicit_invalid_signtool_fails_without_fallback",
     )
 
 
