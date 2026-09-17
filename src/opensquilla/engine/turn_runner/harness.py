@@ -81,7 +81,6 @@ from opensquilla.engine.turn_runner.turn_finalizer_stage import (
 )
 from opensquilla.engine.usage_accounting import UsageExecutionContext
 from opensquilla.provider.model_catalog import resolve_effective_context_window
-from opensquilla.session.compaction_lifecycle import normalize_flush_triggers_strict
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -94,10 +93,6 @@ if TYPE_CHECKING:
     from opensquilla.observability.turn_call_log import TurnCallLogger
     from opensquilla.provider.protocol import LLMProvider
     from opensquilla.tools.types import ToolContext
-
-
-def _coerce_flush_triggers(value: Any) -> list[str]:
-    return list(normalize_flush_triggers_strict(value))
 
 
 def create_turn_execution_context(
@@ -815,7 +810,6 @@ class _TurnRunnerAgentConfigBuilderAdapter(AgentConfigBuilderPort):
         from opensquilla.paths import media_root_from_config
 
         runner = self._runner
-        mem_cfg = getattr(runner._config, "memory", None) if runner._config else None
         agent_token_cfg = (
             getattr(runner._config, "agent_token_saving", None)
             if runner._config
@@ -829,39 +823,10 @@ class _TurnRunnerAgentConfigBuilderAdapter(AgentConfigBuilderPort):
         thinking = runner._resolve_turn_thinking(turn)
         return _AgentConfigAuxiliaries(
             thinking=thinking,
-            flush_workspace_dir=str(runner._resolve_memory_source_dir(agent_id)),
             tool_result_store_dir=str(
                 media_root_from_config(runner._config) / "tool-results"
             ),
             tool_result_store_session_id=session_id_for_log or session_key,
-            flush_enabled=getattr(mem_cfg, "flush_enabled", False),
-            flush_triggers=_coerce_flush_triggers(
-                getattr(mem_cfg, "flush_triggers", None)
-            ),
-            flush_pre_compaction=getattr(mem_cfg, "flush_pre_compaction", False),
-            flush_timeout_seconds=getattr(mem_cfg, "flush_timeout_seconds", 15.0),
-            flush_background_timeout_seconds=getattr(
-                mem_cfg, "flush_background_timeout_seconds", 120.0
-            ),
-            flush_backoff_initial_seconds=getattr(
-                mem_cfg, "flush_backoff_initial_seconds", 30.0
-            ),
-            flush_backoff_max_seconds=getattr(
-                mem_cfg, "flush_backoff_max_seconds", 300.0
-            ),
-            flush_archive_max_bytes=getattr(
-                mem_cfg, "flush_archive_max_bytes", 800_000
-            ),
-            flush_compaction_requires_safe_receipt=getattr(
-                mem_cfg,
-                "flush_compaction_requires_safe_receipt",
-                False,
-            ),
-            flush_compaction_safety_mode=getattr(
-                mem_cfg,
-                "flush_compaction_safety_mode",
-                "protect",
-            ),
             compaction_profile=getattr(
                 compaction_cfg,
                 "compaction_profile",
@@ -971,7 +936,7 @@ class _TurnRunnerAgentFactoryAdapter(AgentFactoryPort):
     """Bind the typed ``Agent(...)`` constructor.
 
     The adapter injects the runner-singleton dependencies
-    (``usage_tracker``, ``session_flush_service``) so the stage never
+    (``usage_tracker``) so the stage never
     sees those runtime attributes directly.
     """
 
@@ -1041,7 +1006,6 @@ class _TurnRunnerAgentFactoryAdapter(AgentFactoryPort):
             session_key=session_key,
             turn_call_logger=turn_call_logger,
             memory_sync_manager=memory_sync_manager,
-            session_flush_service=self._runner._session_flush_service,
             tool_registry=self._runner._tool_registry,
             tool_context=tool_context,
             usage_event_sink=usage_event_sink,
@@ -2072,9 +2036,8 @@ class _TurnRunnerTurnErrorPersistAdapter(TurnErrorPersistPort):
     """Bind ``TurnRunner._persist_turn_error`` as a Protocol port.
 
     Forwards verbatim. The helper owns its own log-and-continue
-    try/except and guards both ``session_manager is None`` and
-    ``event is None`` internally, so the adapter and stage body have no
-    additional guards.
+    try/except and guards ``event is None`` internally; diagnostic recording
+    does not require a session manager.
     """
 
     def __init__(self, runner: TurnRunner) -> None:
@@ -2088,6 +2051,11 @@ class _TurnRunnerTurnErrorPersistAdapter(TurnErrorPersistPort):
         append_transcript: bool = True,
         expected_session_id: str | None = None,
         expected_session_epoch: int | None = None,
+        turn_id: str | None = None,
+        surface: str = "unknown",
+        provider: str | None = None,
+        model: str | None = None,
+        fallback_hops: int = 0,
     ) -> None:
         await self._runner._persist_turn_error(
             session_key,
@@ -2095,6 +2063,11 @@ class _TurnRunnerTurnErrorPersistAdapter(TurnErrorPersistPort):
             append_transcript=append_transcript,
             expected_session_id=expected_session_id,
             expected_session_epoch=expected_session_epoch,
+            turn_id=turn_id,
+            surface=surface,
+            provider=provider,
+            model=model,
+            fallback_hops=fallback_hops,
         )
 
 
