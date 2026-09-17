@@ -26,6 +26,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Unsupported legacy database lineages are
   preserved and rejected consistently, and preview/nightly Desktop profiles
   are isolated from stable data.
+- Shell calls with an authorized but invalid working directory now report a
+  correctable argument error without executing the command or requesting broader
+  sandbox permissions.
 
 - Browser extensions can now reach state-changing HTTP and WebSocket endpoints
   through a loopback request authority when their exact custom-scheme origin

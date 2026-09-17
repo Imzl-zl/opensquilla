@@ -149,6 +149,27 @@ def test_thinking_setting_keeps_model_and_execution_bounds(tmp_path: Path) -> No
         live.render_config("openrouter", live.MODELS["openrouter"], tmp_path, thinking="unknown")
 
 
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("15", True),
+        ("15.0\n", True),
+        (" 1.5e1 ", True),
+        ("14", False),
+        ("15.00000000000000000001", False),
+        ("14.99999999999999999999", False),
+        ("NaN", False),
+        ("Infinity", False),
+        ("", False),
+        ("The sum is 15", False),
+        ("15\n0", False),
+    ],
+)
+def test_child_sum_accepts_equal_numbers_without_rounding_or_extracting_prose(value, expected):
+    # The workload asks for the sum, not a particular integer/decimal spelling.
+    assert live.numeric_result_matches(value, 15) is expected
+
+
 def test_physical_limit_is_atomic_and_survives_restart(tmp_path: Path) -> None:
     guard = _guard(tmp_path)
     url = guard.endpoint + "/chat/completions"

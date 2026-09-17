@@ -28,6 +28,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -2496,6 +2497,15 @@ async def budget_case(case: LiveCase, *, historical: bool = False) -> None:
                    case.guard.snapshot()["counts"].get("root_turns") == 1)
 
 
+def numeric_result_matches(value: str, expected: int) -> bool:
+    """Compare a numeric artifact exactly, without float rounding or prose extraction."""
+    try:
+        number = Decimal(value.strip())
+    except InvalidOperation:
+        return False
+    return number.is_finite() and number == expected
+
+
 async def childbudget_case(case: LiveCase) -> None:
     key = "agent:main:webchat:live-childbudget"
     (case.workspace / "numbers.txt").write_text("3\n5\n7\n", encoding="utf-8")
@@ -2532,7 +2542,8 @@ async def childbudget_case(case: LiveCase) -> None:
         lambda s: (s.get("goal") or {}).get("status") == "paused" and not s.get("active_task"),
     )
     case.check(
-        "child_output_consumed", (case.workspace / "child-result.txt").read_text().strip() == "15"
+        "child_output_consumed",
+        numeric_result_matches((case.workspace / "child-result.txt").read_text(), 15),
     )
     goal = snapshot["goal"]
     proof = child_usage_evidence(case.root / "state", goal["goalId"])
