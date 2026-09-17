@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 
@@ -457,6 +458,7 @@ def test_source_symbols_handles_adversarial_c_lines_in_bounded_time(tmp_path: Pa
         import asyncio
         import json
         import sys
+        from pathlib import Path
         from opensquilla.tools.builtin.filesystem import source_symbols
         from opensquilla.tools.types import CallerKind, ToolContext, current_tool_context
 
@@ -465,6 +467,7 @@ def test_source_symbols_handles_adversarial_c_lines_in_bounded_time(tmp_path: Pa
             workspace_dir=sys.argv[1], session_key="agent:main:test",
         ))
         try:
+            Path(sys.argv[2]).touch()
             result = json.loads(asyncio.run(source_symbols(path="sample.cpp")))
             assert result["status"] == "success", result
             assert [(row["name"], row["line"]) for row in result["results"]] == [
@@ -473,17 +476,29 @@ def test_source_symbols_handles_adversarial_c_lines_in_bounded_time(tmp_path: Pa
         finally:
             current_tool_context.reset(token)
     """)
-    # A parent-process deadline works even if Python's regex engine holds the GIL.
+    # Start the parsing deadline after imports: full CI also runs other Python
+    # workers compiling cold dependencies. Keep a separate bounded startup phase.
+    # Both deadlines are enforced by the parent, outside the regex engine's GIL.
     source_root = Path(filesystem.__file__).resolve().parents[3]
-    completed = subprocess.run(
-        [sys.executable, "-c", script, str(tmp_path)],
+    ready = tmp_path / "parser-ready"
+    with subprocess.Popen(
+        [sys.executable, "-c", script, str(tmp_path), str(ready)],
         env={**os.environ, "PYTHONPATH": str(source_root)},
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=15,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
+    ) as child:
+        try:
+            startup_deadline = time.monotonic() + 30
+            while not ready.exists() and child.poll() is None:
+                assert time.monotonic() < startup_deadline, "parser child did not finish importing"
+                time.sleep(0.05)
+            stdout, stderr = child.communicate(timeout=15)
+            assert child.returncode == 0, stdout + stderr
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.communicate()
 
 
 @pytest.mark.asyncio
