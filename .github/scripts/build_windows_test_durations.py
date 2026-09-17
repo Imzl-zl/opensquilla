@@ -367,7 +367,7 @@ def _percentile(values: list[float], fraction: float) -> float:
 def partition_phase_estimate(
     files: list[str], phase_weights: dict[str, dict[str, float]], *, workers: int
 ) -> tuple[float, float]:
-    """Estimate loadfile worker time plus the separate serial phase."""
+    """Estimate idealized LPT worker loads plus serial time, not xdist wall time."""
 
     if type(workers) is not int or workers < 1:
         raise ValueError("workers must be a positive integer")
@@ -388,8 +388,12 @@ def allocate_family_partitions(
 ) -> tuple[list[str], ...]:
     """Propose fixed whole-file partitions; applying the proposal remains explicit."""
 
-    if type(count) is not int or count < 1 or len(files) != len(set(files)):
-        raise ValueError("partition count must be positive and input files must be unique")
+    if type(workers) is not int or workers < 1:
+        raise ValueError("workers must be a positive integer")
+    if type(count) is not int or not 1 <= count <= len(files):
+        raise ValueError("partition count must be positive and cannot exceed the input file count")
+    if len(files) != len(set(files)):
+        raise ValueError("input files must be unique")
     partitions: tuple[list[str], ...] = tuple([] for _ in range(count))
     ordered = sorted(
         files,

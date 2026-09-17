@@ -364,6 +364,23 @@ def test_phase_partition_allocator_balances_serial_and_indivisible_parallel_file
     assert [estimate(paths, weights, workers=3)[0] for paths in partitions] == [80.0] * 4
 
 
+@pytest.mark.parametrize("workers", [0, -1, True, 1.5])
+def test_phase_partition_allocator_rejects_invalid_workers_before_empty_input(
+    workers: object,
+) -> None:
+    with pytest.raises(ValueError, match="workers must be a positive integer"):
+        DURATION_MODULE["allocate_family_partitions"]([], {}, workers=workers, count=4)
+
+
+@pytest.mark.parametrize("files", [[], ["only-file"]])
+def test_phase_partition_allocator_never_proposes_empty_execution_partitions(
+    files: list[str],
+) -> None:
+    weights = {path: {"parallel": 1.0, "serial": 0.0} for path in files}
+    with pytest.raises(ValueError, match="cannot exceed the input file count"):
+        DURATION_MODULE["allocate_family_partitions"](files, weights, workers=3, count=4)
+
+
 def test_duration_builder_rejects_stale_partition_evidence(tmp_path: Path) -> None:
     observations = _partitioned_observations(tmp_path)
     with pytest.raises(ValueError, match="partition hash does not match"):
