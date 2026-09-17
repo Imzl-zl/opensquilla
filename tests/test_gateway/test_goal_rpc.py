@@ -203,6 +203,7 @@ async def _open_goal_rpc_stack(
         config=gateway_config,
     )
     runtime.set_goal_service(service)
+    get_registry().set_unregister_listener(service.on_connection_unregistered)
     if wire_lifecycle:
         runtime.set_lifecycle_listener(service.on_task_lifecycle)
         runtime.set_activation_listener(service.on_task_activation)
@@ -1979,7 +1980,7 @@ async def test_detached_goal_reattaches_with_token_and_supports_explicit_takeove
             scopes=frozenset({"operator.admin"}),
             is_owner=True,
             authenticated=True,
-            token_public_id="explicit-goal-takeover",
+            token_public_id="desktop",
         )
         takeover_id = f"goal-takeover-{uuid.uuid4()}"
         takeover_context = RpcContext(
@@ -4398,7 +4399,8 @@ class _DurableGoalContinuationProvider:
     first_final = "The inputs are inspected; final verification still remains."
     terminal_summary = "The durable Goal was verified in the continuation."
 
-    def __init__(self) -> None:
+    def __init__(self, *, retry_automatic: bool = False) -> None:
+        self.retry_automatic = retry_automatic
         self.calls = 0
         self.tool_names_seen: list[list[str]] = []
         self.system_prompts_seen: list[str] = []
@@ -4414,7 +4416,7 @@ class _DurableGoalContinuationProvider:
         config: Any = None,
     ) -> AsyncIterator[Any]:
         self.calls += 1
-        call = self.calls
+        call = self.calls - int(self.retry_automatic and self.calls >= 3)
 
         tool_names = [tool.name for tool in tools or []]
         system_prompt = str(getattr(config, "system", "") or "")
@@ -4453,9 +4455,16 @@ class _DurableGoalContinuationProvider:
         else:
             raise AssertionError("The Goal continuation made an extra provider call")
 
-        return self._stream(call=call)
+        return self._stream(
+            call=call, fail_before_response=self.retry_automatic and self.calls == 2,
+        )
 
-    async def _stream(self, *, call: int) -> AsyncIterator[Any]:
+    async def _stream(
+        self, *, call: int, fail_before_response: bool = False,
+    ) -> AsyncIterator[Any]:
+        if fail_before_response:
+            yield ProviderError(message="Synthetic transient failure", code="503")
+            return
         if call == 1:
             yield ProviderText(text=self.first_final)
             yield ProviderDone(stop_reason="stop", input_tokens=13, output_tokens=5)
@@ -4512,9 +4521,11 @@ def _durable_goal_control_registry() -> ToolRegistry:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("retry_automatic", [False, True])
 async def test_real_turn_runner_continuation_reuses_durable_goal_context_and_completes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    retry_automatic: bool,
 ) -> None:
     """A successful non-terminal Task must continue through the full real stack."""
 
@@ -4558,7 +4569,7 @@ async def test_real_turn_runner_continuation_reuses_durable_goal_context_and_com
                 terminal_idle_seen.set()
 
         stack.runtime.set_idle_listener(observe_terminal_idle)
-        provider = _DurableGoalContinuationProvider()
+        provider = _DurableGoalContinuationProvider(retry_automatic=retry_automatic)
         config = GatewayConfig(
             workspace_dir=str(tmp_path / "workspace"),
             attachments=AttachmentsConfig(media_root=str(tmp_path / "media")),
@@ -4566,7 +4577,7 @@ async def test_real_turn_runner_continuation_reuses_durable_goal_context_and_com
             naming={"enabled": False},
             goal=GoalConfig(execution_enabled=True),
             squilla_router=SquillaRouterConfig(enabled=False),
-            agent_max_provider_retries=0,
+            agent_max_provider_retries=int(retry_automatic),
         )
         runner = TurnRunner(
             provider_selector=_DurableGoalContinuationSelector(provider),
@@ -4653,6 +4664,12 @@ async def test_real_turn_runner_continuation_reuses_durable_goal_context_and_com
 
         assert provider.objective in provider.request_contexts_seen[1]
         assert provider.first_final in provider.messages_seen[1]
+        assert "automatic=false; continuationSeq=0" in provider.request_contexts_seen[0]
+        assert "This is a new automatic continuation turn" not in (
+            provider.request_contexts_seen[0]
+        )
+        assert "automatic=true; continuationSeq=1" in provider.request_contexts_seen[1]
+        assert "The previous turn has ended" in provider.messages_seen[1]
         assert await _table_count(stack.storage, "agent_tasks") == 2
         assert await stack.storage.get_agent_task(unexpected_third_task_id) is None
 
@@ -4667,7 +4684,9 @@ async def test_real_turn_runner_continuation_reuses_durable_goal_context_and_com
         )
 
         assert second_task.status == AgentTaskStatus.SUCCEEDED
-        assert provider.calls == 3
+        assert provider.calls == 3 + int(retry_automatic)
+        if retry_automatic:
+            assert provider.request_contexts_seen[1] == provider.request_contexts_seen[2]
         assert all(
             {"update_goal", "update_goal_progress"} <= set(tool_names)
             for tool_names in provider.tool_names_seen
@@ -4699,7 +4718,7 @@ async def test_real_turn_runner_continuation_reuses_durable_goal_context_and_com
 
         await asyncio.wait_for(terminal_idle_seen.wait(), timeout=3.0)
         assert len(runs) == 2
-        assert provider.calls == 3
+        assert provider.calls == 3 + int(retry_automatic)
         assert await _table_count(stack.storage, "agent_tasks") == 2
         assert await stack.storage.get_agent_task(unexpected_third_task_id) is None
 
@@ -5278,6 +5297,135 @@ async def test_background_goal_cannot_restore_invalid_authority_after_disconnect
         assert SOURCE_KEY not in stack.service._continuity_grants
 
 
+@pytest.mark.parametrize(
+    "revocation", ["named_token", "named_token_active", "missing_principal", "removed_write_scope"]
+)
+async def test_background_goal_rechecks_revoked_authority_before_next_admission(
+    tmp_path: Path, revocation: str,
+) -> None:
+    from opensquilla.gateway.auth import resolve_auth
+    from opensquilla.gateway.rpc_sandbox import _handle_sandbox_token_revoke
+    from opensquilla.gateway.token_store import TokenStore
+
+    entered, finish = asyncio.Event(), asyncio.Event()
+    runs: list[TaskRun] = []
+
+    async def handler(run: TaskRun) -> None:
+        runs.append(run)
+        if len(runs) == 1:
+            entered.set()
+            await finish.wait()
+        else:
+            await stack.service.commit_model_status(
+                run.goal_context, status="complete", reason=None,
+            )
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "background-authority.sqlite", handler=handler, wire_lifecycle=True,
+    ) as stack:
+        connection = get_registry().get(stack.context.conn_id)
+        assert connection is not None
+        issued = None
+        if revocation.startswith("named_token"):
+            state = tmp_path / "auth"
+            stack.context.config.state_dir = str(state)
+            stack.context.config.auth.mode = "token"
+            issued = TokenStore(state / "sessions.db").create(
+                name="Synthetic background operator", roles={"operator"},
+                scopes={"operator.read", "operator.write"},
+                capabilities={"host.execute", "task.read", "task.submit"},
+            )
+            principal = resolve_auth(
+                stack.context.config, auth_params={"token": issued.token},
+                role_claim="operator", peer_ip="192.168.1.7",
+            )
+            assert principal is not None and principal.authenticated
+            stack.context.principal = connection.principal = principal
+        created = await _handle_goals_set(
+            {**_set_params(), "executionPolicy": "background"}, stack.context,
+        )
+        await asyncio.wait_for(entered.wait(), 2)
+        if revocation == "missing_principal":
+            connection.principal = None
+        elif revocation == "removed_write_scope":
+            connection.principal = replace(connection.principal, scopes=frozenset())
+        # No Goal status/lease read may observe the changed connection before
+        # unregister. The normal disconnect boundary must preserve revocation.
+        get_registry().unregister(stack.context.conn_id)
+        stack.subscriptions.remove_connection(stack.context.conn_id)
+        if issued is not None and revocation == "named_token":
+            owner = replace(stack.context, principal=_PRINCIPAL)
+            revoked = await _handle_sandbox_token_revoke(
+                {"publicId": issued.record.public_id}, owner,
+            )
+            assert revoked["revoked"] is True
+            # A request already carrying the old principal must not recreate
+            # the grant through resume rollback or a tokenless reattachment.
+            get_registry().register(connection)
+            stack.subscriptions.subscribe_messages(stack.context.conn_id, SOURCE_KEY)
+            goal = await stack.storage.get_goal(SOURCE_KEY)
+            assert goal is not None
+            with pytest.raises(RpcHandlerError, match="authorized Goal owner"):
+                await _handle_goals_resume(
+                    _mutation_params(
+                        {"goalId": goal.goal_id, "stateRevision": goal.state_revision},
+                        request_index=2,
+                    ), stack.context,
+                )
+            assert SOURCE_KEY not in stack.service._continuity_grants
+            with pytest.raises(RpcHandlerError, match="authorized Goal owner"):
+                await _handle_goals_reattach(
+                    _reattach_params(created, takeover=True), stack.context,
+                )
+            assert SOURCE_KEY not in stack.service._continuity_grants
+            get_registry().unregister(stack.context.conn_id)
+            stack.subscriptions.remove_connection(stack.context.conn_id)
+        finish.set()
+        await stack.runtime.wait(created["taskId"], timeout=3)
+        await stack.service._kick_if_idle(SOURCE_KEY)
+        if stack.service._kick_tasks:
+            await asyncio.gather(*list(stack.service._kick_tasks.values()))
+        if revocation == "named_token_active":
+            await _wait_for_goal(stack.storage, lambda goal: goal.status == "complete")
+        expected_runs = 2 if revocation == "named_token_active" else 1
+        assert await _table_count(stack.storage, "agent_tasks") == expected_runs
+        assert len(runs) == expected_runs
+        assert SOURCE_KEY not in stack.service._continuity_grants
+
+
+@pytest.mark.parametrize("outcome", ["failure", "replay"])
+async def test_goal_authority_rollback_cannot_restore_disconnected_downgraded_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    async with _open_goal_rpc_stack(tmp_path / "authority-rollback.sqlite") as stack:
+        created = await _handle_goals_set(
+            {**_set_params(), "executionPolicy": "background"}, stack.context,
+        )
+        connection = get_registry().get(stack.context.conn_id)
+        assert connection is not None
+
+        async def revoked_during_storage(**_kwargs):
+            connection.principal = replace(connection.principal, scopes=frozenset())
+            get_registry().unregister(stack.context.conn_id)
+            assert SOURCE_KEY not in stack.service._continuity_grants
+            if outcome == "failure":
+                raise RuntimeError("Synthetic durable write failure")
+            return SimpleNamespace(replayed=True, response=created)
+
+        monkeypatch.setattr(stack.storage, "resume_goal", revoked_during_storage)
+        if outcome == "failure":
+            with pytest.raises(RuntimeError, match="Synthetic durable write failure"):
+                await _handle_goals_resume(
+                    _mutation_params(created["goal"], request_index=2), stack.context,
+                )
+        else:
+            await _handle_goals_resume(
+                _mutation_params(created["goal"], request_index=2), stack.context,
+            )
+        assert SOURCE_KEY not in stack.service._leases
+        assert SOURCE_KEY not in stack.service._continuity_grants
+
+
 async def test_natural_create_attaches_to_ordinary_running_rpc_task(tmp_path: Path) -> None:
     created_goals: list[dict[str, Any]] = []
     runtime_contexts: list[dict[str, Any]] = []
@@ -5483,6 +5631,8 @@ async def test_natural_resume_and_edit_reuse_current_ordinary_task(tmp_path: Pat
 async def test_natural_dispatch_edits_and_pauses_atomically_in_current_task(
     tmp_path: Path, initial_status: str, change: str,
 ) -> None:
+    from structlog.testing import capture_logs
+
     from opensquilla.engine.types import ToolCall
     from opensquilla.tools.dispatch import build_tool_handler
     from opensquilla.tools.types import CallerKind, ToolContext
@@ -5509,6 +5659,19 @@ async def test_natural_dispatch_edits_and_pauses_atomically_in_current_task(
             assert not result.is_error, result.content
             return json.loads(result.content)
 
+        async def reject(arguments: dict[str, Any]) -> None:
+            # Inspect expected failure logs without rendering seven full rich
+            # tracebacks inside the task's bounded completion wait.
+            with capture_logs() as logs:
+                result = await dispatch(ToolCall(
+                    tool_use_id=str(uuid.uuid4()), tool_name="update_goal", arguments=arguments,
+                ))
+            assert result.is_error
+            assert json.loads(result.content)["error_class"] == "RetryableToolInputError"
+            failures = [entry for entry in logs if entry["event"] == "dispatch.tool_failed"]
+            assert len(failures) == 1
+            assert failures[0]["error_class"] == "RetryableToolInputError"
+
         if len(runs) == 1:
             await invoke("create_goal", {"objective": "Complete the first synthetic objective."})
             if initial_status == "paused":
@@ -5524,11 +5687,7 @@ async def test_natural_dispatch_edits_and_pauses_atomically_in_current_task(
             {"objective": "Invalid pause reason.", "status": "paused",
              "reason": "Invalid reason."},
         ):
-            rejected = await dispatch(ToolCall(
-                tool_use_id=str(uuid.uuid4()), tool_name="update_goal", arguments=invalid,
-            ))
-            assert rejected.is_error
-            assert json.loads(rejected.content)["error_class"] == "RetryableToolInputError"
+            await reject(invalid)
             unchanged = await stack.storage.get_goal(SOURCE_KEY)
             assert unchanged == before
         event_count = len(stack.events)
@@ -5556,11 +5715,7 @@ async def test_natural_dispatch_edits_and_pauses_atomically_in_current_task(
             {"status": "paused", "reason": "Invalid reason."},
             {"status": "blocked"},
         ):
-            rejected = await dispatch(ToolCall(
-                tool_use_id=str(uuid.uuid4()), tool_name="update_goal", arguments=arguments,
-            ))
-            assert rejected.is_error
-            assert json.loads(rejected.content)["error_class"] == "RetryableToolInputError"
+            await reject(arguments)
         assert await stack.storage.get_goal(SOURCE_KEY) == persisted
         task = await stack.storage.get_agent_task(run.task_id)
         assert task is not None and task.status == AgentTaskStatus.RUNNING

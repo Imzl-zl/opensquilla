@@ -26,7 +26,7 @@ import structlog
 from yoyo import exceptions, get_backend, read_migrations
 from yoyo import migrations as yoyo_migrations
 
-from opensquilla.persistence.migration_compatibility import (
+from opensquilla.migration_compatibility import (
     LEGACY_MIGRATION_ALIASES,
     REGISTRY_FILENAME,
     classify_migration_ledger,

@@ -1191,7 +1191,7 @@ def test_unsupported_goal_lineage_is_not_imported_or_relabelled(
 
 
 def test_home_import_recognizes_only_verified_released_alias(tmp_path: Path) -> None:
-    from opensquilla.persistence.migration_compatibility import LEGACY_MIGRATION_ALIASES
+    from opensquilla.migration_compatibility import LEGACY_MIGRATION_ALIASES
 
     migration_id, (_, expected_hash) = next(iter(LEGACY_MIGRATION_ALIASES.items()))
     source = _build_source_home(tmp_path, applied_ids=(migration_id,))

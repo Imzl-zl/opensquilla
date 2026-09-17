@@ -2767,7 +2767,7 @@ def _migration_dir_candidates() -> list[Path]:
 
 def _known_migration_ids() -> set[str]:
     """Return the migration ids shipped with this binary (yoyo id == file stem)."""
-    from opensquilla.persistence.migration_compatibility import known_migration_ids
+    from opensquilla.migration_compatibility import known_migration_ids
 
     for candidate in _migration_dir_candidates():
         try:
@@ -2781,7 +2781,7 @@ def _known_migration_ids() -> set[str]:
 
 def _read_applied_migration_ledger(db_path: Path) -> dict[str, str | None] | None:
     """Read the yoyo ledger read-only; ``None`` when the db cannot be inspected."""
-    from opensquilla.persistence.migration_compatibility import read_migration_ledger
+    from opensquilla.migration_compatibility import read_migration_ledger
 
     try:
         with tempfile.TemporaryDirectory(prefix="opensquilla-sqlite-inspect-") as temporary:
@@ -4340,7 +4340,7 @@ class OpenSquillaHomeMigrator:
                     "refusing an unverifiable import",
                 )
                 return True
-            from opensquilla.persistence.migration_compatibility import classify_migration_ledger
+            from opensquilla.migration_compatibility import classify_migration_ledger
 
             compatibility = classify_migration_ledger(applied, known)
             if compatibility.code is not None:

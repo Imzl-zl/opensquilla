@@ -2834,12 +2834,31 @@ def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_
     assert "set -euo pipefail" in preflight["run"]
     assert "sys.executable" in preflight["run"]
     assert "opensquilla.__file__" in preflight["run"]
-    assert set(re.findall(r"tests/[a-zA-Z0-9_/.]+\.py", preflight["run"])) == {
+    expected_preflight_files = {
         "tests/test_sandbox/test_trusted_sandbox_execution.py",
         "tests/test_tools/test_approval_unification.py",
         "tests/test_live_multi_provider_matrix.py",
         "tests/test_live_provider_profile_smoke.py",
         "tests/test_live_plan_goal_runtime.py",
     }
+    if job_name in {"ubuntu-full", "windows-full"}:
+        expected_preflight_files.update({
+            "tests/test_ci/test_architecture_import_contracts.py",
+            "tests/test_engine/turn_runner/test_stage_test_boundaries.py",
+            "tests/test_engine/test_runtime_artifacts.py",
+            "tests/test_engine/test_tokenjuice_tool_result_projection.py",
+            "tests/test_tools/test_tool_upgrade_compatibility.py",
+            "tests/test_gateway/test_goal_rpc.py",
+            "tests/test_tools/test_dispatch_legacy_coverage.py",
+            "tests/unit/cli/repl/test_slash_bridge.py",
+        })
+        assert '"${{ matrix.shard }}" == "desktop-installer-contracts"' in preflight["run"]
+        assert '"${regression_args[@]}"' in preflight["run"]
+        assert "-o faulthandler_timeout=60" in preflight["run"]
+    assert set(re.findall(r"tests/[a-zA-Z0-9_/.]+\.py", preflight["run"])) == (
+        expected_preflight_files
+    )
     assert "-vv --tb=short" in preflight["run"]
+    assert "-o faulthandler_timeout=60" in main["run"]
     assert "--showlocals" not in preflight["run"]
+    assert "--showlocals" not in main["run"]

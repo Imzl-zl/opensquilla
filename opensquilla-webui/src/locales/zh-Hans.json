@@ -4028,7 +4028,7 @@
     },
     "planMode": {
       "label": "Plan 模式",
-      "readOnly": "Agent 只调研并生成方案，不修改文件。",
+      "readOnly": "先调查和讨论方案，暂不实施。必要测试和构建仍受常规权限约束。",
       "nextTurn": "将在下一轮生效",
       "updating": "正在更新…",
       "turnOff": "关闭 Plan 模式",

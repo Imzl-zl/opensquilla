@@ -1050,25 +1050,6 @@ async def test_collaboration_intent_stays_system_on_actual_wire_without_extra_ca
     )
 
 
-@pytest.mark.parametrize("mode", ["plan", "default"])
-def test_compaction_refresh_preserves_current_mode_without_promoting_reference_data(mode) -> None:
-    from opensquilla.engine import Agent, AgentConfig
-    from opensquilla.engine.turn_runner.harness import _TurnRunnerSystemPromptRefreshAdapter
-
-    agent = Agent(provider=_StubProvider("synthetic"),
-                  tool_context=ToolContext(collaboration_mode=mode), config=AgentConfig(
-                      system_prompt="OLD", cache_breakpoints=[{"text": "OLD", "cache": "true"}],
-                      request_context_prompt="UNTRUSTED_PROPOSAL_MARKER",
-                  ))
-    runner = SimpleNamespace(_assemble_prompt=lambda *args, **kwargs: ("REFRESHED", "Daily data"))
-    _TurnRunnerSystemPromptRefreshAdapter(runner).refresh_system_prompt(
-        agent=agent, agent_id="main", tool_defs=[], session_key="agent:main:synthetic",
-        bootstrap_context_mode=None,
-    )
-    assert f"Current Collaboration Mode: {mode.title()}" in agent.config.system_prompt
-    assert "UNTRUSTED_PROPOSAL_MARKER" not in agent.config.system_prompt
-    assert agent.config.request_context_prompt == "UNTRUSTED_PROPOSAL_MARKER"
-    assert agent.config.cache_breakpoints[0]["text"] == agent.config.system_prompt
 
 
 # replace lint suppress

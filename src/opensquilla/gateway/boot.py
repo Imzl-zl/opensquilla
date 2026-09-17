@@ -4354,6 +4354,7 @@ async def start_gateway_server(
     task_runtime.set_idle_listener(goal_service.on_runtime_idle)
     task_runtime.set_goal_service(goal_service)
     subscription_manager.set_message_unsubscribe_listener(goal_service.on_subscription_lost)
+    get_registry().set_unregister_listener(goal_service.on_connection_unregistered)
     # Wire task_runtime's short write-lock provider into turn_runner.
     turn_runner.set_session_lock_provider(task_runtime._get_session_lock_for_turn)
     svc.task_runtime = task_runtime

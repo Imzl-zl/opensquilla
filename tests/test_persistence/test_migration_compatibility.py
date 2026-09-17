@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from opensquilla.persistence import migrator
-from opensquilla.persistence.migration_compatibility import (
+from opensquilla.migration_compatibility import (
     LEGACY_MIGRATION_ALIASES,
     classify_migration_ledger,
     frozen_migration_registry,
     known_migration_ids,
 )
+from opensquilla.persistence import migrator
 from opensquilla.recovery.engine import _database_safety_code
 from scripts.freeze_migration_registry import freeze_registry
 

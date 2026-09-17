@@ -11,6 +11,7 @@ import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -53,8 +54,10 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 _AUTOMATIC_GOAL_MESSAGE = (
-    "Continue working toward the active Goal from its durable objective and progress. "
-    "Use the Goal controls when progress or a terminal result can be recorded."
+    "This is a new automatic continuation turn. The previous turn has ended. "
+    "Inspect the current state and make concrete progress on the remaining work toward "
+    "the full active Goal. Use its durable objective and progress as context, and use "
+    "the Goal controls when progress or a terminal result can be recorded."
 )
 
 
@@ -164,6 +167,7 @@ class GoalService:
         # tab/socket from authorizing another automatic turn while allowing an
         # explicitly authenticated replacement connection to reattach.
         self._continuity_grants: dict[str, GoalExecutionLease] = {}
+        self._authority_token_store: tuple[str, Any] | None = None
         self._transition_locks: dict[str, _GoalTransitionLockState] = {}
         self._transition_registry_lock = asyncio.Lock()
         self._kick_tasks: dict[str, asyncio.Task[None]] = {}
@@ -261,6 +265,11 @@ class GoalService:
         continuity_token: str | None = None,
     ) -> GoalExecutionLease:
         self._require_subscription(ctx, goal.session_key)
+        if not self._principal_authority_current(ctx.principal):
+            self._revoke_authority(goal.session_key)
+            raise GoalConflictError(
+                "GOAL_AUTHORITY_UNAVAILABLE", "A current authorized Goal owner is required"
+            )
         source_kind = "cli" if source_kind == "cli" else "web"
         lease = GoalExecutionLease(
             session_id=goal.session_id,
@@ -278,6 +287,56 @@ class GoalService:
         self._leases[goal.session_key] = lease
         self._continuity_grants[goal.session_key] = lease
         return lease
+
+    def _principal_authority_current(self, principal: Any) -> bool:
+        from opensquilla.gateway.scopes import normalize_operator_scopes, operator_scope_satisfies
+
+        if (
+            principal is None
+            or not principal.authenticated
+            or not operator_scope_satisfies("operator.write", principal.scopes)
+        ):
+            return False
+        public_id = str(getattr(principal, "token_public_id", "") or "")
+        if public_id in {"", "desktop", "legacy"}:
+            return True
+        state_dir = str(getattr(self._config, "state_dir", "") or "")
+        if not state_dir:
+            return False
+        try:
+            from opensquilla.gateway.token_store import TokenStore
+
+            if self._authority_token_store is None or self._authority_token_store[0] != state_dir:
+                self._authority_token_store = (
+                    state_dir, TokenStore(Path(state_dir) / "sessions.db")
+                )
+            authorization = self._authority_token_store[1].get_active_authorization(public_id)
+        except Exception:
+            log.warning("goal.authority_lookup_failed", exc_info=True)
+            return False
+        if authorization is None:
+            return False
+        roles, scopes, capabilities = authorization
+        return (
+            principal.role in roles
+            and principal.scopes <= normalize_operator_scopes(scopes)
+            and principal.capabilities <= capabilities
+        )
+
+    def on_connection_unregistered(self, connection: Any) -> None:
+        """Observe final authority synchronously before transport identity disappears."""
+        for key, grant in tuple(self._continuity_grants.items()):
+            if grant.owner_connection_id != connection.conn_id:
+                continue
+            principal = getattr(connection, "principal", None)
+            if (
+                principal is None
+                or _principal_identity(principal) != grant.principal_identity
+                or not self._principal_authority_current(principal)
+                or principal.scopes != grant.principal.scopes
+                or principal.capabilities != grant.principal.capabilities
+            ):
+                self._revoke_authority(key)
 
     def _revoke_authority(self, session_key: str) -> None:
         key = canonicalize_session_key(session_key)
@@ -303,8 +362,24 @@ class GoalService:
         *,
         lease: GoalExecutionLease | None,
         grant: GoalExecutionLease | None,
+        installed: GoalExecutionLease | None,
     ) -> None:
         key = canonicalize_session_key(session_key)
+        if installed is None:
+            # Installation is synchronous: no competing coroutine can own a
+            # newly published grant before a failed install returns. Remove
+            # that partial grant without restoring an already revoked one.
+            if self._continuity_grants.get(key) is not grant:
+                self._revoke_authority(key)
+            return
+        if self._continuity_grants.get(key) is not installed:
+            return
+        # A failed/replayed command may restore prior continuity only while
+        # that credential still grants it; rollback cannot undo revocation.
+        if lease is not None and not self._principal_authority_current(lease.principal):
+            lease = None
+        if grant is not None and not self._principal_authority_current(grant.principal):
+            grant = None
         if lease is None:
             self._leases.pop(key, None)
         else:
@@ -379,16 +454,15 @@ class GoalService:
         ):
             self._revoke_authority(goal.session_key)
             return None
-        from opensquilla.gateway.scopes import operator_scope_satisfies
         from opensquilla.gateway.websocket import get_registry
 
         connection = get_registry().get(lease.owner_connection_id)
         if goal.background and connection is None:
             principal = lease.principal
-            if principal is not None and operator_scope_satisfies(
-                "operator.write", principal.scopes
-            ):
+            if self._principal_authority_current(principal):
                 return lease
+            self._revoke_authority(goal.session_key)
+            return None
         if connection is None:
             self._detach_authority(goal.session_key, expected=lease)
             return None
@@ -403,7 +477,7 @@ class GoalService:
         if (
             principal is None
             or _principal_identity(principal) != lease.principal_identity
-            or not operator_scope_satisfies("operator.write", principal.scopes)
+            or not self._principal_authority_current(principal)
         ):
             # Observed revocation is stronger than transport loss. Otherwise
             # background execution could resurrect the old principal on disconnect.
@@ -800,13 +874,14 @@ class GoalService:
                 async with self._lock(key):
                     previous_lease = self._leases.get(key)
                     previous_grant = self._continuity_grants.get(key)
+                    installed = None
                     try:
                         self._require_execution_available()
                         # Acquire the process-local execution authority before
                         # the durable set. Subscription loss after this point
                         # is serialized by the Goal transition lock; it detaches
                         # future execution but never rewrites durable Goal state.
-                        self._install_lease(
+                        installed = self._install_lease(
                             ctx,
                             goal=goal,
                             source_kind=source_kind,
@@ -828,6 +903,7 @@ class GoalService:
                             key,
                             lease=previous_lease,
                             grant=previous_grant,
+                            installed=installed,
                         )
                         await self._task_runtime.abort_reservation(reservation)
                         raise
@@ -836,6 +912,7 @@ class GoalService:
                             key,
                             lease=previous_lease,
                             grant=previous_grant,
+                            installed=installed,
                         )
                         await self._task_runtime.abort_reservation(reservation)
                         return acceptance
@@ -983,13 +1060,15 @@ class GoalService:
                 self._require_subscription(ctx, key)
                 previous_lease = self._leases.get(key)
                 previous_grant = self._continuity_grants.get(key)
-                self._install_lease(ctx, goal=goal, source_kind=source_kind)
+                installed = self._install_lease(ctx, goal=goal, source_kind=source_kind)
                 try:
                     created = await self._storage.create_goal_for_running_task(
                         goal, task_id=task_id
                     )
                 except BaseException:
-                    self._restore_authority(key, lease=previous_lease, grant=previous_grant)
+                    self._restore_authority(
+                        key, lease=previous_lease, grant=previous_grant, installed=installed
+                    )
                     raise
                 context = goal_turn_context(
                     created, task_id=task_id, automatic=False
@@ -1053,7 +1132,7 @@ class GoalService:
                 )
                 previous_lease = self._leases.get(key)
                 previous_grant = self._continuity_grants.get(key)
-                self._install_lease(ctx, goal=goal, source_kind=source_kind)
+                installed = self._install_lease(ctx, goal=goal, source_kind=source_kind)
                 try:
                     result = await self._storage.edit_goal(
                         session_key=key,
@@ -1068,7 +1147,9 @@ class GoalService:
                         pause_requested=pause,
                     )
                 except BaseException:
-                    self._restore_authority(key, lease=previous_lease, grant=previous_grant)
+                    self._restore_authority(
+                        key, lease=previous_lease, grant=previous_grant, installed=installed
+                    )
                     raise
                 assert result.goal is not None
                 context = goal_turn_context(
@@ -1214,10 +1295,11 @@ class GoalService:
             installing_authority = reactivating or changing_execution_policy
             previous_lease = self._leases.get(key)
             previous_grant = self._continuity_grants.get(key)
+            installed = None
             try:
                 if installing_authority:
                     self._require_execution_available()
-                    self._install_lease(
+                    installed = self._install_lease(
                         ctx,
                         goal=goal,
                         source_kind=source_kind,
@@ -1236,6 +1318,7 @@ class GoalService:
                         key,
                         lease=previous_lease,
                         grant=previous_grant,
+                        installed=installed,
                     )
                 raise
             if result.replayed and installing_authority:
@@ -1243,6 +1326,7 @@ class GoalService:
                     key,
                     lease=previous_lease,
                     grant=previous_grant,
+                    installed=installed,
                 )
             elif not result.replayed and result.goal is not None:
                 await self._emit_goal(
@@ -1352,8 +1436,9 @@ class GoalService:
                 )
                 previous_lease = self._leases.get(key)
                 previous_grant = self._continuity_grants.get(key)
+                installed = None
                 try:
-                    self._install_lease(
+                    installed = self._install_lease(
                         ctx,
                         goal=goal,
                         source_kind=source_kind,
@@ -1368,6 +1453,7 @@ class GoalService:
                         key,
                         lease=previous_lease,
                         grant=previous_grant,
+                        installed=installed,
                     )
                     raise
                 if result.replayed:
@@ -1375,6 +1461,7 @@ class GoalService:
                         key,
                         lease=previous_lease,
                         grant=previous_grant,
+                        installed=installed,
                     )
                 elif result.goal is not None:
                     await self._emit_goal(
@@ -2629,6 +2716,9 @@ class GoalService:
         if self._closed:
             return
         self._closed = True
+        from opensquilla.gateway.websocket import get_registry
+
+        get_registry().clear_unregister_listener(self.on_connection_unregistered)
         tasks = list(self._kick_tasks.values())
         self._kick_tasks.clear()
         self._kick_dirty.clear()

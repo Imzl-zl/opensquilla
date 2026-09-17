@@ -4029,7 +4029,7 @@
     },
     "planMode": {
       "label": "Plan mode",
-      "readOnly": "The agent researches and proposes a plan without changing files.",
+      "readOnly": "Research and discuss before implementation. Tests and builds follow normal permissions.",
       "nextTurn": "Applies to the next turn",
       "updating": "Updating…",
       "turnOff": "Turn plan mode off",

@@ -41,6 +41,21 @@ def test_named_token_revoke_prevents_future_verification(tmp_path) -> None:
     assert store.verify(issued.token) is None
 
 
+def test_active_token_authorization_uses_current_record_without_loading_secret(tmp_path) -> None:
+    store = TokenStore(tmp_path / "sessions.db")
+    issued = store.create(
+        name="Synthetic Goal operator", roles={"operator"},
+        scopes={"operator.read", "operator.write"}, capabilities={"task.submit"},
+    )
+    assert store.get_active_authorization(issued.record.public_id) == (
+        frozenset({"operator"}), frozenset({"operator.read", "operator.write"}),
+        frozenset({"task.submit"}),
+    )
+    assert store.get_active_authorization("unknown-public-id") is None
+    store.revoke(issued.record.public_id)
+    assert store.get_active_authorization(issued.record.public_id) is None
+
+
 def test_named_token_list_never_returns_secret_material(tmp_path) -> None:
     store = TokenStore(tmp_path / "sessions.db")
     issued = store.create(

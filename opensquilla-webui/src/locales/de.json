@@ -3944,7 +3944,7 @@
     },
     "planMode": {
       "label": "Planmodus",
-      "readOnly": "Der Agent recherchiert und erstellt einen Plan, ohne Dateien zu ändern.",
+      "readOnly": "Zuerst recherchieren und den Plan besprechen, noch nicht umsetzen. Tests und Builds unterliegen den üblichen Berechtigungen.",
       "nextTurn": "Gilt ab dem nächsten Durchgang",
       "updating": "Wird aktualisiert…",
       "turnOff": "Planmodus ausschalten",

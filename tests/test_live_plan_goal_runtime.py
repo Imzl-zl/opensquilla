@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, closing
@@ -992,12 +993,15 @@ async def test_restart_accepts_null_resume_task_until_idle_admission(tmp_path, m
     assert requested == ["old", "new"]
 
 
+@pytest.mark.parametrize("clock_resolution", [None, 0.015625], ids=["native", "windows-coarse"])
 async def test_stop_total_deadline_bounds_dripping_http_before_terminal_cleanup(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, clock_resolution,
 ):
     # This is a real local HTTP stream, not a provider or a mocked live result.
     from opensquilla.gateway import boot  # noqa: F401 - warm production import before deadline
 
+    if clock_resolution is not None:
+        monkeypatch.setattr(asyncio.get_running_loop(), "_clock_resolution", clock_resolution)
     response_finished = asyncio.Event()
     request_started = asyncio.Event()
     handlers = set()
@@ -1014,7 +1018,12 @@ async def test_stop_total_deadline_bounds_dripping_http_before_terminal_cleanup(
             request_started.set()
             writer.write(b"HTTP/1.1 202 Accepted\r\nTransfer-Encoding: chunked\r\n\r\n")
             await writer.drain()
-            for _ in range(100):
+            # asyncio may wake a timer up to one clock-resolution interval
+            # early. On Windows 100 sleeps of 10ms can finish within 200ms
+            # while socket callbacks keep the loop ready. Measure elapsed
+            # monotonic time instead of treating sleep count as a duration.
+            finish_at = time.monotonic() + 1.0
+            while time.monotonic() < finish_at:
                 await asyncio.sleep(0.01)
                 writer.write(b"1\r\nx\r\n")
                 await writer.drain()

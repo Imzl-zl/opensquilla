@@ -563,7 +563,7 @@ def _migration_dir_candidates() -> tuple[Path, ...]:
 
 
 def _known_migration_ids() -> set[str]:
-    from opensquilla.persistence.migration_compatibility import known_migration_ids
+    from opensquilla.migration_compatibility import known_migration_ids
 
     for directory in _migration_dir_candidates():
         try:
@@ -734,7 +734,7 @@ def _bundle_names(path: Path) -> tuple[Path, ...]:
 
 def _database_safety_code(path: Path) -> str | None:
     """Validate a stable private SQLite snapshot without opening the source."""
-    from opensquilla.persistence.migration_compatibility import (
+    from opensquilla.migration_compatibility import (
         classify_migration_ledger,
         read_migration_ledger,
     )

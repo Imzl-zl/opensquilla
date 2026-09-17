@@ -3944,7 +3944,7 @@
     },
     "planMode": {
       "label": "Modo de plan",
-      "readOnly": "El agente investiga y propone un plan sin modificar archivos.",
+      "readOnly": "Investigar y discutir el plan antes de implementarlo. Las pruebas y compilaciones siguen los permisos habituales.",
       "nextTurn": "Se aplica al siguiente turno",
       "updating": "Actualizando…",
       "turnOff": "Desactivar modo de plan",
