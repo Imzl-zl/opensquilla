@@ -53,10 +53,17 @@
             @keydown.meta.enter.prevent="submitEdit"
             @keydown.ctrl.enter.prevent="submitEdit"
           />
+          <GoalExecutionSettings
+            v-model="editSettings"
+            :disabled="busy || editSubmitting"
+            :usage-coverage="goal.usageCoverage ?? 'partial_history'"
+            :existing-budget="goal.tokenBudget"
+            :usage-accounting-started-at-ms="goal.usageAccountingStartedAtMs"
+          />
           <button
             type="submit"
             class="goal-ribbon__edit-button"
-            :disabled="busy || editSubmitting || !editText.trim()"
+            :disabled="busy || editSubmitting || !editText.trim() || !goalExecutionOptionsValid(editSettings)"
           >
             {{ t('chat.goal.saveEdit') }}
           </button>
@@ -153,7 +160,9 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
-import type { GoalSnapshot } from '@/composables/chat/useChatGoals'
+import { goalExecutionOptionsValid, type GoalSnapshot } from '@/composables/chat/useChatGoals'
+import type { GoalExecutionOptions } from '@/modules/goalCenter'
+import GoalExecutionSettings from './GoalExecutionSettings.vue'
 import ExecutionProgress from './ExecutionProgress.vue'
 import { useDocumentEvent } from '@/composables/useDocumentEvent'
 
@@ -167,7 +176,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  edit: [objective: string, settle: (accepted: boolean) => void]
+  edit: [objective: string, settle: (accepted: boolean) => void, options?: GoalExecutionOptions]
   pause: []
   resume: []
   takeover: []
@@ -179,6 +188,7 @@ const editing = ref(false)
 const editSubmitting = ref(false)
 const objectiveExpanded = ref(false)
 const editText = ref(props.goal.objective)
+const editSettings = ref<GoalExecutionOptions>({})
 const editInput = ref<HTMLTextAreaElement | null>(null)
 const actionsRef = ref<HTMLElement | null>(null)
 const menuTrigger = ref<HTMLButtonElement | null>(null)
@@ -254,6 +264,10 @@ const pauseReasonText = computed(() => {
   switch (props.goal.pauseReason) {
     case 'user':
     case 'user_paused': return t('chat.goal.pausedByUser')
+    case 'token_budget': return t('chat.goal.tokenBudgetReached')
+    case 'usage_unknown': return t(props.goal.usageCoverage === 'complete'
+      ? 'chat.goal.usageReceiptsRecovered' : 'chat.goal.pendingUsageReceipts')
+    case 'empty_continuations': return t('chat.goal.emptyContinuations')
     case 'turn_limit': return t('chat.goal.turnLimitReached')
     case 'runtime_limit': return t('chat.goal.runtimeLimitReached')
     case 'process_restart': return t('chat.goal.pausedAfterRestart')
@@ -293,7 +307,13 @@ const metaText = computed(() => {
   if (props.goal.turnsSettled > 0) {
     parts.push(t('chat.goal.turns', { turns: props.goal.turnsSettled }))
   }
-  if (props.goal.usage.totalTokens > 0) {
+  if (props.goal.executionPolicy === 'background') parts.push(t('chat.goal.backgroundActive'))
+  if (props.goal.tokenBudget != null) {
+    parts.push(t('chat.goal.tokenBudgetUsage', {
+      used: (props.goal.budgetTokensUsed ?? 0).toLocaleString(),
+      budget: props.goal.tokenBudget.toLocaleString(),
+    }))
+  } else if (props.goal.usage.totalTokens > 0) {
     parts.push(t('chat.goal.tokens', {
       tokens: props.goal.usage.totalTokens.toLocaleString(),
     }))
@@ -301,9 +321,14 @@ const metaText = computed(() => {
   return parts.join(' · ')
 })
 
+
 function beginEdit() {
   closeMenu()
   editText.value = props.goal.objective
+  editSettings.value = {
+    executionPolicy: props.goal.executionPolicy ?? 'foreground',
+    ...(props.goal.usageCoverage === 'complete' ? { tokenBudget: props.goal.tokenBudget ?? null } : {}),
+  }
   editing.value = true
   void nextTick(() => {
     resizeEditInput()
@@ -330,7 +355,7 @@ function cancelEdit() {
 }
 
 function submitEdit() {
-  if (editSubmitting.value) return
+  if (editSubmitting.value || !goalExecutionOptionsValid(editSettings.value)) return
   const objective = editText.value.trim()
   if (!objective) return
   editSubmitting.value = true
@@ -342,7 +367,7 @@ function submitEdit() {
       return
     }
     void nextTick(() => editInput.value?.focus())
-  })
+  }, { ...editSettings.value })
 }
 
 function invokeLifecycleAction() {
@@ -653,10 +678,14 @@ watch(() => [props.goal.goalId, props.goal.stateRevision, props.busy], () => {
 }
 .goal-ribbon__edit {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   flex: 1 1 auto;
   min-width: 0;
+}
+.goal-ribbon__edit .goal-settings {
+  flex: 1 0 100%;
 }
 .goal-ribbon__edit-input {
   flex: 1 1 auto;

@@ -203,6 +203,7 @@ async def _open_goal_rpc_stack(
         config=gateway_config,
     )
     runtime.set_goal_service(service)
+    get_registry().set_unregister_listener(service.on_connection_unregistered)
     if wire_lifecycle:
         runtime.set_lifecycle_listener(service.on_task_lifecycle)
         runtime.set_activation_listener(service.on_task_activation)
@@ -1979,7 +1980,7 @@ async def test_detached_goal_reattaches_with_token_and_supports_explicit_takeove
             scopes=frozenset({"operator.admin"}),
             is_owner=True,
             authenticated=True,
-            token_public_id="explicit-goal-takeover",
+            token_public_id="desktop",
         )
         takeover_id = f"goal-takeover-{uuid.uuid4()}"
         takeover_context = RpcContext(
@@ -5232,11 +5233,233 @@ async def test_goal_reattach_contract_maps_invalid_result_without_running_twice(
     assert error.value.message == "goals.reattach response violated its v4 contract"
 
 
+@pytest.mark.parametrize("open_local_owner", [False, True])
+async def test_background_goal_continues_after_disconnect_but_shutdown_pauses(
+    tmp_path: Path, open_local_owner: bool,
+) -> None:
+    started = asyncio.Event()
+    release_first = asyncio.Event()
+    continued = asyncio.Event()
+    release_second = asyncio.Event()
+    runs: list[TaskRun] = []
+
+    async def handler(run: TaskRun) -> None:
+        runs.append(run)
+        if len(runs) == 1:
+            started.set()
+            await release_first.wait()
+        elif len(runs) == 2:
+            continued.set()
+            await release_second.wait()
+        else:
+            raise AssertionError("Shutdown must not admit another automatic task")
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "background-goal.sqlite",
+        handler=handler,
+        wire_lifecycle=True,
+    ) as stack:
+        if open_local_owner:
+            from opensquilla.gateway.auth import resolve_auth
+
+            principal = resolve_auth(
+                stack.context.config, auth_params={}, role_claim="operator", peer_ip="127.0.0.1",
+            )
+            assert principal is not None and principal.is_owner
+            assert principal.authenticated is False and principal.auth_state == "authenticated"
+            stack.context.principal = principal
+            get_registry().get(stack.context.conn_id).principal = principal
+        created = await _handle_goals_set(
+            {**_set_params(), "executionPolicy": "background"},
+            stack.context,
+        )
+        await asyncio.wait_for(started.wait(), 2)
+        assert created["goal"]["executionPolicy"] == "background"
+        stack.subscriptions.unsubscribe_messages(stack.context.conn_id, SOURCE_KEY)
+        get_registry().unregister(stack.context.conn_id)
+        await stack.service.on_subscription_lost(stack.context.conn_id, SOURCE_KEY)
+        release_first.set()
+        await asyncio.wait_for(continued.wait(), 2)
+        status = await stack.service.status(SOURCE_KEY)
+        assert status["goal"]["status"] == "active"
+        assert status["goal"]["continuationDeferredReason"] is None
+        await stack.service.prepare_shutdown()
+        paused = await stack.storage.get_goal(SOURCE_KEY)
+        assert paused is not None
+        assert (paused.status, paused.pause_reason) == ("paused", "process_restart")
+        assert paused.background is True
+        release_second.set()
+        await stack.runtime.wait(runs[1].task_id, timeout=2)
+        assert len(runs) == 2
 
 
+@pytest.mark.parametrize("invalid_principal", [None, replace(_PRINCIPAL, scopes=frozenset())])
+async def test_background_goal_cannot_restore_invalid_authority_after_disconnect(
+    tmp_path: Path,
+    invalid_principal: Principal | None,
+) -> None:
+    async with _open_goal_rpc_stack(tmp_path / "background-revoked.sqlite") as stack:
+        await _handle_goals_set(
+            {**_set_params(), "executionPolicy": "background"}, stack.context,
+        )
+        goal = await stack.storage.get_goal(SOURCE_KEY)
+        assert goal is not None
+        assert stack.service._lease_for(goal) is not None
+        connection = get_registry().get(stack.context.conn_id)
+        assert connection is not None
+        connection.principal = invalid_principal
+        assert stack.service._lease_for(goal) is None
+        get_registry().unregister(stack.context.conn_id)
+        assert stack.service._lease_for(goal) is None
+        assert SOURCE_KEY not in stack.service._continuity_grants
 
 
-async def test_natural_create_attaches_to_ordinary_running_rpc_task(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "revocation", ["named_token", "named_token_active", "missing_principal", "removed_write_scope"]
+)
+async def test_background_goal_rechecks_revoked_authority_before_next_admission(
+    tmp_path: Path, revocation: str,
+) -> None:
+    from opensquilla.gateway.auth import resolve_auth
+    from opensquilla.gateway.rpc_sandbox import _handle_sandbox_token_revoke
+    from opensquilla.gateway.token_store import TokenStore
+
+    entered, finish = asyncio.Event(), asyncio.Event()
+    finish_summary = asyncio.Event()
+    runs: list[TaskRun] = []
+
+    async def handler(run: TaskRun) -> None:
+        runs.append(run)
+        if len(runs) == 1:
+            entered.set()
+            await finish.wait()
+        else:
+            await stack.service.commit_model_status(
+                run.goal_context, status="complete", reason=None,
+            )
+            # Goal completion is durable before this ordinary task finishes.
+            # Keep that valid interval open independently of platform timing.
+            await finish_summary.wait()
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "background-authority.sqlite", handler=handler, wire_lifecycle=True,
+    ) as stack:
+        connection = get_registry().get(stack.context.conn_id)
+        assert connection is not None
+        issued = None
+        if revocation.startswith("named_token"):
+            state = tmp_path / "auth"
+            stack.context.config.state_dir = str(state)
+            stack.context.config.auth.mode = "token"
+            issued = TokenStore(state / "sessions.db").create(
+                name="Synthetic background operator", roles={"operator"},
+                scopes={"operator.read", "operator.write"},
+                capabilities={"host.execute", "task.read", "task.submit"},
+            )
+            principal = resolve_auth(
+                stack.context.config, auth_params={"token": issued.token},
+                role_claim="operator", peer_ip="192.168.1.7",
+            )
+            assert principal is not None and principal.authenticated
+            stack.context.principal = connection.principal = principal
+        created = await _handle_goals_set(
+            {**_set_params(), "executionPolicy": "background"}, stack.context,
+        )
+        await asyncio.wait_for(entered.wait(), 2)
+        if revocation == "missing_principal":
+            connection.principal = None
+        elif revocation == "removed_write_scope":
+            connection.principal = replace(connection.principal, scopes=frozenset())
+        # No Goal status/lease read may observe the changed connection before
+        # unregister. The normal disconnect boundary must preserve revocation.
+        get_registry().unregister(stack.context.conn_id)
+        stack.subscriptions.remove_connection(stack.context.conn_id)
+        if issued is not None and revocation == "named_token":
+            owner = replace(stack.context, principal=_PRINCIPAL)
+            revoked = await _handle_sandbox_token_revoke(
+                {"publicId": issued.record.public_id}, owner,
+            )
+            assert revoked["revoked"] is True
+            # A request already carrying the old principal must not recreate
+            # the grant through resume rollback or a tokenless reattachment.
+            get_registry().register(connection)
+            stack.subscriptions.subscribe_messages(stack.context.conn_id, SOURCE_KEY)
+            goal = await stack.storage.get_goal(SOURCE_KEY)
+            assert goal is not None
+            with pytest.raises(RpcHandlerError, match="authorized Goal owner"):
+                await _handle_goals_resume(
+                    _mutation_params(
+                        {"goalId": goal.goal_id, "stateRevision": goal.state_revision},
+                        request_index=2,
+                    ), stack.context,
+                )
+            assert SOURCE_KEY not in stack.service._continuity_grants
+            with pytest.raises(RpcHandlerError, match="authorized Goal owner"):
+                await _handle_goals_reattach(
+                    _reattach_params(created, takeover=True), stack.context,
+                )
+            assert SOURCE_KEY not in stack.service._continuity_grants
+            get_registry().unregister(stack.context.conn_id)
+            stack.subscriptions.remove_connection(stack.context.conn_id)
+        finish.set()
+        await stack.runtime.wait(created["taskId"], timeout=3)
+        await stack.service._kick_if_idle(SOURCE_KEY)
+        if stack.service._kick_tasks:
+            await asyncio.gather(*list(stack.service._kick_tasks.values()))
+        if revocation == "named_token_active":
+            await _wait_for_goal(stack.storage, lambda goal: goal.status == "complete")
+            task = await stack.storage.get_agent_task(runs[1].task_id)
+            assert task is not None and task.status == AgentTaskStatus.RUNNING
+            # Terminal Goal status prevents further admission even while the
+            # owning task is still performing its ordinary final response.
+            await stack.service._kick_if_idle(SOURCE_KEY)
+            assert len(runs) == 2
+            finish_summary.set()
+            settled = await stack.runtime.wait(runs[1].task_id, timeout=3)
+            assert settled.status == AgentTaskStatus.SUCCEEDED
+        expected_runs = 2 if revocation == "named_token_active" else 1
+        assert await _table_count(stack.storage, "agent_tasks") == expected_runs
+        assert len(runs) == expected_runs
+        assert SOURCE_KEY not in stack.service._continuity_grants
+
+
+@pytest.mark.parametrize("outcome", ["failure", "replay"])
+async def test_goal_authority_rollback_cannot_restore_disconnected_downgraded_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str,
+) -> None:
+    async with _open_goal_rpc_stack(tmp_path / "authority-rollback.sqlite") as stack:
+        created = await _handle_goals_set(
+            {**_set_params(), "executionPolicy": "background"}, stack.context,
+        )
+        connection = get_registry().get(stack.context.conn_id)
+        assert connection is not None
+
+        async def revoked_during_storage(**_kwargs):
+            connection.principal = replace(connection.principal, scopes=frozenset())
+            get_registry().unregister(stack.context.conn_id)
+            assert SOURCE_KEY not in stack.service._continuity_grants
+            if outcome == "failure":
+                raise RuntimeError("Synthetic durable write failure")
+            return SimpleNamespace(replayed=True, response=created)
+
+        monkeypatch.setattr(stack.storage, "resume_goal", revoked_during_storage)
+        if outcome == "failure":
+            with pytest.raises(RuntimeError, match="Synthetic durable write failure"):
+                await _handle_goals_resume(
+                    _mutation_params(created["goal"], request_index=2), stack.context,
+                )
+        else:
+            await _handle_goals_resume(
+                _mutation_params(created["goal"], request_index=2), stack.context,
+            )
+        assert SOURCE_KEY not in stack.service._leases
+        assert SOURCE_KEY not in stack.service._continuity_grants
+
+
+@pytest.mark.parametrize("open_local_owner", [False, True])
+async def test_natural_create_attaches_to_ordinary_running_rpc_task(
+    tmp_path: Path, open_local_owner: bool,
+) -> None:
     created_goals: list[dict[str, Any]] = []
     runtime_contexts: list[dict[str, Any]] = []
 
@@ -5262,6 +5485,16 @@ async def test_natural_create_attaches_to_ordinary_running_rpc_task(tmp_path: Pa
         handler=handler,
         wire_lifecycle=True,
     ) as stack:
+        if open_local_owner:
+            from opensquilla.gateway.auth import resolve_auth
+
+            principal = resolve_auth(
+                stack.context.config, auth_params={}, role_claim="operator", peer_ip="127.0.0.1",
+            )
+            assert principal is not None and principal.is_owner
+            assert principal.authenticated is False and principal.auth_state == "authenticated"
+            stack.context.principal = principal
+            get_registry().get(stack.context.conn_id).principal = principal
         accepted = await _handle_sessions_send_contract(
             {
                 "key": SOURCE_KEY,
@@ -5285,10 +5518,96 @@ async def test_natural_create_attaches_to_ordinary_running_rpc_task(tmp_path: Pa
         assert goal.turns_started == goal.turns_settled == 1
 
 
+async def test_background_opt_in_requires_subscription_before_durable_edit(tmp_path: Path) -> None:
+    async with _open_goal_rpc_stack(tmp_path / "goal-background-authority.sqlite") as stack:
+        created = await _handle_goals_set(_set_params(), stack.context)
+        await stack.runtime.wait(created["taskId"], timeout=2)
+        stack.subscriptions.unsubscribe_messages(stack.context.conn_id, SOURCE_KEY)
+        with pytest.raises(RpcHandlerError) as exc:
+            await _handle_goals_edit(
+                {
+                    **_mutation_params(created["goal"], request_index=2),
+                    "objective": created["goal"]["objective"],
+                    "executionPolicy": "background",
+                },
+                stack.context,
+            )
+        assert exc.value.code == "EXECUTION_LEASE_REQUIRED"
+        goal = await stack.storage.get_goal(SOURCE_KEY)
+        assert goal is not None and goal.background is False
+        assert goal.state_revision == created["goal"]["stateRevision"]
 
 
+async def test_three_empty_automatic_turns_pause_without_counting_user_turn(tmp_path: Path) -> None:
+    runs: list[TaskRun] = []
+
+    async def handler(run: TaskRun) -> None:
+        runs.append(run)
+        task = await stack.storage.get_agent_task(run.task_id)
+        assert task is not None
+        details = dict(task.details)
+        details["activity_snapshot"] = {
+            "version": 2,
+            "task_id": run.task_id,
+            "turn_id": run.task_id,
+            "complete": True,
+            "entries": [
+                {
+                    "type": "phase",
+                    "id": "thinking",
+                    "order": 1,
+                    "kind": "state",
+                    "phase": "thinking",
+                    "at": 1,
+                    "ended_at": 2,
+                },
+            ],
+        }
+        await stack.storage.update_agent_task(run.task_id, details=details)
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "empty-continuations.sqlite",
+        handler=handler,
+        wire_lifecycle=True,
+    ) as stack:
+        await _handle_goals_set(_set_params(), stack.context)
+        goal = await _wait_for_goal(
+            stack.storage,
+            lambda value: value.status == "paused" and value.active_task_id is None,
+        )
+        assert goal.pause_reason == "empty_continuations"
+        assert len(runs) == 4
+        assert [run.goal_context["automatic"] for run in runs] == [False, True, True, True]
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"type": "segment", "segment_type": "text", "text_utf16_length": 1},
+        {"type": "segment", "segment_type": "tool", "name": "wait_agent"},
+        {"type": "interrupt", "interrupt_type": "approval"},
+        {"type": "reasoning"},
+        {"type": "phase", "phase": "retrying"},
+    ],
+)
+def test_goal_empty_guard_excludes_useful_activity_and_waits(entry: dict[str, Any]) -> None:
+    context = GoalTurnContext(
+        session_id="synthetic-session",
+        epoch=0,
+        goal_id="synthetic-goal",
+        objective_revision=1,
+        objective_snapshot="Do synthetic work.",
+        task_id="synthetic-task",
+        continuation_seq=1,
+        automatic=True,
+    )
+    task = SimpleNamespace(
+        status=AgentTaskStatus.SUCCEEDED,
+        details={"activity_snapshot": {"version": 2, "complete": True, "entries": [entry]}},
+    )
+    assert GoalService._empty_automatic_turn(task, context) is False
+    task.details = {}
+    assert GoalService._empty_automatic_turn(task, context) is False
 
 
 async def test_natural_resume_and_edit_reuse_current_ordinary_task(tmp_path: Path) -> None:
@@ -5463,6 +5782,48 @@ async def test_natural_dispatch_edits_and_pauses_atomically_in_current_task(
         assert await _table_count(stack.storage, "transcript_entries") == expected_count
 
 
+async def test_owned_background_turn_dispatch_can_pause_after_disconnect(tmp_path: Path) -> None:
+    from opensquilla.engine.types import ToolCall
+    from opensquilla.tools.dispatch import build_tool_handler
+    from opensquilla.tools.types import CallerKind, ToolContext
+
+    paused: list[dict[str, Any]] = []
+
+    async def handler(run: TaskRun) -> None:
+        connection_id = stack.context.conn_id
+        stack.subscriptions.unsubscribe_messages(connection_id, SOURCE_KEY)
+        get_registry().unregister(connection_id)
+        ctx = ToolContext(
+            caller_kind=CallerKind.WEB, run_mode="full", is_owner=True,
+            session_key=SOURCE_KEY, session_id=run.envelope.session_id,
+            session_epoch=run.envelope.session_epoch, task_id=run.task_id,
+            workspace_dir=str(tmp_path / "workspace"), goal_service=stack.service,
+            goal_context=run.goal_context, allowed_tools={"update_goal"},
+        )
+        result = await build_tool_handler(get_default_registry(), ctx)(ToolCall(
+            tool_use_id="pause-disconnected", tool_name="update_goal",
+            arguments={"status": "paused"},
+        ))
+        assert not result.is_error, result.content
+        snapshot = json.loads(result.content)["goal"]
+        assert snapshot["status"] == "paused" and snapshot["activeTaskId"] == run.task_id
+        paused.append(snapshot)
+        task = await stack.storage.get_agent_task(run.task_id)
+        assert task is not None and task.status == AgentTaskStatus.RUNNING
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "background-disconnected-pause.sqlite", handler=handler, wire_lifecycle=True,
+    ) as stack:
+        sent = await _handle_goals_set(
+            {**_set_params(), "executionPolicy": "background"}, stack.context,
+        )
+        task = await stack.runtime.wait(sent["taskId"], timeout=3)
+        assert task.status == AgentTaskStatus.SUCCEEDED
+        goal = await _wait_for_goal(
+            stack.storage, lambda goal: goal.status == "paused" and goal.active_task_id is None,
+        )
+        assert goal.pause_reason == "user" and len(paused) == 1
+        assert await _table_count(stack.storage, "agent_tasks") == 1
 
 
 async def test_queued_gateway_child_and_grandchild_usage_stays_with_root_goal(

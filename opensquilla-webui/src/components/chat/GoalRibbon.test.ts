@@ -87,6 +87,40 @@ afterEach(() => {
 })
 
 describe('GoalRibbon', () => {
+  it('explains missing usage receipts and disables budget edits until accounting is complete', async () => {
+    const host = mountRibbon({ goal: goal({ status: 'paused', usageCoverage: 'partial_usage', pauseReason: 'usage_unknown' }) })
+    expect(host.textContent).toContain('Waiting for usage receipts')
+    await openActions(host)
+    Array.from(host.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Edit goal')?.click()
+    await nextTick()
+    expect(host.querySelector<HTMLInputElement>('input[type="number"]')?.disabled).toBe(true)
+  })
+
+  it('allows removing an existing budget while usage receipts are incomplete', async () => {
+    const onEdit = vi.fn()
+    const host = mountRibbon({ goal: goal({ usageCoverage: 'partial_usage', tokenBudget: 8000 }), onEdit })
+    await openActions(host)
+    host.querySelector<HTMLButtonElement>('[role="menuitem"]')?.click()
+    await nextTick()
+    Array.from(host.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Remove token budget')?.click()
+    await nextTick()
+    host.querySelector<HTMLButtonElement>('button[type="submit"]')?.click()
+    expect(onEdit.mock.calls[0]?.[2]).toEqual({ tokenBudget: null, executionPolicy: 'foreground' })
+  })
+
+  it('offers manual resume after late receipts complete the accounting', () => {
+    const host = mountRibbon({ goal: goal({ status: 'paused', usageCoverage: 'complete', pauseReason: 'usage_unknown' }) })
+    expect(host.textContent).toContain('Usage receipts are complete. Resume the Goal when ready.')
+    expect(host.textContent).not.toContain('Waiting for usage receipts')
+    expect(host.querySelector('[data-action="resume"]')).not.toBeNull()
+  })
+
+  it('shows why repeated empty automatic turns paused the Goal', () => {
+    const host = mountRibbon({ goal: goal({ status: 'paused', pauseReason: 'empty_continuations' }) })
+    expect(host.querySelector('.goal-ribbon__meta')?.textContent).toContain('Paused after repeated turns with no output or tool activity')
+    expect(host.querySelector('[data-action="resume"]')).not.toBeNull()
+  })
+
   it('shows Goal progress, accounting, and Plan deferral', () => {
     const host = mountRibbon({ planModeActive: true })
 
@@ -256,6 +290,43 @@ describe('GoalRibbon', () => {
     continueButton?.click()
     expect(onTakeover).toHaveBeenCalledOnce()
     expect(host.textContent).not.toContain('Goal paused')
+  })
+
+  it('edits budget and execution policy through the same goal mutation', async () => {
+    const onEdit = vi.fn((_objective: string, settle: (accepted: boolean) => void, _options?: import('@/modules/goalCenter').GoalExecutionOptions) => settle(true))
+    const host = mountRibbon({ goal: goal({ usageCoverage: 'complete', tokenBudget: 5000, budgetTokensUsed: 1200 }), onEdit })
+    expect(host.textContent).toContain('1,200 / 5,000 tokens')
+    await openActions(host)
+    host.querySelector<HTMLButtonElement>('[role="menuitem"]')?.click()
+    await nextTick()
+    const budget = host.querySelector<HTMLInputElement>('input[type="number"]')!
+    expect(budget.value).toBe('5000')
+    budget.value = '9000'
+    budget.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    const policy = host.querySelector<HTMLSelectElement>('select')!
+    policy.value = 'background'
+    policy.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+    host.querySelector<HTMLButtonElement>('button[type="submit"]')?.click()
+    expect(onEdit.mock.calls[0]?.[2]).toEqual({ tokenBudget: 9000, executionPolicy: 'background' })
+  })
+
+  it('keeps the token budget unavailable for incomplete historic usage while allowing background execution', async () => {
+    const host = mountRibbon({ goal: goal({ usageCoverage: 'partial_history', usageAccountingStartedAtMs: 1800000000000 }) })
+    await openActions(host)
+    host.querySelector<HTMLButtonElement>('[role="menuitem"]')?.click()
+    await nextTick()
+    expect(host.querySelector<HTMLInputElement>('input[type="number"]')?.disabled).toBe(true)
+    expect(host.querySelector<HTMLSelectElement>('select')?.disabled).toBe(false)
+    expect(host.textContent).toContain('Earlier usage is incomplete')
+    expect(host.textContent).toContain('Usage accounting started at')
+  })
+
+  it('explains token-budget pauses before usage and background metadata', () => {
+    const host = mountRibbon({ goal: goal({ status: 'paused', pauseReason: 'token_budget', executionPolicy: 'background' }) })
+    expect(host.querySelector('.goal-ribbon__meta')?.textContent).toContain('Token budget reached')
+    expect(host.querySelector('.goal-ribbon__meta')?.textContent).toContain('Background')
   })
 
   it('edits the objective with a labeled multiline field', async () => {

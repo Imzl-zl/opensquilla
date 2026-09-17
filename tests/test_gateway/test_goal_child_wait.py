@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -16,13 +17,23 @@ from opensquilla.gateway.rpc_goals import (
     _handle_goals_set,
 )
 from opensquilla.gateway.task_runtime import TaskRun
+from opensquilla.gateway.websocket import get_registry
 from opensquilla.session.goals import GoalTurnContext
 from opensquilla.session.usage_ledger import UsageEventCompletion, UsageEventStart
-from tests.test_gateway.test_goal_rpc import SOURCE_KEY, _open_goal_rpc_stack, _set_params
+from tests.test_gateway.test_goal_rpc import (
+    SOURCE_KEY,
+    _goal_connection,
+    _mutation_params,
+    _open_goal_rpc_stack,
+    _set_params,
+    _table_count,
+)
 
 
 @asynccontextmanager
-async def _child_group_stack(tmp_path, monkeypatch, *, record_usage=False):
+async def _child_group_stack(
+    tmp_path, monkeypatch, *, record_usage=False, execution_policy="foreground",
+):
     parent_started = asyncio.Event()
     release_parent = asyncio.Event()
     synthesis_started = asyncio.Event()
@@ -113,7 +124,9 @@ async def _child_group_stack(tmp_path, monkeypatch, *, record_usage=False):
             )
 
         try:
-            created = await _handle_goals_set(_set_params(), stack.context)
+            created = await _handle_goals_set(
+                {**_set_params(), "executionPolicy": execution_policy}, stack.context,
+            )
             await asyncio.wait_for(parent_started.wait(), timeout=3)
             yield SimpleNamespace(
                 stack=stack,
@@ -287,13 +300,66 @@ async def test_completion_candidate_does_not_grant_unrelated_goal_authority(tmp_
         assert await stack.storage.get_goal(SOURCE_KEY) == before
 
 
-@pytest.mark.parametrize("parent_goal", ["none", "current", "replaced"])
+async def _disconnect_owner_and_open_controller(stack):
+    conn_id = stack.context.conn_id
+    get_registry().unregister(conn_id)
+    stack.subscriptions.remove_connection(conn_id)
+    await stack.service.on_subscription_lost(conn_id, SOURCE_KEY)
+    assert get_registry().get(conn_id) is None
+    assert SOURCE_KEY not in stack.service._leases
+    assert SOURCE_KEY in stack.service._continuity_grants
+    controller = replace(stack.context, conn_id=f"{conn_id}-controller")
+    get_registry().register(_goal_connection(controller.conn_id))
+    return controller
+
+
+async def test_disconnected_background_clear_cannot_reclaim_goal_from_late_child(
+    tmp_path, monkeypatch,
+):
+    async with _child_group_stack(
+        tmp_path, monkeypatch, execution_policy="background",
+    ) as state:
+        stack = state.stack
+        controller = await _disconnect_owner_and_open_controller(stack)
+        try:
+            before = await stack.service.snapshot(await stack.storage.get_goal(SOURCE_KEY))
+            assert before["executionPolicy"] == "background"
+            response = await _handle_goals_clear(
+                _mutation_params(before, request_index=2), controller,
+            )
+            assert response["goal"] is None
+            assert SOURCE_KEY not in stack.service._continuity_grants
+            assert SOURCE_KEY not in stack.service._leases
+            # Clear does not cancel ordinary accepted work. Its late child
+            # result can be summarized, but cannot restore Goal ownership.
+            await state.wake()
+            state.release_parent.set()
+            await asyncio.wait_for(state.synthesis_started.wait(), timeout=3)
+            assert state.runs[-1].run_kind == "runtime_send"
+            assert state.runs[-1].goal_context is None
+            state.release_synthesis.set()
+            await stack.runtime.wait(state.runs[-1].task_id, timeout=3)
+            await state.manager.drain(timeout=3)
+            await stack.service._kick_if_idle(SOURCE_KEY)
+            await asyncio.gather(*list(stack.service._kick_tasks.values()))
+            assert await stack.storage.get_goal(SOURCE_KEY) is None
+            assert not state.continuation_started.is_set()
+            assert [run.run_kind for run in state.runs] == ["session_turn", "runtime_send"]
+            assert await _table_count(stack.storage, "agent_tasks") == 2
+            assert SOURCE_KEY not in stack.service._continuity_grants
+        finally:
+            get_registry().unregister(controller.conn_id)
+
+
+@pytest.mark.parametrize(
+    ("parent_goal", "background_disconnected"),
+    [("none", False), ("current", False), ("replaced", False), ("current", True)],
+)
 async def test_public_stop_releases_old_group_without_reviving_its_goal(
-    parent_goal, tmp_path, monkeypatch,
+    parent_goal, background_disconnected, tmp_path, monkeypatch,
 ):
     from opensquilla.gateway.routing import RouteEnvelope, SourceKind
     from opensquilla.gateway.rpc_sessions import _handle_sessions_abort_contract
-    from tests.test_gateway.test_goal_rpc import _mutation_params
 
     calls = []
     continuation_started, finish = asyncio.Event(), asyncio.Event()
@@ -332,6 +398,7 @@ async def test_public_stop_releases_old_group_without_reviving_its_goal(
 
         manager.set_idle_listener(idle)
         manager.set_cancel_listener(cancel_authority)
+        controller = stack.context
         try:
             if parent_goal == "none":
                 session = await stack.storage.get_session(SOURCE_KEY)
@@ -341,7 +408,11 @@ async def test_public_stop_releases_old_group_without_reviving_its_goal(
                     session_epoch=session.epoch,
                 ), "Start ordinary child investigation")
                 await stack.runtime.wait(parent.task_id, timeout=2)
-            created = await _handle_goals_set(_set_params(), stack.context)
+            created = await _handle_goals_set(
+                {**_set_params(), "executionPolicy": (
+                    "background" if background_disconnected else "foreground"
+                )}, stack.context,
+            )
             await stack.runtime.wait(created["taskId"], timeout=2)
             if parent_goal == "replaced":
                 goal = await stack.service.snapshot(await stack.storage.get_goal(SOURCE_KEY))
@@ -352,10 +423,12 @@ async def test_public_stop_releases_old_group_without_reviving_its_goal(
                 await stack.runtime.wait(created["taskId"], timeout=2)
             await asyncio.gather(*list(stack.service._kick_tasks.values()))
             assert not continuation_started.is_set()
+            if background_disconnected:
+                controller = await _disconnect_owner_and_open_controller(stack)
             parent_task_id = calls[0].task_id
             params = {"key": SOURCE_KEY, "taskId": parent_task_id, "scope": "task"}
             cancellation = asyncio.create_task(
-                _handle_sessions_abort_contract(params, stack.context)
+                _handle_sessions_abort_contract(params, controller)
             )
             await asyncio.wait_for(cancellation_started.wait(), 2)
             await stack.service._kick_if_idle(SOURCE_KEY)
@@ -371,17 +444,35 @@ async def test_public_stop_releases_old_group_without_reviving_its_goal(
                 assert goal.status == "paused"
                 assert goal.pause_reason == "user_cancelled"
                 assert not continuation_started.is_set()
+                assert SOURCE_KEY not in stack.service._leases
+                assert SOURCE_KEY not in stack.service._continuity_grants
+                before_late_child = await _table_count(stack.storage, "agent_tasks")
+                await manager.send_parent_wake(
+                    parent_session_key=SOURCE_KEY, parent_task_id=parent_task_id,
+                    payloads=[{"task_id": "late-synthetic-child", "status": "succeeded"}],
+                    task_runtime=stack.runtime, message="Late synthetic child result.",
+                    provenance={
+                        "kind": "internal_system", "source_tool": "subagent_completion",
+                        "parent_task_id": parent_task_id,
+                    }, parent_envelope=calls[0].envelope,
+                )
+                await manager.drain(timeout=3)
+                await stack.service._kick_if_idle(SOURCE_KEY)
+                assert await _table_count(stack.storage, "agent_tasks") == before_late_child
+                assert not continuation_started.is_set()
             else:
                 await asyncio.wait_for(continuation_started.wait(), 2)
                 goal = await stack.storage.get_goal(SOURCE_KEY)
                 assert goal.status == "active"
                 assert goal.goal_id == created["goal"]["goalId"]
             before_replay = len(calls)
-            await _handle_sessions_abort_contract(params, stack.context)
+            await _handle_sessions_abort_contract(params, controller)
             await stack.service._kick_if_idle(SOURCE_KEY)
             assert len(calls) == before_replay
             assert released == [SOURCE_KEY]
         finally:
+            if controller is not stack.context:
+                get_registry().unregister(controller.conn_id)
             finish_cancellation.set()
             finish.set()
             await manager.close(timeout=2)
