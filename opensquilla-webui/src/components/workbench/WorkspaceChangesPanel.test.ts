@@ -446,67 +446,30 @@ describe('WorkspaceChangesPanel', () => {
     mounted.unmount()
   })
 
-  it('steps through the changed files with the visible arrows', async () => {
-    const port = reader({
+  it('names the file in the diff header, with no separate pager row', async () => {
+    const mounted = mountPanel(reader({
       readChanges: vi.fn(async () => changes({
-        entries: [
-          entry({ path: 'src/a.ts', changeType: 'modified', staged: false, unstaged: true }),
-          entry({ path: 'src/b.ts', changeType: 'modified', staged: false, unstaged: true }),
-        ],
-        totalCount: 2,
+        entries: [entry({ path: 'src/a.ts', changeType: 'modified' })],
       })),
-      readDiff: vi.fn(async () => diff()),
-    })
-    const mounted = mountPanel(port)
+    }))
     await settle()
 
-    const previous = mounted.element.querySelector<HTMLButtonElement>(
-      '[data-testid="changes-previous-file"]',
-    )
-    const next = mounted.element.querySelector<HTMLButtonElement>(
-      '[data-testid="changes-next-file"]',
-    )
-    const position = mounted.element.querySelector('[data-testid="changes-file-position"]')
-
-    // Nothing is selected yet, so the first step is a step forward.
-    expect(previous?.disabled).toBe(true)
-    expect(next?.disabled).toBe(false)
-    expect(position?.textContent?.trim()).toBe('0 / 2')
-
-    next?.click()
-    await settle()
-    expect(port.readDiff).toHaveBeenLastCalledWith({
-      workspaceId: 'workspace-1',
-      path: 'src/a.ts',
-      staged: false,
-    })
-    expect(position?.textContent?.trim()).toBe('1 / 2')
-
-    next?.click()
-    await settle()
-    expect(port.readDiff).toHaveBeenLastCalledWith({
-      workspaceId: 'workspace-1',
-      path: 'src/b.ts',
-      staged: false,
-    })
-    // The last file is the end of the sequence, not a wrap-around.
-    expect(next?.disabled).toBe(true)
-    expect(previous?.disabled).toBe(false)
-
-    previous?.click()
-    await settle()
-    expect(position?.textContent?.trim()).toBe('1 / 2')
-    expect(previous?.disabled).toBe(true)
+    // The list is the navigation: it shows every changed file and the arrow
+    // keys walk it, so the header only has to say which file is open.
+    const head = mounted.element.querySelector('.wb-changes__diff-head')
+    expect(head?.textContent).toContain('Select a file to review its diff.')
+    expect(mounted.element.querySelector('.wb-changes__nav')).toBeNull()
     mounted.unmount()
   })
 
-  it('hides the file arrows when the working tree is clean', async () => {
+  it('renders no diff header when the working tree is clean', async () => {
     const mounted = mountPanel(reader({
       readChanges: vi.fn(async () => changes({ totalCount: 0, entries: [] })),
     }))
     await settle()
 
-    expect(mounted.element.querySelector('.wb-changes__nav')).toBeNull()
+    expect(mounted.element.querySelector('.wb-changes__diff-head')).toBeNull()
+    expect(mounted.element.textContent).toContain('No changes in this workspace.')
     mounted.unmount()
   })
 

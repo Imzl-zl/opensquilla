@@ -20,7 +20,7 @@
       <div class="wb-changes__bar-actions">
         <button
           type="button"
-          class="wb-changes__nav-button"
+          class="wb-changes__action wb-changes__action--icon"
           :aria-pressed="wrapLines"
           :aria-label="t('workbench.changes.wrapLines')"
           :title="t('workbench.changes.wrapLines')"
@@ -154,59 +154,27 @@
         :aria-busy="diffLoading"
         :aria-label="t('workbench.changes.diffLabel')"
       >
-        <!-- The toolbar exists as soon as there are changed files, so the file
-             arrows are reachable before anything is selected. The path and the
-             counts join it only when there is a patch to describe. -->
-        <div v-if="orderedEntries.length > 0" class="wb-changes__diff-head">
-          <template v-if="showDiffHead">
-            <span class="wb-changes__diff-path">{{ diff?.path }}</span>
+        <!-- One row for "which file am I looking at". The list above is the
+             navigation: it shows every changed file, and the arrow keys walk it.
+             A step-by-one pager next to the name is a control no review surface
+             has, and it earned nothing the list does not already do. -->
+        <div v-if="changes && changes.entries.length > 0" class="wb-changes__diff-head">
+          <template v-if="diff">
+            <span class="wb-changes__diff-path">{{ diff.path }}</span>
             <span class="wb-changes__diff-side">
-              {{ diff?.staged ? t('workbench.changes.staged') : t('workbench.changes.unstaged') }}
-            </span>
-            <span
-              class="wb-changes__diff-lines"
-              :title="t('workbench.changes.diffStats', { added: addedLines, removed: removedLines })"
-              :aria-label="t('workbench.changes.diffStats', { added: addedLines, removed: removedLines })"
-            >
-              <span class="wb-changes__added">+{{ addedLines }}</span>
-              <span class="wb-changes__removed">-{{ removedLines }}</span>
+              {{ diff.staged ? t('workbench.changes.staged') : t('workbench.changes.unstaged') }}
             </span>
           </template>
-          <!-- The arrow keys already step through the list; these are the same
-               step as a button, so a pointer user does not have to hunt for the
-               next file in a long list. Right-aligned in both states, so the
-               controls never move when a file is selected. -->
-          <div class="wb-changes__nav" role="group" :aria-label="t('workbench.changes.fileNav')">
-            <button
-              type="button"
-              class="wb-changes__nav-button"
-              :disabled="!canSelectPrevious"
-              :aria-label="t('workbench.changes.previousFile')"
-              :title="t('workbench.changes.previousFile')"
-              data-testid="changes-previous-file"
-              @click="stepFile(-1)"
-            >
-              <Icon name="chevronDown" :size="12" class="wb-changes__nav-glyph--previous" />
-            </button>
-            <span class="wb-changes__nav-position" data-testid="changes-file-position">
-              {{ positionLabel }}
-            </span>
-            <button
-              type="button"
-              class="wb-changes__nav-button"
-              :disabled="!canSelectNext"
-              :aria-label="t('workbench.changes.nextFile')"
-              :title="t('workbench.changes.nextFile')"
-              data-testid="changes-next-file"
-              @click="stepFile(1)"
-            >
-              <Icon name="chevronDown" :size="12" />
-            </button>
-          </div>
+          <!-- While the patch is in flight the file is already known, so the row
+               keeps naming it instead of falling back to the prompt. -->
+          <span v-else-if="selectedEntry" class="wb-changes__diff-path">
+            {{ selectedEntry.path }}
+          </span>
+          <span v-else class="wb-changes__diff-prompt">
+            {{ t('workbench.changes.selectPrompt') }}
+          </span>
         </div>
-
-        <p v-if="!selectedEntry" class="wb-changes__note">{{ t('workbench.changes.selectPrompt') }}</p>
-        <p v-else-if="diffLoading" class="wb-changes__note" role="status">
+        <p v-if="diffLoading" class="wb-changes__note" role="status">
           {{ t('workbench.changes.diffLoading') }}
         </p>
         <div v-else-if="diffError" class="wb-changes__note wb-changes__note--error" role="alert">
@@ -411,38 +379,6 @@ const divergenceLabel = computed(() => {
   })
 })
 
-// Rendering order, flattened: the file-nav buttons step through exactly the
-// sequence the list shows, so "next" never disagrees with what is below.
-const orderedEntries = computed<WorkspaceChangeEntry[]>(() =>
-  groups.value.flatMap(group => group.entries),
-)
-
-const selectedIndex = computed(() => orderedEntries.value.findIndex(
-  entry => entryKey(entry) === selectedKey.value,
-))
-
-const canSelectPrevious = computed(() => selectedIndex.value > 0)
-const canSelectNext = computed(() => (
-  orderedEntries.value.length > 0
-  && selectedIndex.value < orderedEntries.value.length - 1
-))
-
-const positionLabel = computed(() => {
-  const total = orderedEntries.value.length
-  const current = selectedIndex.value === -1 ? 0 : selectedIndex.value + 1
-  return t('workbench.changes.filePosition', { current, total })
-})
-
-async function stepFile(offset: number) {
-  const entries = orderedEntries.value
-  if (entries.length === 0) return
-  const index = selectedIndex.value === -1 ? -1 : selectedIndex.value
-  const target = entries[Math.min(entries.length - 1, Math.max(0, index + offset))]
-  if (!target || entryKey(target) === selectedKey.value) return
-  await select(target)
-  focusEntry(target)
-}
-
 const groups = computed(() => {
   const value = changes.value
   if (!value) return []
@@ -518,16 +454,6 @@ const diffLines = computed<DiffLine[]>(() => {
   return rows
 })
 
-// The header describes a patch, so it only claims space once there is a text
-// patch to describe: a binary or empty diff has no counts to report, and the
-// toolbar would show a path it cannot speak for.
-const showDiffHead = computed(() => Boolean(
-  diff.value && !diff.value.binary && diff.value.text.trim(),
-))
-
-const addedLines = computed(() => countLines(diff.value?.text, '+'))
-const removedLines = computed(() => countLines(diff.value?.text, '-'))
-
 const unavailableDetail = computed(() => {
   const reason = changes.value?.availabilityReason
   switch (reason) {
@@ -546,18 +472,6 @@ function typeLetter(type: WorkspaceChangeType): string {
   return TYPE_LETTER[type] ?? '·'
 }
 
-/** Count only real diff content lines, not the `+++`/`---` file headers. */
-function countLines(text: string | undefined, marker: '+' | '-'): number {
-  if (!text) return 0
-  let total = 0
-  for (const line of text.split('\n')) {
-    if (!line.startsWith(marker)) continue
-    if (line.startsWith(`${marker}${marker}${marker}`)) continue
-    total += 1
-  }
-  return total
-}
-
 /** Counts are shown only when both halves are known; `0/0` for a binary file
  * would claim a measurement Git did not make. */
 function entryStats(entry: WorkspaceChangeEntry): boolean {
@@ -572,12 +486,6 @@ function hasGutters(line: DiffLine): boolean {
 
 function entryButtons(): HTMLButtonElement[] {
   return [...document.querySelectorAll<HTMLButtonElement>('.wb-changes__entry')]
-}
-
-function focusEntry(entry: WorkspaceChangeEntry) {
-  const buttons = entryButtons()
-  const target = buttons.find(button => button.dataset.entryKey === entryKey(entry))
-  target?.focus()
 }
 
 function focusSibling(entry: WorkspaceChangeEntry, offset: number) {
@@ -731,53 +639,6 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   margin-inline-start: auto;
 }
 
-.wb-changes__nav {
-  display: flex;
-  gap: 0.125rem;
-  align-items: center;
-  /* Trailing edge of the diff toolbar, so the arrows keep one position whether
-     or not a file is currently selected. */
-  margin-inline-start: auto;
-}
-
-/* The previous/next glyphs are one chevron, so a step up and a step down stay
-   the same shape and weight. */
-.wb-changes__nav-glyph--previous {
-  transform: rotate(180deg);
-}
-
-.wb-changes__nav-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.375rem;
-  height: 1.375rem;
-  padding: 0;
-  color: var(--text-muted);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-}
-
-.wb-changes__nav-button:disabled {
-  cursor: default;
-  opacity: 0.5;
-}
-
-.wb-changes__nav-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.wb-changes__nav-position {
-  min-width: 5ch;
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: 0.6875rem;
-  text-align: center;
-}
-
 .wb-changes__action {
   display: inline-flex;
   flex: none;
@@ -795,6 +656,13 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 .wb-changes__action:disabled {
   cursor: default;
   opacity: 0.6;
+}
+
+/* An icon-only action keeps the square hit area of the labelled ones. */
+.wb-changes__action--icon {
+  justify-content: center;
+  min-width: 1.5rem;
+  padding: 0.125rem 0.25rem;
 }
 
 .wb-changes__action:focus-visible,
@@ -1056,10 +924,14 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   border-radius: var(--radius-sm);
 }
 
-.wb-changes__diff-lines {
-  display: flex;
-  flex: none;
-  gap: 0.375rem;
+/* The prompt shares the row so the pager is never a lone control above an
+   empty pane. */
+.wb-changes__diff-prompt {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* The +N/-N counts are metadata; the patch itself carries the add/remove
