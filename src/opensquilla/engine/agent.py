@@ -4084,6 +4084,18 @@ class Agent:
             or type(self.provider).__name__
         )
 
+    def _provider_activity_model(self, observed_model: str = "") -> str:
+        """Resolve the current physical model without mutating the route plan."""
+
+        if str(observed_model or "").strip():
+            return str(observed_model).strip()
+        active_model = getattr(self.provider, "active_model_id", None)
+        if active_model is not None:
+            # A composite can explicitly have no single physical model while
+            # its members run. Its configured fallback is not an observation.
+            return str(active_model or "").strip()
+        return str(self.config.model_id or "").strip()
+
     def _log_reasoning_output_budget_exhausted(
         self,
         *,
@@ -7879,6 +7891,7 @@ class Agent:
 
                     yield ProviderActivityEvent(
                         activity_id=provider_activity_id,
+                        model=self._provider_activity_model(),
                         phase="requesting",
                         reason=next_provider_activity_reason,
                         retry_attempt=_connection_wait_attempt or _retry_attempt,
@@ -8217,6 +8230,9 @@ class Agent:
                                 yield ProviderActivityEvent(
                                     schema_version=1,
                                     activity_id=provider_activity_id,
+                                    model=self._provider_activity_model(
+                                        getattr(raw_ev, "model", "")
+                                    ),
                                     phase=activity_phase,
                                     reason=_normalize_provider_activity_reason(raw_ev.reason),
                                     retry_attempt=max(0, raw_ev.retry_attempt),
@@ -8310,6 +8326,7 @@ class Agent:
                                 ):
                                     yield ProviderActivityEvent(
                                         activity_id=provider_activity_id,
+                                        model=self._provider_activity_model(),
                                         phase="reasoning",
                                         reason="initial",
                                         retry_attempt=_retry_attempt,
@@ -9542,6 +9559,7 @@ class Agent:
                                 next_provider_activity_reason = fallback_reason
                                 yield ProviderActivityEvent(
                                     activity_id=provider_activity_id,
+                                    model=self._provider_activity_model(),
                                     phase="fallback",
                                     reason=fallback_reason,
                                     retry_attempt=_call_attempt + 1,
@@ -9649,6 +9667,7 @@ class Agent:
                                 next_provider_activity_reason = "reasoning_only"
                                 yield ProviderActivityEvent(
                                     activity_id=provider_activity_id,
+                                    model=self._provider_activity_model(),
                                     phase="retrying",
                                     reason="reasoning_only",
                                     retry_attempt=_attempt_retries_used[
@@ -9762,6 +9781,7 @@ class Agent:
                             next_provider_activity_reason = "reasoning_only"
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retrying",
                                 reason="reasoning_only",
                                 retry_attempt=_attempt_retries_used[
@@ -9795,6 +9815,7 @@ class Agent:
                             )
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retry_wait",
                                 reason="invalid_response",
                                 retry_attempt=_attempt_retries_used[
@@ -9810,6 +9831,7 @@ class Agent:
                             next_provider_activity_reason = "invalid_response"
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retrying",
                                 reason="invalid_response",
                                 retry_attempt=_attempt_retries_used[
@@ -9846,6 +9868,7 @@ class Agent:
                             )
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retry_wait",
                                 reason="stream_incomplete",
                                 retry_attempt=_attempt_retries_used[
@@ -9861,6 +9884,7 @@ class Agent:
                             next_provider_activity_reason = "stream_incomplete"
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retrying",
                                 reason="stream_incomplete",
                                 retry_attempt=_attempt_retries_used[
@@ -9941,6 +9965,7 @@ class Agent:
                             next_provider_activity_reason = fallback_reason
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="fallback",
                                 reason=fallback_reason,
                                 retry_attempt=_call_attempt + 1,
@@ -10442,6 +10467,7 @@ class Agent:
                             )
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retry_wait",
                                 reason="empty_response",
                                 retry_attempt=_retry_attempt + 1,
@@ -10454,6 +10480,7 @@ class Agent:
                             next_provider_activity_reason = "empty_response"
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retrying",
                                 reason="empty_response",
                                 retry_attempt=_retry_attempt,
@@ -11155,6 +11182,7 @@ class Agent:
                             _connection_wait_attempt += 1
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retry_wait",
                                 reason="transport_transient",
                                 retry_attempt=_connection_wait_attempt,
@@ -11167,6 +11195,7 @@ class Agent:
                             next_provider_activity_reason = "transport_transient"
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retrying",
                                 reason="transport_transient",
                                 retry_attempt=_connection_wait_attempt,
@@ -11189,6 +11218,7 @@ class Agent:
                             next_provider_activity_reason = "rate_limited"
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="fallback",
                                 reason="rate_limited",
                                 retry_attempt=_call_attempt + 1,
@@ -11258,6 +11288,7 @@ class Agent:
                                 next_provider_activity_reason = reason
                                 yield ProviderActivityEvent(
                                     activity_id=provider_activity_id,
+                                    model=self._provider_activity_model(),
                                     phase="fallback",
                                     reason=reason,
                                     retry_attempt=_retry_attempt + 1,
@@ -11289,6 +11320,7 @@ class Agent:
                         )
                         yield ProviderActivityEvent(
                             activity_id=provider_activity_id,
+                            model=self._provider_activity_model(),
                             phase="retry_wait",
                             reason=reason,
                             retry_attempt=_retry_attempt + 1,
@@ -11302,6 +11334,7 @@ class Agent:
                         next_provider_activity_reason = reason
                         yield ProviderActivityEvent(
                             activity_id=provider_activity_id,
+                            model=self._provider_activity_model(),
                             phase="retrying",
                             reason=reason,
                             retry_attempt=_retry_attempt,
