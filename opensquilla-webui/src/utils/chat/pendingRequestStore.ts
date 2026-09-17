@@ -12,9 +12,12 @@ export function createPendingRequestStore<T extends object>(
     try {
       const raw: unknown = JSON.parse(sessionStorage.getItem(storageKey) || '[]')
       if (!Array.isArray(raw)) return fallback
-      return new Map(raw.filter((entry): entry is [string, T] => (
+      const entries = raw.filter((entry): entry is [string, T] => (
         Array.isArray(entry) && typeof entry[0] === 'string' && isPending(entry[1])
-      )).slice(-MAX_PENDING))
+      )).slice(-MAX_PENDING)
+      fallback.clear()
+      for (const [key, value] of entries) fallback.set(key, value)
+      return fallback
     } catch {
       return fallback
     }

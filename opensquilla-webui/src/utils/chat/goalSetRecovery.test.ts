@@ -1,10 +1,14 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
-beforeEach(() => vi.resetModules())
+beforeEach(() => {
+  vi.resetModules()
+  // Happy DOM caches bound methods; use a fresh instance after quota spies.
+  vi.stubGlobal('sessionStorage', new Storage())
+})
 afterEach(() => {
   vi.restoreAllMocks()
-  sessionStorage.clear()
+  vi.unstubAllGlobals()
 })
 
 it('retains both Goal ingress identities across refresh until acceptance is known', async () => {
@@ -66,3 +70,18 @@ it.each(['request', 'session'] as const)(
     expect(recovery.recoverGoalSet(otherIdentity)).toEqual(other)
   },
 )
+
+it('retains recovered Goal identities when a later storage read fails', async () => {
+  const first = await import('./goalSetRecovery')
+  const identity = first.goalSetIdentity('source', 1, 'Synthetic objective', {})
+  const pending = first.recoverGoalSet(identity)
+  vi.resetModules()
+  const reloaded = await import('./goalSetRecovery')
+  expect(reloaded.recoverGoalSet(identity)).toEqual(pending)
+  vi.spyOn(sessionStorage, 'getItem').mockImplementationOnce(() => {
+    throw new DOMException('Storage temporarily unavailable', 'SecurityError')
+  })
+
+  expect(reloaded.recoverGoalSet(identity)).toEqual(pending)
+  expect(reloaded.recoverGoalSet(identity)).toEqual(pending)
+})

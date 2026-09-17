@@ -1,10 +1,14 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
-beforeEach(() => vi.resetModules())
+beforeEach(() => {
+  vi.resetModules()
+  // Happy DOM caches bound methods; use a fresh instance after quota spies.
+  vi.stubGlobal('sessionStorage', new Storage())
+})
 afterEach(() => {
   vi.restoreAllMocks()
-  sessionStorage.clear()
+  vi.unstubAllGlobals()
 })
 
 it('retains the implementation receipt and new-session destination across a reload', async () => {
@@ -63,4 +67,21 @@ it('does not resurrect a forgotten implementation from stale storage', async () 
   expect(replacement.targetSessionKey).toBe('destination-two')
   expect(recovery.recoverPlanImplementation(identity, () => 'destination-three')).toEqual(replacement)
   expect(recovery.recoverPlanImplementation(otherIdentity, () => 'unused')).toEqual(other)
+})
+
+it('retains a recovered implementation when a later storage read fails', async () => {
+  const first = await import('./planImplementationRecovery')
+  const identity = first.planImplementationIdentity('source', 1, 'revision', true)
+  const pending = first.recoverPlanImplementation(identity, () => 'destination-one')
+  vi.resetModules()
+  const reloaded = await import('./planImplementationRecovery')
+  const createRetryDestination = vi.fn(() => 'destination-two')
+  expect(reloaded.recoverPlanImplementation(identity, createRetryDestination)).toEqual(pending)
+  vi.spyOn(sessionStorage, 'getItem').mockImplementationOnce(() => {
+    throw new DOMException('Storage temporarily unavailable', 'SecurityError')
+  })
+
+  expect(reloaded.recoverPlanImplementation(identity, createRetryDestination)).toEqual(pending)
+  expect(createRetryDestination).not.toHaveBeenCalled()
+  expect(reloaded.recoverPlanImplementation(identity, createRetryDestination)).toEqual(pending)
 })
