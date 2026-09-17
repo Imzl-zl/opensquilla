@@ -94,6 +94,11 @@ from opensquilla.engine.session_sanitize import (
 )
 from opensquilla.engine.thinking import drop_reasoning
 from opensquilla.engine.tokenjuice_adapter import reduce_tool_result_with_tokenjuice
+from opensquilla.engine.tool_failure_recovery import (
+    FAILURE_RECOVERY_CODE,
+    FAILURE_RECOVERY_INSTRUCTION,
+    ToolFailureRecovery,
+)
 from opensquilla.engine.tool_result_store import (
     TOOL_RESULT_META_NAME,
     ToolResultRecord,
@@ -6392,6 +6397,8 @@ class Agent:
         )
         turn_llm_calls = 0
         turn_tool_errors = 0
+        tool_failure_recovery = ToolFailureRecovery()
+        tool_failure_finalization_pending = False
         # Whole-turn replay is safe only while no provider admission has
         # completed and no tool execution has crossed an external-effect
         # boundary. The usage call index supplies the durable half of this
@@ -6988,7 +6995,9 @@ class Agent:
                                 ),
                             ))
                 if (
-                    self.config.max_iterations > 0 and iterations >= self.config.max_iterations
+                    self.config.max_iterations > 0
+                    and iterations >= self.config.max_iterations
+                    and not tool_failure_finalization_pending
                 ):
                     max_iterations_source = str(
                         self.config.metadata.get("agent_max_iterations_source", "agent_config")
@@ -7175,7 +7184,11 @@ class Agent:
 
                     request_suffix_messages: list[Message] = []
                     reasoning_only_act_now_for_call: Message | None = None
-                    if (
+                    if tool_failure_finalization_pending:
+                        request_suffix_messages = [
+                            Message(role="user", content=FAILURE_RECOVERY_INSTRUCTION)
+                        ]
+                    elif (
                         max_iterations_finalization_pending
                         and max_iterations_finalization_message is not None
                     ):
@@ -7258,10 +7271,13 @@ class Agent:
                     provider_tools_for_call = (
                         None
                         if max_iterations_finalization_pending
+                        or tool_failure_finalization_pending
                         else provider_tool_definitions
                     )
                     tools_supported_for_call = (
-                        tools_supported and (not max_iterations_finalization_pending)
+                        tools_supported
+                        and not max_iterations_finalization_pending
+                        and not tool_failure_finalization_pending
                     )
                     base_recovery_available = self._tool_result_recovery_available()
                     call_retrieval_available = bool(
@@ -7511,6 +7527,10 @@ class Agent:
                         break
 
                     call_chat_cfg = chat_cfg
+                    if tool_failure_finalization_pending:
+                        call_chat_cfg = call_chat_cfg.model_copy(
+                            update={"tool_choice": None, "physical_attempt_limit": 1}
+                        )
                     forced_tool_choice = self.config.metadata.get("meta_match_tool_choice")
                     if (
                         forced_tool_choice is not None
@@ -8201,6 +8221,7 @@ class Agent:
                                 if not tools_supported_for_call:
                                     if (
                                         max_iterations_finalization_pending
+                                        or tool_failure_finalization_pending
                                     ):
                                         ignored_post_delivery_tool_use = True
                                     continue
@@ -8321,6 +8342,7 @@ class Agent:
                                 if not tools_supported_for_call:
                                     if (
                                         max_iterations_finalization_pending
+                                        or tool_failure_finalization_pending
                                     ):
                                         ignored_post_delivery_tool_use = True
                                     continue
@@ -8707,6 +8729,12 @@ class Agent:
 
                             elif isinstance(raw_ev, ProviderErrorEvent):
                                 provider_error_for_log = raw_ev
+                                ensemble_trace = getattr(raw_ev, "ensemble_trace", None)
+                                if isinstance(ensemble_trace, dict):
+                                    ensemble_request_count_baseline = _merge_ensemble_request_count(
+                                        ensemble_trace,
+                                        ensemble_request_count_baseline,
+                                    )
                                 pending_tool_events.clear()
                                 usage_unknown_reason = provider_error_usage_reason(raw_ev.code)
                                 known_usage_receipt = has_known_provider_usage_receipt(raw_ev)
@@ -9069,6 +9097,16 @@ class Agent:
                         yield terminal_error
                         break
                     response_text = "".join(assistant_text_parts)
+                    if tool_failure_finalization_pending and (
+                        _got_error or not _got_done_event or not response_text.strip()
+                    ):
+                        terminal_error = ErrorEvent(
+                            message=tool_failure_recovery.terminal_message,
+                            code=FAILURE_RECOVERY_CODE,
+                        )
+                        yield self._transition(AgentState.ERROR)
+                        yield terminal_error
+                        break
                     if (
                         ignored_post_delivery_tool_use
                         and not response_text.strip()
@@ -9132,6 +9170,17 @@ class Agent:
                         reasoning_tokens=iter_reasoning_tokens,
                         user_visible_emitted=attempt_user_visible_emitted,
                     )
+                    if (
+                        tool_failure_finalization_pending
+                        and attempt_classification.kind != _ProviderAttemptKind.OK
+                    ):
+                        terminal_error = ErrorEvent(
+                            message=tool_failure_recovery.terminal_message,
+                            code=FAILURE_RECOVERY_CODE,
+                        )
+                        yield self._transition(AgentState.ERROR)
+                        yield terminal_error
+                        break
                     if not _got_error and attempt_classification.kind != _ProviderAttemptKind.OK:
                         logger.warning(
                             "provider.invalid_response",
@@ -11302,6 +11351,8 @@ class Agent:
 
                 # No tool calls → we're done
                 if not tool_calls:
+                    if tool_failure_finalization_pending:
+                        break
                     if await _claim_pending_inputs_for_next_call():
                         # A plain response is also a safe same-turn boundary.
                         # Keep the assistant output already emitted above, then
@@ -11498,6 +11549,8 @@ class Agent:
                     preflight_result = (
                         preflight_tool_results.get(tc.tool_use_id) or snapshot_failure
                     )
+                    if preflight_result is None:
+                        preflight_result = tool_failure_recovery.before_call(execution_tc)
                     if tool_timeout is not None and tool_timeout <= 0:
                         preflight_result = ToolResult(
                             tool_use_id=tc.tool_use_id,
@@ -11613,6 +11666,13 @@ class Agent:
                                     timed_out=True,
                                 ),
                             )
+                    tool_failure_recovery.observe(
+                        execution_tc, res,
+                        repair_observed=(
+                            self._tool_effect_observation()
+                            != tool_effect_observations_by_id[tc.tool_use_id]
+                        ),
+                    )
                     duration_ms = int((time.monotonic() - started) * 1000)
                     self._end_tool_reliability_attempt(
                         tool_use_id=tc.tool_use_id,
@@ -11823,7 +11883,7 @@ class Agent:
                             )
 
                         async def _run_after_policy_locks() -> ToolResult:
-                            async with semaphore:
+                            async with tool_failure_recovery.dispatch_slot(tc), semaphore:
                                 return await _run_one(tc)
 
                         async def _run_after_key_lock() -> ToolResult:
@@ -11856,9 +11916,15 @@ class Agent:
                         async for event in _flush_parallel_batch(parallel_batch):
                             yield event
                         parallel_batch = []
+                        recovery_denial = tool_failure_recovery.before_call(tc)
+                        if recovery_denial is not None:
+                            results_by_id[tc.tool_use_id] = recovery_denial
+                            _record_completed_tool_result(recovery_denial)
+                            continue
                         active_ctx = (
                             current_tool_context.get() or self._tool_context or ToolContext()
                         )
+                        meta_effects_before = self._tool_effect_observation()
                         meta_reliability_started = self._begin_tool_reliability_attempt(
                             tool_use_id=tc.tool_use_id,
                             tool_name=tc.tool_name,
@@ -11866,6 +11932,12 @@ class Agent:
                         try:
                             async for ev in self._run_one_streaming(tc, active_ctx):
                                 if isinstance(ev, ToolResult):
+                                    tool_failure_recovery.observe(
+                                        tc, ev,
+                                        repair_observed=(
+                                            self._tool_effect_observation() != meta_effects_before
+                                        ),
+                                    )
                                     results_by_id[tc.tool_use_id] = ev
                                     _record_completed_tool_result(ev)
                                 else:
@@ -12375,6 +12447,12 @@ class Agent:
                     )
                 if turn_yielded:
                     break
+                if tool_failure_recovery.exhausted:
+                    tool_failure_finalization_pending = True
+                    self._write_turn_call_log(
+                        "turn_policy_decision", action="finalize_without_tools",
+                        reason=FAILURE_RECOVERY_CODE, iteration=iterations,
+                    )
                 # ------ TOOL_CALLING → THINKING ------
                 yield self._transition(AgentState.THINKING)
                 # Loop continues
