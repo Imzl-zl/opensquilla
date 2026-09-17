@@ -584,9 +584,9 @@ async def test_close_closes_scopes_initialized_by_an_already_running_cycle(
     release = asyncio.Event()
     initialized = []
     scope_runtime = runtime._scope_runtime
-    outboxes = {
-        scope: await TelemetryOutbox.open(tmp_path, scope) for scope in TelemetryScope
-    }
+    outboxes = {}
+    upload_task = None
+    closing = None
 
     async def delayed_open(_state_dir, scope):
         if scope is TelemetryScope.RELIABILITY:
@@ -608,17 +608,31 @@ async def test_close_closes_scopes_initialized_by_an_already_running_cycle(
     monkeypatch.setattr(runtime_module, "TelemetryOutbox", SimpleNamespace(open=delayed_open))
     monkeypatch.setattr(TelemetryUploader, "upload_once", idle_upload)
     monkeypatch.setattr(runtime, "_scope_runtime", track_scope)
-    await runtime.start()
-    await asyncio.wait_for(entered.wait(), timeout=1)
-    closing = asyncio.create_task(runtime.close())
-    await asyncio.sleep(0)
-    assert runtime.opened_scopes == frozenset()
-    release.set()
-    await asyncio.wait_for(closing, timeout=5)
+    try:
+        for scope in TelemetryScope:
+            outboxes[scope] = await TelemetryOutbox.open(tmp_path, scope)
+        await runtime.start()
+        upload_task = runtime._upload_task
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        closing = asyncio.create_task(runtime.close())
+        await asyncio.sleep(0)
+        assert runtime.opened_scopes == frozenset()
+        release.set()
+        await asyncio.wait_for(closing, timeout=5)
 
-    assert len(initialized) == 2
-    assert all(scoped.outbox._closed and scoped.uploader._closed for scoped in initialized)
-    assert runtime.opened_scopes == frozenset()
+        assert len(initialized) == 2
+        assert all(scoped.outbox._closed and scoped.uploader._closed for scoped in initialized)
+        assert runtime.opened_scopes == frozenset()
+    finally:
+        release.set()
+        tasks = tuple(task for task in (closing, upload_task) if task is not None)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(
+            *(outbox.close() for outbox in outboxes.values()), return_exceptions=True,
+        )
 
 
 async def test_close_releases_stalled_send_lock_before_draining_accepted_record(
