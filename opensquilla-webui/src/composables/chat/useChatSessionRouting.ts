@@ -335,6 +335,16 @@ export function useChatSessionRouting(options: UseChatSessionRoutingOptions) {
   watch(options.sessionKey, () => {
     reset()
   }, { flush: 'sync', immediate: true })
+  watch([options.sessionKey, options.isDraft], ([key, draft], [previousKey, wasDraft]) => {
+    if (key !== previousKey || draft || !wasDraft) return
+    // First-send acceptance materializes a draft under the same key. Its
+    // provisional default snapshot is not the newly created session, even
+    // when both carry revision zero. Retire that snapshot before the durable
+    // bootstrap arrives, keeping the selected mode visible during the handoff.
+    const acceptedMode = mode.value
+    reset()
+    mode.value = acceptedMode
+  }, { flush: 'sync' })
   watch(options.globalMode, nextMode => {
     // Drafts have no durable session setting yet. Their first send captures
     // the current global default unless the user chose one of the three modes.

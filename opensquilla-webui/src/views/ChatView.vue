@@ -3574,6 +3574,10 @@ const chatSend = useChatSend({
     const bootstrap = startSessionBootstrap({ includeHistory: false, force: true })
     void bootstrap.live.then(outcome => {
       if (outcome.authoritative && sessionKey.value === key) {
+        // A provisional snapshot may have completed before the first send
+        // materialized this same key. Re-read after the durable subscription
+        // if its routing projection did not replace that draft snapshot.
+        if (!chatSessionRouting.hasAuthoritativeSnapshot.value) void chatSessionRouting.load()
         void handleAuthoritativeSessionSubscription(key)
       }
     })

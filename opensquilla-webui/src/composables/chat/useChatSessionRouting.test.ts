@@ -417,6 +417,66 @@ function pending<T>() {
 }
 
 describe('durable session model selection', () => {
+  it('replaces a provisional default with the accepted first-turn pin under the same key and revision', async () => {
+    const h = harness({ draft: true, modelSelectionCapable: true })
+    h.api.applyBootstrap(modelSnapshot(null, 0))
+    await h.api.setMode('off')
+    h.isStreaming.value = true
+    h.rpc.call.mockResolvedValue(modelSnapshot(PIN, 0))
+
+    // Acceptance keeps the draft key. No navigation, reload or menu refresh
+    // occurs, and the old provisional revision cannot reject the saved pin.
+    h.isDraft.value = false
+    expect(h.api.hasAuthoritativeSnapshot.value).toBe(false)
+    expect(h.api.mode.value).toBe('off')
+    expect(h.api.initialRoutingMode.value).toBeNull()
+    expect(h.api.modelSelectionSupported.value).toBe(false)
+    expect(h.rpc.call).not.toHaveBeenCalled()
+
+    // ChatView loads only after the durable bootstrap's critical frames.
+    await expect(h.api.load()).resolves.toBe(true)
+    expect(h.rpc.call).toHaveBeenCalledExactlyOnceWith('sessions.routing.get', { sessionKey: SESSION_ONE })
+    expect(h.api.modelSelection.value).toEqual(PIN)
+    expect(h.api.modelSelectionSupported.value).toBe(true)
+    expect(h.api.revision.value).toBe(0)
+  })
+
+  it.each(['direct', 'router', 'ensemble'] as const)(
+    'accepts the durable %s bootstrap after retiring a same-key provisional snapshot', async mode => {
+      const h = harness({ draft: true, modelSelectionCapable: true })
+      h.api.applyBootstrap(modelSnapshot(null, 0))
+      const selectedMode = mode === 'direct' ? 'off' : mode === 'router' ? 'squilla_router' : 'llm_ensemble'
+      await h.api.setMode(selectedMode)
+      h.isDraft.value = false
+
+      expect(h.api.mode.value).toBe(selectedMode)
+      expect(h.api.applyBootstrap(modelSnapshot(mode === 'direct' ? PIN : null, 0, mode))).toBe(true)
+      expect(h.api.mode.value).toBe(selectedMode)
+      expect(h.api.modelSelection.value).toEqual(mode === 'direct' ? PIN : null)
+      expect(h.api.hasAuthoritativeSnapshot.value).toBe(true)
+      expect(h.rpc.call).not.toHaveBeenCalled()
+    },
+  )
+
+  it('does not carry an accepted draft mode or late pin read across navigation', async () => {
+    const h = harness({ draft: true, modelSelectionCapable: true })
+    h.api.applyBootstrap(modelSnapshot(null, 0))
+    await h.api.setMode('llm_ensemble')
+    h.isDraft.value = false
+    const read = pending<unknown>()
+    h.rpc.call.mockReturnValueOnce(read.promise)
+    const loading = h.api.load()
+
+    h.sessionKey.value = SESSION_TWO
+    h.api.applyBootstrap({ ...modelSnapshot(OTHER_PIN, 0), key: SESSION_TWO })
+    read.resolve(modelSnapshot(PIN, 0, 'ensemble'))
+
+    await expect(loading).resolves.toBe(false)
+    expect(h.api.mode.value).toBe('off')
+    expect(h.api.modelSelection.value).toEqual(OTHER_PIN)
+    expect(h.notifyError).not.toHaveBeenCalled()
+  })
+
   it('requires both advertised capability and a model-aware authoritative snapshot', () => {
     const h = harness({ modelSelectionCapable: true })
     expect(h.api.modelSelectionSupported.value).toBe(false)

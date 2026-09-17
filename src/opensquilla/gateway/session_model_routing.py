@@ -7,6 +7,7 @@ it happens to target a user session for delivery or transcript context.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -251,6 +252,34 @@ def accepted_model_routing_audit(
     return audit
 
 
+async def prepare_model_routing_runtime(
+    config: Any,
+    *,
+    initialization_timeout: float = 30.0,
+) -> None:
+    """Load a chosen router before its separate per-message routing budget.
+
+    Per-session routing can be enabled while the global strategy is Direct,
+    which deliberately skips boot preloading. The local model cold start is
+    readiness work, not classification, and must not consume the 5s routing
+    deadline. No admission/state lock may be held while awaiting this helper.
+    """
+    router_config = getattr(config, "squilla_router", None)
+    if not bool(getattr(router_config, "enabled", False)):
+        return
+    from opensquilla.engine.steps.squilla_router import preload_strategy
+
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(preload_strategy, router_config),
+            timeout=initialization_timeout,
+        )
+    except TimeoutError as exc:
+        raise TimeoutError(
+            "The local routing model is still initializing; retry when it is ready."
+        ) from exc
+
+
 async def accepted_model_routing_stream(
     stream: AsyncIterator[Any],
     accepted_config: Any,
@@ -267,6 +296,7 @@ async def accepted_model_routing_stream(
 __all__ = [
     "accepted_model_routing_audit",
     "accepted_model_routing_stream",
+    "prepare_model_routing_runtime",
     "capture_accepted_model_routing_config",
     "capture_prepared_session_model_routing_config",
     "resolve_session_model_routing_resolution",

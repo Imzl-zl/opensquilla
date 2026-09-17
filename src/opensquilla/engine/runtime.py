@@ -10037,15 +10037,30 @@ class TurnRunner:
         router_timeout = float(getattr(router_cfg, "routing_timeout_seconds", 5.0) or 5.0)
 
         def _copy_router_turn(turn: TurnContext) -> TurnContext:
-            metadata: dict[str, Any] = {}
-            for key, value in turn.metadata.items():
-                try:
-                    metadata[key] = copy.deepcopy(value)
-                except Exception:
-                    metadata[key] = value
-            pipeline_steps = metadata.get("pipeline_steps")
-            if isinstance(pipeline_steps, list):
-                metadata["pipeline_steps"] = list(pipeline_steps)
+            # Detach mutable per-turn facts, but retain opaque runtime services.
+            # In particular deepcopy(bound_method) clones its owner, traversing
+            # live gateways, locks, SQLite connections and even event loops.
+            # The worker only reads these service capabilities; it must never
+            # construct partial copies or spend its routing budget cloning them.
+            memo: dict[int, Any] = {}
+            visited: set[int] = set()
+
+            def retain_runtime_values(value: Any) -> None:
+                identity = id(value)
+                if identity in visited:
+                    return
+                visited.add(identity)
+                if type(value) is dict:
+                    for child in (*value.keys(), *value.values()):
+                        retain_runtime_values(child)
+                elif type(value) in (list, tuple, set, frozenset):
+                    for child in value:
+                        retain_runtime_values(child)
+                elif type(value) not in (str, bytes, int, float, bool, type(None)):
+                    memo[identity] = value
+
+            retain_runtime_values(turn.metadata)
+            metadata = copy.deepcopy(turn.metadata, memo)
             metadata["_defer_squilla_router_history"] = True
             return replace(
                 turn,

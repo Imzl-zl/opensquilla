@@ -69,9 +69,9 @@ describe('ChatComposer popovers', () => {
   it.each([
     { mode: 'off', pin: null, defaultModel: { model: 'base', provider: 'provider-a' }, label: 'Base model', badge: true },
     { mode: 'off', pin: { model: 'base', provider: 'provider-a' }, defaultModel: { model: 'base', provider: 'provider-a' }, label: 'Base model', badge: false },
-    { mode: 'squilla_router', pin: null, defaultModel: { model: 'base', provider: 'provider-a' }, label: 'Smart routing', badge: false },
-    { mode: 'llm_ensemble', pin: null, defaultModel: { model: 'base', provider: 'provider-a' }, label: 'Multi-model', badge: false },
-    { mode: 'off', pin: null, defaultModel: null, label: 'Single model', badge: true },
+    { mode: 'squilla_router', pin: null, defaultModel: { model: 'base', provider: 'provider-a' }, label: 'Intelligent model routing', badge: false },
+    { mode: 'llm_ensemble', pin: null, defaultModel: { model: 'base', provider: 'provider-a' }, label: 'Model ensemble', badge: false },
+    { mode: 'off', pin: null, defaultModel: null, label: 'Fixed model', badge: true },
   ])('shows the active selection without confusing defaults and pins: $mode / $label / $badge', async ({ mode, pin, defaultModel, label, badge }) => {
     const { app, el } = await mountComposer({
       modelSelectionAvailable: true,

@@ -344,3 +344,51 @@ async def test_squilla_router_timeout_fails_open_for_blocking_router(
     )
     assert router_record.applied is False
     assert "timed out" in (router_record.fallback_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_router_worker_does_not_clone_live_services_or_bound_callbacks(monkeypatch):
+    """Copying a bound callback must not recursively clone its gateway/event loop."""
+    copied: list[str] = []
+
+    class LiveService:
+        def __init__(self, name):
+            self.name = name
+
+        def __deepcopy__(self, _memo):
+            copied.append(self.name)
+            raise TypeError("live gateway services cannot be copied")
+
+        def observe_metaskill_usage(self, _run_id):
+            pass
+
+    sink = LiveService("growth_sink")
+    writer = LiveService("meta_writer")
+    hold_store = LiveService("router_hold_store")
+    observed = {}
+
+    async def inspect_router(ctx):
+        observed.update({
+            "writer": ctx.metadata["meta_run_writer"],
+            "sink": ctx.metadata["metaskill_usage_recorder"].__self__,
+            "hold": ctx.metadata["router_control_hold_store"],
+        })
+        # Mutable per-turn facts still need isolation from a timed-out worker.
+        ctx.metadata["router_prev_assistant_usage"]["nested"]["tokens"] = 99
+        return ctx
+
+    inspect_router.__name__ = "apply_squilla_router"
+    monkeypatch.setattr("opensquilla.engine.steps.apply_squilla_router", inspect_router)
+    runner = TurnRunner(
+        provider_selector=None, config=GatewayConfig(), meta_run_writer=writer,
+        growth_event_sink=sink,
+    )
+    runner._router_control_hold_store = hold_store
+    facts = {"nested": {"tokens": 7}}
+    await runner._run_pipeline(
+        "hello", "agent:main:live-service-copy", _Provider(), None, [], "system", [],
+        prev_assistant_usage=facts,
+    )
+    assert observed == {"writer": writer, "sink": sink, "hold": hold_store}
+    assert facts == {"nested": {"tokens": 7}}
+    assert copied == []

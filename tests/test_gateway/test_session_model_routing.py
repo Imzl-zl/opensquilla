@@ -25,6 +25,87 @@ from opensquilla.gateway.session_model_routing import (
 from opensquilla.tools.types import ToolContext
 
 
+@pytest.mark.parametrize("provider", ["tokenrhythm", "deepseek"])
+def test_session_router_materializes_implicit_provider_tiers_without_global_changes(
+    provider: str,
+) -> None:
+    from opensquilla.provider.preset_registry import get_preset
+
+    config = GatewayConfig(
+        llm={"provider": provider, "model": "configured-direct-model"},
+        squilla_router={"enabled": False},
+    )
+    original = config.squilla_router.model_dump()
+    original_fields = set(config.squilla_router.model_fields_set)
+
+    accepted = capture_model_routing_config(config, session_mode="router")
+
+    preset = get_preset(provider)
+    assert preset is not None
+    assert accepted.squilla_router.tiers == preset.tier_defaults()
+    assert accepted.squilla_router.enabled is True
+    assert accepted.squilla_router.rollout_phase == "full"
+    assert config.squilla_router.model_dump() == original
+    assert config.squilla_router.model_fields_set == original_fields
+
+
+@pytest.mark.parametrize(
+    ("provider", "router_settings"),
+    [
+        ("tokenrhythm", {"preset_binding": "custom"}),
+        ("tokenrhythm", {"tier_profile": None}),
+        ("deepseek", {"tier_profile": "deepseek"}),
+        (
+            "tokenrhythm",
+            {
+                "cross_provider_tiers": True,
+                "tiers": {
+                    "c0": {"provider": "deepseek", "model": "custom-cheap-model"},
+                    "c1": {"provider": "openrouter", "model": "custom/routed-model"},
+                },
+            },
+        ),
+    ],
+)
+def test_session_router_preserves_explicit_operator_tiers_and_provider_policy(
+    provider: str, router_settings: dict[str, Any],
+) -> None:
+    config = GatewayConfig(
+        llm={"provider": provider, "model": "configured-direct-model"},
+        squilla_router={"enabled": False, **router_settings},
+    )
+    original = config.squilla_router.model_dump()
+
+    accepted = capture_model_routing_config(config, session_mode="router")
+
+    assert accepted.squilla_router.tiers == original["tiers"]
+    assert accepted.squilla_router.tier_profile == original["tier_profile"]
+    assert accepted.squilla_router.cross_provider_tiers == original["cross_provider_tiers"]
+    assert accepted.squilla_router.tier_provider_mismatch == original["tier_provider_mismatch"]
+    assert config.squilla_router.model_dump() == original
+
+
+def test_session_router_follow_primary_reuses_provider_default_policy() -> None:
+    from opensquilla.provider.preset_registry import get_preset
+
+    config = GatewayConfig(
+        llm={"provider": "tokenrhythm", "model": "configured-direct-model"},
+        squilla_router={
+            "enabled": False,
+            "preset_binding": "follow_primary",
+            "tiers": {"c0": {"provider": "openrouter", "model": "old-primary/model"}},
+        },
+    )
+    original = config.squilla_router.model_dump()
+
+    accepted = capture_model_routing_config(config, session_mode="router")
+
+    preset = get_preset("tokenrhythm")
+    assert preset is not None
+    assert accepted.squilla_router.tiers == preset.tier_defaults()
+    assert config.squilla_router.model_dump() == original
+
+
 @pytest.mark.asyncio
 async def test_interactive_session_resolution_overlays_global_without_mutating_it() -> None:
     config = GatewayConfig(
@@ -245,3 +326,66 @@ async def test_runtime_tool_context_uses_accepted_routing_mode_and_revision(
     assert observed[0].router_control_config.enabled is False
     assert caller_context.router_control_routing_revision is None
     assert config.squilla_router.enabled is True
+
+
+@pytest.mark.asyncio
+async def test_router_readiness_loads_offloop_before_classification_budget(monkeypatch):
+    import asyncio
+    import threading
+
+    from opensquilla.gateway.session_model_routing import prepare_model_routing_runtime
+
+    config = GatewayConfig(squilla_router={"enabled": False, "routing_timeout_seconds": 5})
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = threading.Event()
+    caller_thread = threading.get_ident()
+    seen = []
+
+    def preload(router_config):
+        seen.append((router_config, threading.get_ident()))
+        loop.call_soon_threadsafe(entered.set)
+        release.wait(2)
+        return object()
+
+    monkeypatch.setattr("opensquilla.engine.steps.squilla_router.preload_strategy", preload)
+    accepted = capture_model_routing_config(config, session_mode="router")
+    task = asyncio.create_task(prepare_model_routing_runtime(accepted))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert not task.done()
+        assert seen[0][1] != caller_thread
+        assert config.squilla_router.enabled is False
+        assert config.squilla_router.routing_timeout_seconds == 5
+    finally:
+        release.set()
+        await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["direct", "ensemble", None])
+async def test_non_router_readiness_does_not_load_local_models(monkeypatch, mode):
+    from opensquilla.gateway.session_model_routing import prepare_model_routing_runtime
+
+    def forbidden(_config):
+        raise AssertionError("direct/ensemble readiness does not need the router classifier")
+
+    monkeypatch.setattr("opensquilla.engine.steps.squilla_router.preload_strategy", forbidden)
+    accepted = capture_model_routing_config(
+        GatewayConfig(squilla_router={"enabled": False}), session_mode=mode,
+    )
+    await prepare_model_routing_runtime(accepted)
+
+
+@pytest.mark.asyncio
+async def test_router_initialization_failure_is_not_silently_a_direct_turn(monkeypatch):
+    from opensquilla.gateway.session_model_routing import prepare_model_routing_runtime
+
+    def fail(_config):
+        raise RuntimeError("local router readiness failed")
+
+    monkeypatch.setattr("opensquilla.engine.steps.squilla_router.preload_strategy", fail)
+    with pytest.raises(RuntimeError, match="local router readiness failed"):
+        await prepare_model_routing_runtime(
+            capture_model_routing_config(GatewayConfig(), session_mode="router")
+        )

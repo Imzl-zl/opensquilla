@@ -2712,13 +2712,19 @@ async def test_task_runtime_turn_rejects_unavailable_bound_project_kinds(
 
 
 @pytest.mark.asyncio
-async def test_task_runtime_turn_uses_acceptance_time_model_routing_config() -> None:
+@pytest.mark.parametrize("accepted_mode", ["direct", "router"])
+async def test_task_runtime_turn_uses_acceptance_time_model_routing_config(
+    accepted_mode: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     live_config = GatewayConfig(
         squilla_router={"enabled": False, "rollout_phase": "observe"},
         agent_stream_heartbeat_interval_seconds=0.0,
         agent_stream_idle_timeout_seconds=1.0,
     )
-    accepted_config = capture_model_routing_config(live_config)
+    accepted_config = capture_model_routing_config(
+        live_config, session_mode=accepted_mode
+    )
     live_config.llm_ensemble.enabled = True
     live_config.squilla_router.enabled = True
     live_config.squilla_router.rollout_phase = "full"
@@ -2726,9 +2732,23 @@ async def test_task_runtime_turn_uses_acceptance_time_model_routing_config() -> 
     probe = TurnRunner.__new__(TurnRunner)
     probe._config = live_config
     observed: list[str] = []
+    ready: list[str] = []
+
+    async def prepare(config: Any) -> None:
+        # A recovered/new-chat Router turn must preload even when the live
+        # policy has changed. No provider stream may start before readiness.
+        assert config is accepted_config
+        assert observed == []
+        ready.append(model_routing_snapshot(config)["mode"])
+
+    monkeypatch.setattr(
+        "opensquilla.gateway.session_model_routing.prepare_model_routing_runtime",
+        prepare,
+    )
 
     class RecordingTurnRunner:
         async def run(self, message: str, session_key: str, **kwargs: Any):
+            assert ready == [accepted_mode]
             observed.append(model_routing_snapshot(probe._turn_config())["mode"])
             yield DoneEvent()
 
@@ -2762,7 +2782,7 @@ async def test_task_runtime_turn_uses_acceptance_time_model_routing_config() -> 
         event_emitter=emit,
     )
 
-    assert observed == ["direct"]
+    assert observed == [accepted_mode]
     assert model_routing_snapshot(live_config)["mode"] == "ensemble"
 
 
