@@ -265,12 +265,9 @@ def _spreadsheet_units(
                 continue
             index = int(element.get("r", "1"))
             if index >= offset:
-                rows = fs._read_xlsx_worksheet(ET.tostring(element), shared)
-                # The shared reader expects row beneath a worksheet element.
-                if not rows:
-                    wrapper = ET.Element("worksheet")
-                    wrapper.append(element)
-                    rows = fs._read_xlsx_worksheet(ET.tostring(wrapper), shared)
+                wrapper = ET.Element("worksheet")
+                wrapper.append(element)
+                rows = fs._read_xlsx_worksheet(ET.tostring(wrapper), shared)
                 yield (
                     index,
                     json.dumps(rows[0] if rows else [], ensure_ascii=False),
@@ -347,17 +344,16 @@ def read_document(
         ".mbox": "message",
         ".msg": "message",
     }.get(ext, "row")
-    source = (
-        _docx_units(path)
-        if ext == ".docx"
-        else _pptx_units(path, start, count)
-        if ext == ".pptx"
-        else _pdf_units(path, start, count)
-        if ext == ".pdf"
-        else _email_units(path)
-        if ext in {".eml", ".mbox", ".msg"}
-        else _spreadsheet_units(path, start, sheet)
-    )
+    if ext == ".docx":
+        source = _docx_units(path)
+    elif ext == ".pptx":
+        source = _pptx_units(path, start, count)
+    elif ext == ".pdf":
+        source = _pdf_units(path, start, count)
+    elif ext in {".eml", ".mbox", ".msg"}:
+        source = _email_units(path)
+    else:
+        source = _spreadsheet_units(path, start, sheet)
     result: dict[str, Any] = {
         "path": str(path),
         "format": ext[1:],

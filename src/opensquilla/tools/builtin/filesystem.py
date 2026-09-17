@@ -3093,6 +3093,8 @@ async def edit_source(
 ) -> str:
     p, attachment_block = await _prepare_attachment_edit_path(
         path, tool_name="edit_source", approval_id=approval_id,
+        sandbox_permissions=sandbox_permissions, justification=justification,
+        prefix_rule=prefix_rule,
     )
     if attachment_block is not None:
         return attachment_block
