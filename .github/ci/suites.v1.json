@@ -10,6 +10,9 @@
     "tests/test_tools/test_execution_status.py",
     "tests/test_provider_ensemble.py",
     "tests/test_gateway/test_goal_rpc.py",
+    "tests/test_gateway/test_goal_child_wait.py",
+    "tests/test_gateway/test_goal_plan_rpc_admission.py",
+    "tests/test_gateway/test_plan_cancel_tree.py",
     "tests/test_gateway/test_plan_rpc.py",
     "tests/test_gateway/test_task_runtime_wait_slots.py",
     "tests/test_gateway/test_task_progress_projection.py",
@@ -17,6 +20,7 @@
     "tests/test_engine/test_plan_run_reconciliation.py",
     "tests/test_engine/test_goal_context_prompt.py",
     "tests/test_session/test_goal_storage.py",
+    "tests/test_session/test_goal_plan_admission.py",
     "tests/test_session/test_plan_storage.py",
     "tests/test_session/test_plan_presentation.py",
     "tests/test_session/test_task_progress.py",
@@ -27,7 +31,8 @@
     "tests/test_sandbox/test_trusted_sandbox_execution.py",
     "tests/test_tools/test_approval_unification.py",
     "tests/test_live_multi_provider_matrix.py",
-    "tests/test_live_provider_profile_smoke.py"
+    "tests/test_live_provider_profile_smoke.py",
+    "tests/test_live_plan_goal_runtime.py"
   ],
   "baseline_suites": [
     "dependency-audit",
@@ -320,6 +325,9 @@
         "tests/test_tools/test_execution_status.py",
         "tests/test_provider_ensemble.py",
         "tests/test_gateway/test_goal_rpc.py",
+        "tests/test_gateway/test_goal_child_wait.py",
+        "tests/test_gateway/test_goal_plan_rpc_admission.py",
+        "tests/test_gateway/test_plan_cancel_tree.py",
         "tests/test_gateway/test_plan_rpc.py",
         "tests/test_gateway/test_task_runtime_wait_slots.py",
         "tests/test_gateway/test_task_progress_projection.py",
@@ -327,6 +335,7 @@
         "tests/test_engine/test_plan_run_reconciliation.py",
         "tests/test_engine/test_goal_context_prompt.py",
         "tests/test_session/test_goal_storage.py",
+        "tests/test_session/test_goal_plan_admission.py",
         "tests/test_session/test_plan_storage.py",
         "tests/test_session/test_plan_presentation.py",
         "tests/test_session/test_task_progress.py",
@@ -337,7 +346,8 @@
         "tests/test_sandbox/test_trusted_sandbox_execution.py",
         "tests/test_tools/test_approval_unification.py",
         "tests/test_live_multi_provider_matrix.py",
-        "tests/test_live_provider_profile_smoke.py"
+        "tests/test_live_provider_profile_smoke.py",
+        "tests/test_live_plan_goal_runtime.py"
       ]
     },
     "release-packaging": {

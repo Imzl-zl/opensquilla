@@ -76,6 +76,8 @@ from .request_proof import (
     project_final_request_payload,
     protected_tool_result_indexes,
     prove_provider_payload_from_env,
+    provider_request_character_budget,
+    provider_request_token_budget,
 )
 from .stream_assembly import (
     ReasoningAccumulator,
@@ -3611,7 +3613,8 @@ class OpenAIProvider:
         return project_final_request_payload(
             payload,
             projection_adapter=self._provider_kind,
-            proof_budget=cfg.provider_request_max_chars,
+            proof_budget=provider_request_character_budget(payload, cfg),
+            token_budget=provider_request_token_budget(payload, cfg),
             status_projection_mode="content_envelope",
             fallback_reason=fallback_reason,
             active_user_message_index=wire_active_user_index,
@@ -3730,7 +3733,8 @@ class OpenAIProvider:
         budget_decision = coordinate_provider_context_budget(
             payload,
             projection_adapter=self._provider_kind,
-            proof_budget=cfg.provider_request_max_chars,
+            proof_budget=provider_request_character_budget(payload, cfg),
+            token_budget=provider_request_token_budget(payload, cfg),
             status_projection_mode="content_envelope",
             fallback_reason=fallback_reason,
             active_user_message_index=wire_active_user_index,
@@ -3757,6 +3761,7 @@ class OpenAIProvider:
         try:
             prove_provider_payload_from_env(
                 payload,
+                token_budget=provider_request_token_budget(payload, cfg),
                 projection_adapter=self._provider_kind,
                 status_projection_mode="content_envelope",
                 fallback_reason=fallback_reason,
@@ -6478,13 +6483,28 @@ class OpenAIProvider:
                         )
                     models = result
                 else:
+                    from .model_capacity import custom_listing_capacity
+
                     models = [
                         ModelInfo(
                             provider=self.provider_id,
                             model_id=m["id"],
                             display_name=m.get("name", m.get("id", "")),
-                            context_window=m.get("context_length", 0),
-                            max_output_tokens=_model_listing_max_output(m),
+                            context_window=(
+                                custom_listing_capacity(m).get("context_window", 0)
+                                if self.provider_id == "custom"
+                                else m.get("context_length", 0)
+                            ),
+                            max_output_tokens=(
+                                custom_listing_capacity(m).get("max_output_tokens", 0)
+                                if self.provider_id == "custom"
+                                else _model_listing_max_output(m)
+                            ),
+                            metadata=(
+                                {"capacity": custom_listing_capacity(m)}
+                                if self.provider_id == "custom"
+                                else None
+                            ),
                             supports_vision=_model_listing_supports_vision(m),
                         )
                         for m in rows

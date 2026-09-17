@@ -70,6 +70,7 @@ from opensquilla.application.turn_acceptance_ports import (
 from opensquilla.application.turn_admission import (
     AdmitTurn,
     AdmitTurnResult,
+    CancelTurn,
     TurnAdmission,
 )
 from opensquilla.application.turn_cancellation import (
@@ -1841,6 +1842,8 @@ def _normalize_terminal_event_payload(event_name: str, payload: dict[str, Any]) 
     safe_payload = {
         key: value for key, value in payload.items() if key not in sensitive_provider_fields
     }
+    if safe_payload.get("model_capacity") is None:
+        safe_payload.pop("model_capacity", None)
     return {
         **safe_payload,
         "code": code,
@@ -5254,12 +5257,17 @@ async def _handle_plans_cancel_run(params: dict | None, ctx: RpcContext) -> dict
                 raise RpcUnavailableError(
                     "Task runtime is unavailable; the implementation was not cancelled"
                 )
-            cancelled_count = await _cancel_task_runtime(
-                task_runtime,
-                session_key=key,
-                task_id=active_task_id,
-                source="plans.cancelRun",
-                reason="cancelled_by_user",
+            # Ordinary tools may delegate or start task-owned processes. Use
+            # the public exact-task cleanup so Stop also fences late child
+            # completion delivery and cancels this task's descendants.
+            cancellation = await build_turn_admission_application(ctx).cancel(
+                CancelTurn(
+                    session_key=key,
+                    surface="webchat",
+                    task_id=active_task_id,
+                    task_scoped=True,
+                    source="plans.cancelRun",
+                )
             )
             try:
                 terminal_task = await runtime_wait(active_task_id, timeout=10.0)
@@ -5283,7 +5291,7 @@ async def _handle_plans_cancel_run(params: dict | None, ctx: RpcContext) -> dict
                     "The implementation task did not acknowledge cancellation.",
                     details={
                         "taskId": active_task_id,
-                        "cancelledCount": cancelled_count,
+                        "cancelledCount": int(bool(cancellation.get("aborted"))),
                     },
                     retryable=True,
                     accepted=False,

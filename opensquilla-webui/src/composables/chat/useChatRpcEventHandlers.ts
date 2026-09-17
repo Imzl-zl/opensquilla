@@ -2442,6 +2442,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
           turnOutcome?.status,
         ),
         errorCode,
+        modelCapacity: rawPayload.modelCapacity,
         turnId: terminalTurnId || undefined,
         turnOutcome,
         terminalNotice: true,

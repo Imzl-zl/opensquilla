@@ -719,7 +719,9 @@ jobs:
     name: WebUI chat recovery
     needs: [plan-ci, frontend-artifact]
     if: ${{ !cancelled() && needs.plan-ci.result == 'success' && needs.frontend-artifact.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'webui-chat-recovery') }}
-    runs-on: ubuntu-latest
+    # Use a runner that permits the real unprivileged Bubblewrap sandbox without
+    # changing host security policy. Migrate before Ubuntu 22.04 retires in April 2027.
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     env:
       OPENSQUILLA_WEBUI_BASE_URL: http://127.0.0.1:18791
@@ -754,6 +756,26 @@ jobs:
 
       - name: Install Gateway dependencies
         run: uv sync --frozen
+
+      - name: Install and verify Linux guest sandbox
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          bwrap --version
+          # Exercise the real unprivileged namespace boundary. Keep host
+          # AppArmor and sysctl restrictions intact; a denial must fail here.
+          bwrap --unshare-user --unshare-net --ro-bind / / --proc /proc /bin/true
+          uv run python - <<'PY'
+          import json
+          from dataclasses import asdict
+          from opensquilla.sandbox.backend.linux_readiness import probe_bwrap
+
+          probe = probe_bwrap()
+          print(json.dumps(asdict(probe), sort_keys=True))
+          if not probe.available or not probe.supports_perms:
+              raise SystemExit("Linux guest sandbox preflight failed: " + probe.message)
+          PY
 
       - name: Install frontend dependencies
         working-directory: opensquilla-webui
@@ -793,8 +815,12 @@ jobs:
         run: >-
           npm run test:e2e --
           assistant-activity.spec.ts
+          auth-connection-recovery.spec.ts
+          chat-send-lifecycle.spec.ts
+          chat-send-lifecycle.real.spec.ts
           composer-paste.spec.ts
           history-hydration.spec.ts
+          idle-chat-recovery.spec.ts
           provider-error-experience.spec.ts
           user-message-newlines.spec.ts
           session-created-card.spec.ts
@@ -1149,7 +1175,8 @@ jobs:
             tests/test_tools/test_approval_unification.py \
             tests/test_live_multi_provider_matrix.py \
             tests/test_live_provider_profile_smoke.py \
-            -q --maxfail=3 \
+            tests/test_live_plan_goal_runtime.py \
+            -vv --tb=short --maxfail=3 \
             2>&1 | tee "${CI_REPORT_DIR}/preflight.log"
 
       - name: Test Ubuntu full shard
@@ -1177,7 +1204,7 @@ jobs:
             --summary "${CI_REPORT_DIR}/first-failure.txt" \
             "${worker_args[@]}" \
             -- \
-            -q \
+            -vv --tb=short \
             -m "${markers}" \
             --durations=50 \
             "${maxfail_args[@]}" \
@@ -1381,7 +1408,8 @@ jobs:
             tests/test_tools/test_approval_unification.py \
             tests/test_live_multi_provider_matrix.py \
             tests/test_live_provider_profile_smoke.py \
-            -q --maxfail=3 \
+            tests/test_live_plan_goal_runtime.py \
+            -vv --tb=short --maxfail=3 \
             2>&1 | tee "${CI_REPORT_DIR}/preflight.log"
 
       - name: Test Windows shard
@@ -1417,7 +1445,7 @@ jobs:
             --metadata "${CI_REPORT_DIR}/windows-shard-metadata.json" \
             "${worker_args[@]}" \
             -- \
-            -q \
+            -vv --tb=short \
             -m "${markers}" \
             --durations=50 \
             "${maxfail_args[@]}" \
@@ -1522,7 +1550,8 @@ jobs:
             tests/test_tools/test_approval_unification.py \
             tests/test_live_multi_provider_matrix.py \
             tests/test_live_provider_profile_smoke.py \
-            -q --maxfail=3 \
+            tests/test_live_plan_goal_runtime.py \
+            -vv --tb=short --maxfail=3 \
             2>&1 | tee "${CI_REPORT_DIR}/preflight.log"
 
       - name: Test native profile recovery contracts
@@ -1538,6 +1567,9 @@ jobs:
             tests/test_tools/test_execution_status.py
             tests/test_provider_ensemble.py
             tests/test_gateway/test_goal_rpc.py
+            tests/test_gateway/test_goal_child_wait.py
+            tests/test_gateway/test_goal_plan_rpc_admission.py
+            tests/test_gateway/test_plan_cancel_tree.py
             tests/test_gateway/test_plan_rpc.py
             tests/test_gateway/test_task_runtime_wait_slots.py
             tests/test_gateway/test_task_progress_projection.py
@@ -1545,6 +1577,7 @@ jobs:
             tests/test_engine/test_plan_run_reconciliation.py
             tests/test_engine/test_goal_context_prompt.py
             tests/test_session/test_goal_storage.py
+            tests/test_session/test_goal_plan_admission.py
             tests/test_session/test_plan_storage.py
             tests/test_session/test_plan_presentation.py
             tests/test_session/test_task_progress.py
@@ -1552,7 +1585,8 @@ jobs:
             tests/test_persistence/test_migration_compatibility.py
             tests/test_migrations/test_v045_goal_runtime_accounting.py
             tests/test_tools/test_plan_access.py
-            -q
+            -vv
+            --tb=short
             --durations=50
             --junitxml="${CI_REPORT_DIR}/junit.xml"
           )
@@ -1825,10 +1859,14 @@ jobs:
             else
               unset OPENSQUILLA_REQUIRE_ELECTRON_FOREGROUND
             fi
+            set --
+            if [[ "${name}" == "window-background-flow" && "${RUNNER_OS}" == "macOS" ]]; then
+              set -- --connection-faults --flow-control --idle-send --background-ms=65000
+            fi
             if [[ "${RUNNER_OS}" == "Linux" ]]; then
-              "${telemetry[@]}" xvfb-run -a node "${script}" 2>&1 | tee "${log_path}"
+              "${telemetry[@]}" xvfb-run -a node "${script}" "$@" 2>&1 | tee "${log_path}"
             else
-              "${telemetry[@]}" node "${script}" 2>&1 | tee "${log_path}"
+              "${telemetry[@]}" node "${script}" "$@" 2>&1 | tee "${log_path}"
             fi
           }
 

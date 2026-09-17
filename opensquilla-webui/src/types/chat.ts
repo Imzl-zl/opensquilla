@@ -193,6 +193,8 @@ export interface ChatPendingItem {
    * delete intent.
    */
   pendingMayHaveServerCopy?: boolean
+  /** Offline drafts may only cross the wire under their original Gateway identity. */
+  pendingDeliveryIdentity?: string
   /** A cancelling transport row must become a local editable draft after tombstoning. */
   pendingRetainAfterCancel?: boolean
   /** Browser/server staging lifecycle. Unknown enqueue results remain `saving`. */
@@ -756,6 +758,7 @@ export interface ChatMessage {
   /** Typed terminal error code (e.g. 'sandbox_threshold_exceeded') carried on
    *  role:'error' messages so the renderer can offer a recovery action. */
   errorCode?: string
+  modelCapacity?: import('@/modules/providerConfiguration').ModelCapacityFailure
 }
 
 export interface ChatMessageMeta {
@@ -865,4 +868,5 @@ export interface ChatRenderedMessage {
   /** Typed terminal error code, propagated from the raw message so the error
    *  card can render a recovery action (e.g. resume after a sandbox pause). */
   errorCode?: string
+  modelCapacity?: import('@/modules/providerConfiguration').ModelCapacityFailure
 }

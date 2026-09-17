@@ -25,7 +25,8 @@ import sys
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -72,6 +73,7 @@ MODELS = {
 SCENARIOS = {
     "plan": ("plan", "cancel", "plan-stop", "plan-recovery"),
     "plan-stop": ("plan-stop",),
+    "plan-stop-child": ("plan-stop-child",),
     "plan-recovery": ("plan-recovery",),
     "goal": ("goal", "budget", "childbudget", "background", "restart"),
     "wait": ("wait",),
@@ -132,8 +134,12 @@ class DispatchGuard:
             )
             db.execute("INSERT OR IGNORE INTO settings VALUES ('started', ?)", (str(time.time()),))
 
-    def connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path, timeout=5)
+    @contextmanager
+    def connect(self) -> Iterator[sqlite3.Connection]:
+        # sqlite3's context manager commits/rolls back, but does not close its
+        # handle. Explicit closure is required before deleting evidence on Windows.
+        with closing(sqlite3.connect(self.path, timeout=5)) as db, db:
+            yield db
 
     def claim(self, name: str, limit: int, *, turn_id: str | None = None) -> int:
         with self.connect() as db:
@@ -459,7 +465,7 @@ def usage_ledger_path(state: Path) -> Path | None:
     """Resolve the real CLI database layout and reject ambiguous evidence."""
     candidates = []
     for path in state.rglob("*.db"):
-        with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as db:
+        with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='usage_events'").fetchone():
                 candidates.append(path)
     if len(candidates) > 1:
@@ -487,7 +493,7 @@ def runtime_diagnostics(
     tasks = []
     path = usage_ledger_path(state)
     if path is not None:
-        with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as db:
+        with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
             exists = db.execute("SELECT 1 FROM sqlite_master WHERE name='agent_tasks'").fetchone()
             if exists:
                 for status, mode, kind, reason, error_class, raw in db.execute(
@@ -524,7 +530,7 @@ def runtime_diagnostics(
                 {
                     "tools": sorted(names.intersection(ALLOWED_TOOLS)),
                     "other_tool_count": len(names.difference(ALLOWED_TOOLS)),
-                    "workspace_context_present": str(workspace)
+                    "workspace_context_present": json.dumps(str(workspace))[1:-1]
                     in json.dumps(
                         {
                             "messages": payload.get("messages"),
@@ -607,7 +613,7 @@ def ledger_projection(state: Path) -> dict[str, Any]:
     path = usage_ledger_path(state)
     if path is None:
         return {"rows": []}
-    with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as db:
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
         rows = db.execute(
             "SELECT status,COUNT(*),SUM(input_tokens),SUM(output_tokens),"
             "SUM(reasoning_tokens),SUM(total_tokens) FROM usage_events GROUP BY status"
@@ -632,7 +638,7 @@ def child_usage_evidence(state: Path, goal_id: str) -> dict[str, Any]:
     path = usage_ledger_path(state)
     if path is None:
         raise CaseFailureError("missing_usage_ledger")
-    with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as db:
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
         rows = db.execute(
             "SELECT turn_id,root_turn_id,parent_turn_id,status,input_tokens,output_tokens,"
             "cache_read_tokens,total_tokens,goal_id FROM usage_events WHERE goal_id=?",
@@ -680,6 +686,43 @@ def child_usage_evidence(state: Path, goal_id: str) -> dict[str, Any]:
     }
 
 
+def isolated_user_environment(root: Path) -> dict[str, str]:
+    """Give ordinary home lookups a private cross-platform location."""
+    home = root / "user-home"
+    roaming, local = home / "AppData" / "Roaming", home / "AppData" / "Local"
+    for path in (home, roaming, local):
+        path.mkdir(parents=True, exist_ok=True)
+    return {
+        "HOME": str(home),
+        # ntpath.expanduser deliberately ignores HOME; omitting USERPROFILE
+        # makes Path.home() fail in a Windows child with our minimal environment.
+        "USERPROFILE": str(home),
+        "APPDATA": str(roaming),
+        "LOCALAPPDATA": str(local),
+        "PYTHONUTF8": "1",
+        "PYTHONIOENCODING": "utf-8",
+    }
+
+
+def gateway_startup_diagnostics(root: Path, exit_code: int | None) -> dict[str, Any]:
+    """Retain bounded failure categories, never raw startup log messages."""
+    exceptions: set[str] = set()
+    for name in ("stdout", "stderr"):
+        path = root / f"gateway.{name}.log"
+        if path.is_file():
+            with path.open("rb") as stream:
+                stream.seek(max(0, path.stat().st_size - 65536))
+                tail = stream.read().decode("utf-8", errors="replace")
+            exceptions.update(re.findall(
+                r"(?m)^([A-Za-z][A-Za-z0-9_]{0,70}(?:Error|Exception)):", tail,
+            ))
+    return {
+        "phase": "early_exit" if exit_code is not None else "health_timeout",
+        "exit_code": exit_code,
+        "exception_types": sorted(exceptions),
+    }
+
+
 class LiveCase:
     def __init__(
         self, root: Path, provider: str, model: str, secrets: Mapping[str, str],
@@ -719,6 +762,7 @@ class LiveCase:
 
     async def start(self) -> None:
         env = child_environment(self.provider, self.secrets)
+        env.update(isolated_user_environment(self.root))
         env.update(
             {
                 "PYTHONPATH": str(ROOT / "src"),
@@ -754,6 +798,10 @@ class LiveCase:
             shell=False,
         )
         _health, error = await asyncio.to_thread(_wait_for_gateway_health, self.process, self.port)
+        if error:
+            self.evidence["gateway_startup"] = gateway_startup_diagnostics(
+                self.root, self.process.poll(),
+            )
         self.check("gateway_healthy", not error)
         self.check("usage_ledger_resolved", usage_ledger_path(self.root / "state") is not None)
         await self.reconnect()
@@ -936,25 +984,38 @@ QUESTION = (
 
 
 def _direct_verification_command(arguments: Any, workspace: Path) -> bool:
-    """Recognize direct Python script execution, excluding shell wrappers/readers."""
+    """Recognize a Python verifier, optionally after changing to this workspace."""
     if not isinstance(arguments, dict) or not isinstance(arguments.get("command"), str):
         return False
-    try:
-        parts = shlex.split(arguments["command"])
-    except ValueError:
-        return False
-    if not parts or not re.fullmatch(
-        r"(?:python(?:3(?:\.\d+)?)?|py)(?:\.exe)?", Path(parts[0]).name, flags=re.I
-    ):
-        return False
-    rest = parts[1:]
-    while rest and rest[0] in {"-3", "-u", "-B", "-E", "-s"}:
-        rest = rest[1:]
-    if len(rest) != 1:
+    command = arguments["command"]
+    # The evidence reader does not evaluate expansions or multi-line programs.
+    if any(char in command for char in ("$", "`", "\n", "\r")):
         return False
     try:
-        cwd = Path(arguments.get("cwd") or workspace)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        parts = list(lexer)
+        cwd = Path(arguments.get("workdir") or workspace)
         cwd = cwd if cwd.is_absolute() else workspace / cwd
+        if len(parts) >= 3 and parts[0] == "cd":
+            if parts[2] != "&&":
+                return False
+            target = Path(parts[1])
+            target = target if target.is_absolute() else cwd / target
+            if target.resolve() != workspace.resolve():
+                return False
+            cwd = target
+            parts = parts[3:]
+        if not parts or not re.fullmatch(
+            r"(?:python(?:3(?:\.\d+)?)?|py)(?:\.exe)?", Path(parts[0]).name, flags=re.I
+        ):
+            return False
+        rest = parts[1:]
+        while rest and rest[0] in {"-3", "-u", "-B", "-E", "-s"}:
+            rest = rest[1:]
+        if len(rest) != 1:
+            return False
         script = Path(rest[0])
         script = script if script.is_absolute() else cwd / script
         return script.resolve() == (workspace / "verify.py").resolve()
@@ -1495,6 +1556,230 @@ async def plan_stop_case(case: LiveCase) -> None:
     )
 
 
+# The child waits on a file barrier, bounded even if the Gateway is killed.
+# It intentionally writes FINISHED after release so an orphaned process is visible.
+CHILD_STOP_FIXTURE = """from pathlib import Path
+import os
+import sys
+import time
+
+root = Path(__file__).resolve().parent
+maximum = float(sys.argv[1]) if len(sys.argv) == 2 else 180.0
+assert 0 < maximum <= 180
+with (root / "child-started.txt").open("a", encoding="utf-8") as stream:
+    stream.write("STARTED\\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+print("STARTED", flush=True)
+deadline = time.monotonic() + maximum
+while not (root / "child-release.txt").is_file():
+    if time.monotonic() >= deadline:
+        (root / "child-timed-out.txt").write_text("TIMEOUT\\n", encoding="utf-8")
+        raise SystemExit(3)
+    time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+with (root / "child-finished.txt").open("a", encoding="utf-8") as stream:
+    stream.write("FINISHED\\n")
+print("FINISHED", flush=True)
+"""
+
+
+def _plan_stop_child_binding(records: Sequence[dict[str, Any]], parent: str) -> dict[str, str]:
+    requests = [r for r in records if r.get("turn_id") == parent
+                and r.get("kind") == "tool_request"
+                and (r.get("payload") or {}).get("name") == "sessions_spawn"]
+    if len(requests) != 1:
+        raise CaseFailureError("plan_stop_child_exactly_one_spawn")
+    request = requests[0]
+    replies = [r for r in records if r.get("turn_id") == parent
+               and r.get("kind") == "tool_response"
+               and (r.get("payload") or {}).get("tool_use_id")
+               == request["payload"].get("tool_use_id")]
+    if len(replies) != 1 or replies[0]["payload"].get("is_error"):
+        raise CaseFailureError("plan_stop_child_spawn_receipt")
+    if not (isinstance(request.get("seq"), int) and isinstance(replies[0].get("seq"), int)
+            and request["seq"] < replies[0]["seq"]):
+        raise CaseFailureError("plan_stop_child_spawn_sequence")
+    try:
+        child = json.loads(replies[0]["payload"]["result"])
+        if not all(isinstance(child.get(k), str) and child[k] for k in ("session_key", "task_id")):
+            raise ValueError("invalid child identity")
+    except (ValueError, TypeError, KeyError) as exc:
+        raise CaseFailureError("plan_stop_child_spawn_identity") from exc
+    return {k: child[k] for k in ("session_key", "task_id")}
+
+
+def _plan_stop_child_exec(arguments: Any, workspace: Path) -> bool:
+    if not isinstance(arguments, dict) or not isinstance(arguments.get("command"), str):
+        return False
+    if any(marker in arguments["command"] for marker in ("$", "`", "\n", "\r")):
+        return False
+    try:
+        lexer = shlex.shlex(arguments["command"], posix=True, punctuation_chars=True)
+        lexer.whitespace_split, lexer.commenters = True, ""
+        parts = list(lexer)
+        cwd = Path(arguments.get("workdir") or workspace)
+        cwd = cwd if cwd.is_absolute() else workspace / cwd
+        if len(parts) >= 3 and parts[0] == "cd":
+            target = Path(parts[1])
+            target = target if target.is_absolute() else cwd / target
+            if parts[2] != "&&" or target.resolve() != workspace.resolve():
+                return False
+            cwd, parts = target, parts[3:]
+        if not parts or not re.fullmatch(
+            r"(?:python(?:3(?:\.\d+)?)?|py)(?:\.exe)?", Path(parts[0]).name, flags=re.I,
+        ):
+            return False
+        rest = parts[1:]
+        while rest and rest[0] in {"-3", "-u", "-B", "-E", "-s"}:
+            rest = rest[1:]
+        if len(rest) != 1:
+            return False
+        path = Path(rest[0])
+        path = path if path.is_absolute() else cwd / path
+        return path.resolve() == (workspace / "child_wait.py").resolve()
+    except (TypeError, ValueError, OSError):
+        return False
+
+
+def plan_stop_child_evidence(
+    case: LiveCase, key: str, child_key: str, parent: str, child: str,
+    expected_parent_turns: set[str], fixture: bytes,
+) -> dict[str, Any]:
+    """Project exact lineage and absence of a completion wake, without identities."""
+    path = usage_ledger_path(case.root / "state")
+    if path is None:
+        raise CaseFailureError("missing_usage_ledger")
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
+        rows = db.execute("SELECT task_id,session_key,status,details FROM agent_tasks").fetchall()
+        child_row = next((r for r in rows if r[0] == child and r[1] == child_key), None)
+        metadata = ((json.loads(child_row[3] or "{}") if child_row else {}).get("metadata") or {})
+        parent_ids = {r[0] for r in rows if r[1] == key}
+        child_rows = [r for r in rows if r[1] == child_key]
+        usage = dict(db.execute(
+            "SELECT turn_id,COUNT(*) FROM usage_events WHERE turn_id IN (?,?) GROUP BY turn_id",
+            (parent, child),
+        ))
+    child_exec = [r for r in case.records() if r.get("turn_id") == child
+                  and r.get("kind") == "tool_request"
+                  and (r.get("payload") or {}).get("name") == "exec_command"]
+    started = case.workspace / "child-started.txt"
+    return {
+        "exact_parent_turns": parent_ids == expected_parent_turns,
+        "exact_child_turn": len(child_rows) == 1 and child_rows[0][0] == child,
+        "child_lineage_matches": metadata.get("parent_task_id") == parent
+        and metadata.get("parent_session_key") == key,
+        "child_cancelled": child_row is not None and child_row[2] == "cancelled",
+        "parent_and_child_have_usage": usage.get(parent, 0) > 0 and usage.get(child, 0) > 0,
+        "one_real_child_execution": len(child_exec) == 1
+        and _plan_stop_child_exec(child_exec[0]["payload"].get("arguments"), case.workspace),
+        "started_once": started.is_file() and started.read_text().splitlines() == ["STARTED"],
+        "fixture_unchanged": (case.workspace / "child_wait.py").read_bytes() == fixture,
+        "child_finish_absent": not (case.workspace / "child-finished.txt").exists(),
+        "child_timeout_absent": not (case.workspace / "child-timed-out.txt").exists(),
+    }
+
+
+async def plan_stop_child_case(case: LiveCase) -> None:
+    """Stop a running Plan task and its real child blocked on a bounded file barrier."""
+    key = "agent:main:webchat:live-plan-stop-child"
+    script = case.workspace / "child_wait.py"
+    script.write_text(CHILD_STOP_FIXTURE, encoding="utf-8")
+    fixture = script.read_bytes()
+    await case.rpc("plans.setMode", sessionKey=key, mode="plan", expectedRevision=0)
+    planning = await case.send(
+        key, "Read child_wait.py and submit a plan for delegating this bounded synthetic task "
+        "to one child while the parent asks me Blue or Green with request_user_input. "
+        "The child will execute the existing script and wait for its file barrier. "
+        "Do not implement, spawn, run commands, edit files, or ask questions during planning.",
+    )
+    planned = await case.done(key, planning)
+    revision = (planned.get("currentPlan") or {}).get("revisionId")
+    case.check("stop_child_plan_submitted", bool(revision) and script.read_bytes() == fixture
+               and not (case.workspace / "child-started.txt").exists())
+    accepted = await case.rpc(
+        "plans.implement", sessionKey=key, planRevisionId=revision,
+        clientRequestId=str(uuid.uuid4()), intent="continue",
+        message=(
+            "Implement the approved delegation now. Call sessions_spawn exactly once. "
+            f"Tell the child to execute python3 {script} with exec_command, workdir "
+            f"{case.workspace}, timeout 180; the script is bounded to 180 seconds. "
+            "Tell it not to edit any files, spawn children, or ask questions, and to wait for "
+            "that real command. After sessions_spawn returns, immediately call request_user_input "
+            "with question id color, Blue and Green choices, and wait for my actual answer. "
+            "Do not wait for the child first, do not call sessions_yield, do not execute the "
+            "script yourself and do not write the release file or edit any fixture/marker."
+        ),
+    )
+    parent = str(accepted["turn_id"])
+    request = await case.pending(key, parent)
+    child = _plan_stop_child_binding(case.records(), parent)
+    await case.subscribe(child["session_key"])
+    child_snapshot = await case.until(
+        child["session_key"],
+        lambda s: (case.workspace / "child-started.txt").is_file() or any(
+            t.get("task_id") == child["task_id"] and t.get("status") in TERMINAL
+            for t in s.get("tasks", [])
+        ),
+    )
+    case.check("stop_child_running_at_barrier", any(
+        t.get("task_id") == child["task_id"] and t.get("status") == "running"
+        for t in child_snapshot.get("tasks", [])
+    ))
+    parent_snapshot = await case.snapshot(key)
+    run = parent_snapshot.get("activePlanRun") or {}
+    case.check("stop_child_parent_wait_released_single_slot", run.get("status") == "running"
+               and run.get("activeTaskId") == parent and bool(parent_snapshot["pendingUserInputs"]))
+    before = plan_stop_child_evidence(
+        case, key, child["session_key"], parent, child["task_id"], {planning, parent}, fixture,
+    )
+    case.evidence["child_before_plan_stop"] = before
+    case.check("stop_child_real_execution_before_stop", all(
+        value for name, value in before.items() if name != "child_cancelled"
+    ))
+    stopped = await case.rpc(
+        "plans.cancelRun", sessionKey=key, runId=run["runId"],
+        expectedStateRevision=run["stateRevision"],
+    )
+    case.check("stop_child_plan_cancelled", stopped["planRun"]["status"] == "cancelled")
+    for session_key, task_id in ((key, parent), (child["session_key"], child["task_id"])):
+        ended = await case.until(session_key, lambda s: any(
+            t.get("task_id") == task_id and t.get("status") in TERMINAL for t in s.get("tasks", [])
+        ))
+        case.check("stop_child_parent_cancelled" if task_id == parent else "stop_child_cancelled",
+                   any(t.get("task_id") == task_id and t.get("status") == "cancelled"
+                       for t in ended["tasks"]))
+    # Release only after both task terminals. An orphaned shell child would now
+    # write FINISHED; a later ordinary user turn also exercises wake suppression.
+    (case.workspace / "child-release.txt").write_text("RELEASE\n", encoding="utf-8")
+    await case.reconnect()
+    await _reject_stale_effect_answer(case, key, request)
+    followup = await case.send(
+        key, "Read child-started.txt and report its one STARTED line. The earlier Plan and "
+        "child were stopped. Do not run commands, edit files, delegate, ask questions, "
+        "create a Goal or resume any earlier task.",
+    )
+    await case.done(key, followup)
+    async with asyncio.timeout_at(case.deadline):
+        observation_end = time.monotonic() + 1.0
+        while time.monotonic() < observation_end:
+            case.check("stop_child_no_orphan_finish", not (
+                case.workspace / "child-finished.txt"
+            ).exists())
+            await asyncio.sleep(min(0.05, max(0.0, observation_end - time.monotonic())))
+    after = plan_stop_child_evidence(
+        case, key, child["session_key"], parent, child["task_id"],
+        {planning, parent, followup}, fixture,
+    )
+    case.evidence["child_after_plan_stop"] = after
+    case.check("stop_child_no_completion_wake_or_orphan", all(after.values()))
+    final = await case.snapshot(key)
+    case.check("stop_child_parent_idle", not final.get("active_task_group_ids")
+               and not final.get("pendingUserInputs") and not final.get("activePlanRun"))
+    counts = case.guard.snapshot()["counts"]
+    case.check("stop_child_exact_dispatch_turns", counts.get("root_turns") == 3
+               and counts.get("children") == 1)
+
+
 async def plan_recovery_case(case: LiveCase) -> None:
     """Inject Gateway loss after a durable effect; explicitly resume a normal turn."""
     key = "agent:main:webchat:live-plan-recovery"
@@ -1626,7 +1911,7 @@ def durable_case_state(state: Path, key: str) -> dict[str, Any]:
     path = usage_ledger_path(state)
     if path is None:
         raise CaseFailureError("missing_usage_ledger")
-    with sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True) as db:
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
         tasks = [
             {"id": task, "status": status, "goal": (json.loads(raw or "{}"))
              .get("goal_effective_context", (json.loads(raw or "{}"))
@@ -2047,10 +2332,14 @@ async def cli_case(case: LiveCase) -> None:
         frame = await asyncio.to_thread(terminal.capture_text, f"geometry-{width}")
         assert_prompt_ready(frame)
         assert_no_duplicate_fixed_chrome(frame)
+        case.check("cli_unicode_framebuffer", all(
+            text in frame.text for text in ("🦑", "✅", "终端验证完成")
+        ))
         cursor = await asyncio.to_thread(terminal.cursor_position)
         case.check("cli_cursor_in_bounds", cursor is not None
                    and 0 <= cursor[0] < width and 0 <= cursor[1] < 36)
-        geometry.append({"columns": width, "rows": 36, "cursor_in_bounds": True})
+        geometry.append({"columns": width, "rows": 36, "cursor_in_bounds": True,
+                         "unicode_visible": True})
     await asyncio.to_thread(terminal.paste, "/")
     overlay = await asyncio.to_thread(
         terminal.wait_for_text, "commands", timeout_s=5, checkpoint="commands",
@@ -2094,6 +2383,7 @@ async def run_case(
                 await {
                     "plan": plan_case,
                     "plan-stop": plan_stop_case,
+                    "plan-stop-child": plan_stop_child_case,
                     "plan-recovery": plan_recovery_case,
                     "goal": goal_case,
                     "budget": budget_case,

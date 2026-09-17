@@ -29,7 +29,7 @@
       "delivery": "live-only-best-effort",
       "family": "conversation.events",
       "schema": "conversation/conversation-events.schema.json",
-      "schemaSha256": "35b616b613fd89449267b973846a8c345630d1ed3525174ec7c65f7c7d4882e8",
+      "schemaSha256": "49399dc2947bbd9727ce95541e9cb25453678a2ac8708facc4d7e7fab5a3fb49",
       "schemaVersion": 1,
       "wireNames": [
         "chat.done",
@@ -725,6 +725,12 @@
       "name": "migration.sources.preview",
       "schema": "platform/migration-sources-preview.schema.json",
       "schemaSha256": "7d89ea10bff333c3a5c92fb157ea887fbc5823685808e6531fab1cb9426597ff"
+    },
+    {
+      "lifecycle": "stable",
+      "name": "models.capacity.resolve",
+      "schema": "platform/models-capacity-resolve.schema.json",
+      "schemaSha256": "ad2449d34174321d078ee87779b13457c998056897de6008ac9a41e8829851e0"
     },
     {
       "lifecycle": "stable",
@@ -1471,10 +1477,10 @@
   "protocol": "opensquilla-websocket-json",
   "source": {
     "eventFamilyCount": 10,
-    "generatorSha256": "db0dc136a3862dbc79662ba17cd6445730437ac2f33027389cb0cece1d17fec5",
-    "methodCount": 216,
-    "schemaCount": 226,
-    "schemaTreeSha256": "9a18906d1491af9546de1e9e3e0371e362ac1bd4e8e8070da266f56772e60483"
+    "generatorSha256": "806c30bfc7e30c2c0db1b084fbaf32aca759430ef2dda49bed8a9e3952312a65",
+    "methodCount": 217,
+    "schemaCount": 227,
+    "schemaTreeSha256": "679f243c8530110baab109679a5b523e20ed4294e7a63a5a59e4e7625577d97d"
   },
   "wireVersion": 4
 }

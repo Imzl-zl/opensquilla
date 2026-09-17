@@ -9,6 +9,7 @@ import sqlite3
 import tempfile
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager, closing
 from pathlib import Path
 
 import httpx
@@ -25,6 +26,86 @@ def _request(model: str = "deepseek-chat", **kwargs: object) -> bytes:
 
 def _guard(tmp_path: Path) -> live.DispatchGuard:
     return live.DispatchGuard(tmp_path / "guard.sqlite", provider="deepseek", model="deepseek-chat")
+
+
+def test_guard_and_projection_close_sqlite_handles_without_garbage_collection(
+    tmp_path, monkeypatch,
+):
+    # Keep strong references so CPython cannot hide a leaked Windows file lock
+    # with reference counting or a later garbage collection cycle.
+    opened = []
+    connect = sqlite3.connect
+
+    def tracked_connect(*args, **kwargs):
+        db = connect(*args, **kwargs)
+        opened.append(db)
+        return db
+
+    monkeypatch.setattr(live.sqlite3, "connect", tracked_connect)
+    guard = _guard(tmp_path)
+    guard.claim("root_turns", 1, turn_id="synthetic")
+    with pytest.raises(live.DispatchLimitError):
+        guard.claim("root_turns", 1, turn_id="over-limit")
+    with pytest.raises(RuntimeError, match="rollback"):
+        with guard.connect() as db:
+            db.execute("UPDATE counters SET value=99 WHERE name='root_turns'")
+            raise RuntimeError("rollback")
+    assert guard.snapshot()["counts"] == {"root_turns": 1}
+    guard.path.unlink()
+
+    with closing(connect(tmp_path / "sessions.db")) as db, db:
+        db.execute(
+            "CREATE TABLE usage_events (status, input_tokens, output_tokens, "
+            "reasoning_tokens, total_tokens)"
+        )
+        db.execute("INSERT INTO usage_events VALUES ('finalized',1,2,0,3)")
+    assert live.ledger_projection(tmp_path)["rows"][0]["total"] == 3
+    # Include a failing read path, which must release its handle as well.
+    with pytest.raises(sqlite3.OperationalError):
+        live.child_usage_evidence(tmp_path, "synthetic")
+    for db in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            db.execute("SELECT 1")
+    (tmp_path / "sessions.db").unlink()
+
+
+def test_gateway_child_has_owned_home_for_windows_and_posix(tmp_path, monkeypatch):
+    import ntpath
+    import subprocess
+    import sys
+
+    env = live.child_environment("deepseek", {}, base_environment={})
+    for name in ("USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
+        monkeypatch.delenv(name, raising=False)
+    assert ntpath.expanduser("~") == "~"  # the old minimal Windows child environment
+    owned = live.isolated_user_environment(tmp_path)
+    env.update(owned)
+    for name, value in owned.items():
+        monkeypatch.setenv(name, value)
+    assert ntpath.expanduser("~") == str(tmp_path / "user-home")
+    assert not any("KEY" in name or "TOKEN" in name for name in env)
+    assert all(Path(owned[name]).is_relative_to(tmp_path)
+               for name in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"))
+    # Real child interpreter resolution covers Path.home(), not only env shape.
+    child_env = live.minimal_child_environment()
+    child_env.update(owned)
+    result = subprocess.run(
+        [sys.executable, "-c", "from pathlib import Path; print(Path.home())"],
+        env=child_env, capture_output=True, text=True, timeout=10, check=True,
+    )
+    assert result.stdout.strip() == str(tmp_path / "user-home")
+
+
+def test_gateway_startup_diagnostics_preserve_only_machine_categories(tmp_path):
+    (tmp_path / "gateway.stderr.log").write_text(
+        "Traceback (most recent call last):\n"
+        "RuntimeError: private prompt and key material\n"
+        "ValueError: private path\n", encoding="utf-8",
+    )
+    assert live.gateway_startup_diagnostics(tmp_path, 1) == {
+        "phase": "early_exit", "exit_code": 1,
+        "exception_types": ["RuntimeError", "ValueError"],
+    }
 
 
 @pytest.mark.parametrize("provider", tuple(live.MODELS))
@@ -321,7 +402,10 @@ async def test_real_gateway_boot_and_control_rpc_without_provider_credentials() 
     case = live.LiveCase(root, "deepseek", "deepseek-chat", {})
     try:
         async with asyncio.timeout(60):
-            await case.start()
+            try:
+                await case.start()
+            except live.CaseFailureError as exc:
+                raise AssertionError(case.evidence.get("gateway_startup", {})) from exc
             ledger = live.usage_ledger_path(root / "state")
             assert ledger == root / "state" / "state" / "sessions.db"
             assert live.ledger_projection(root / "state") == {"rows": []}
@@ -597,6 +681,25 @@ def test_workspace_context_checks_provider_system_configuration(tmp_path):
     proof = live.runtime_diagnostics(tmp_path, records, tmp_path)
     assert proof["requests"][0]["workspace_context_present"]
     assert str(tmp_path) not in json.dumps(proof)
+
+
+@pytest.mark.parametrize("path_text", [r"C:\Synthetic\工程\workspace", "/synthetic/工程/workspace"])
+@pytest.mark.parametrize("present", [False, True])
+def test_workspace_context_compares_json_escaped_path_without_disclosing_it(
+    tmp_path, path_text, present,
+):
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    workspace = (
+        PureWindowsPath(path_text) if path_text.startswith("C:") else PurePosixPath(path_text)
+    )
+    records = [{"kind": "llm_request", "payload": {
+        "messages": [{"content": "Synthetic ordinary request"}],
+        "config": {"system": f"Workspace: {workspace}" if present else "No workspace supplied"},
+    }}]
+    proof = live.runtime_diagnostics(tmp_path, records, workspace)
+    assert proof["requests"][0]["workspace_context_present"] is present
+    assert str(workspace) not in json.dumps(proof)
 
 
 async def test_external_verifier_executes_real_artifact_without_keys(tmp_path, monkeypatch):
@@ -889,7 +992,9 @@ async def test_restart_accepts_null_resume_task_until_idle_admission(tmp_path, m
     assert requested == ["old", "new"]
 
 
-async def test_stop_total_deadline_bounds_dripping_http_before_terminal_cleanup(tmp_path):
+async def test_stop_total_deadline_bounds_dripping_http_before_terminal_cleanup(
+    tmp_path, monkeypatch,
+):
     # This is a real local HTTP stream, not a provider or a mocked live result.
     from opensquilla.gateway import boot  # noqa: F401 - warm production import before deadline
 
@@ -900,7 +1005,12 @@ async def test_stop_total_deadline_bounds_dripping_http_before_terminal_cleanup(
     async def drip(reader, writer):
         handlers.add(asyncio.current_task())
         try:
-            await reader.readuntil(b"\r\n\r\n")
+            warmup = await reader.readuntil(b"\r\n\r\n")
+            assert warmup.startswith(b"GET /ready ")
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            await writer.drain()
+            request = await reader.readuntil(b"\r\n\r\n")
+            assert request.startswith(b"POST /api/system/shutdown ")
             request_started.set()
             writer.write(b"HTTP/1.1 202 Accepted\r\nTransfer-Encoding: chunked\r\n\r\n")
             await writer.drain()
@@ -911,7 +1021,7 @@ async def test_stop_total_deadline_bounds_dripping_http_before_terminal_cleanup(
             writer.write(b"0\r\n\r\n")
             await writer.drain()
             response_finished.set()
-        except (ConnectionError, asyncio.CancelledError):
+        except (ConnectionError, asyncio.IncompleteReadError, asyncio.CancelledError):
             pass
         finally:
             writer.close()
@@ -945,10 +1055,23 @@ async def test_stop_total_deadline_bounds_dripping_http_before_terminal_cleanup(
             order.append("terminal-cleaned")
 
     server = await asyncio.start_server(drip, "127.0.0.1", 0)
+    client = httpx.AsyncClient(trust_env=False)
     try:
         case = live.LiveCase(tmp_path, "deepseek", "deepseek-v4-flash", {})
         case.port = server.sockets[0].getsockname()[1]
         case.process, case.terminal = Process(), Terminal()
+        # SSL/AnyIO import and the first Windows connection are setup, not the
+        # dripping response under test. Warm a real keepalive connection before
+        # assigning the same strict 200ms case deadline used by this regression.
+        async with asyncio.timeout(5):
+            await client.get(f"http://127.0.0.1:{case.port}/ready")
+
+        @asynccontextmanager
+        async def shutdown_client(**kwargs):
+            assert kwargs == {"trust_env": False}
+            yield client
+
+        monkeypatch.setattr(httpx, "AsyncClient", shutdown_client)
         case.deadline = asyncio.get_running_loop().time() + 0.2
         async with asyncio.timeout(2):
             result = await case.stop()
@@ -957,6 +1080,7 @@ async def test_stop_total_deadline_bounds_dripping_http_before_terminal_cleanup(
         assert result["forced"] and result["process_exited"]
         assert order == ["gateway-killed", "terminal-cleaned"]
     finally:
+        await client.aclose()
         server.close()
         await server.wait_closed()
         for handler in handlers:
@@ -1051,3 +1175,55 @@ def test_source_fingerprint_covers_imported_helper_without_inheriting_credential
     assert before["execution_source_sha256"] != after["execution_source_sha256"]
     assert before["head"] == after["head"] == "synthetic-head"
     assert len(calls) == 4
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_workspace_cd_preserves_actual_verifier_exit_and_order(tmp_path, compact):
+    import shlex
+
+    workspace = tmp_path / "project with spaces"
+    workspace.mkdir()
+    connector = "&&" if compact else " && "
+    command = f"cd {shlex.quote(str(workspace))}{connector}python3 verify.py"
+    rows = _verification_records()
+    for index in (0, 4):
+        rows[index]["payload"]["arguments"]["command"] = command
+    proof = live.verification_evidence(rows, "implementation", workspace)
+    assert proof["failure_before_first_write"]
+    assert proof["success_after_last_write"]
+    assert proof["verification_exits"] == [1, 0]
+    assert not proof["opaque_exec_before_first_write"]
+
+
+@pytest.mark.parametrize("command", [
+    "cd .. && python3 verify.py",
+    "cd . ; python3 verify.py",
+    "cd . || python3 verify.py",
+    "cd . && python3 verify.py || true",
+    "cd . && python3 verify.py | cat",
+    "cd . && python3 verify.py; true",
+    "cd . && python3 verify.py && echo PASS",
+    "cd . && python3 verify.py > replacement.txt",
+    "cd . && python3 verify.py\ntrue",
+    "cd $(pwd) && python3 verify.py",
+    "cd `pwd` && python3 verify.py",
+    "cd . && python3 -c 'print(\"PASS\")'",
+    "cd . && cat verify.py",
+])
+def test_cd_wrappers_cannot_hide_failures_or_substitute_verification(tmp_path, command):
+    rows = _verification_records()
+    rows[0]["payload"]["arguments"]["command"] = command
+    proof = live.verification_evidence(rows, "implementation", tmp_path)
+    assert not proof["failure_before_first_write"]
+    assert proof["direct_verification_calls"] == 1
+
+
+def test_cd_from_explicit_other_cwd_requires_exact_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    assert live._direct_verification_command(
+        {"command": "cd workspace && python3 verify.py", "workdir": str(tmp_path)}, workspace
+    )
+    assert not live._direct_verification_command(
+        {"command": "cd . && python3 verify.py", "workdir": str(tmp_path)}, workspace
+    )

@@ -493,15 +493,15 @@ def test_compatibility_manifest_is_schema_derived_and_deterministic() -> None:
     assert manifest["protocol"] == runner.GATEWAY_PROTOCOL
     assert manifest["wireVersion"] == 4
     assert manifest["source"] == {
-        "schemaCount": 226,
-        "methodCount": 216,
+        "schemaCount": 227,
+        "methodCount": 217,
         "eventFamilyCount": 10,
         "schemaTreeSha256": runner._schema_tree_digest(specs),
         "generatorSha256": runner._generator_digest(),
     }
     assert any(entry["name"] == "skills.install.status" for entry in manifest["methods"])
     assert Counter(entry["lifecycle"] for entry in manifest["methods"]) == {
-        "stable": 213,
+        "stable": 214,
         "legacy": 3,
     }
     assert [
@@ -522,6 +522,11 @@ def test_compatibility_manifest_is_schema_derived_and_deterministic() -> None:
     )
     assert plan_presentation["lifecycle"] == "stable"
     assert plan_presentation["schema"] == "plans/plans-set-presentation.schema.json"
+    capacity_resolve = next(
+        entry for entry in manifest["methods"] if entry["name"] == "models.capacity.resolve"
+    )
+    assert capacity_resolve["lifecycle"] == "stable"
+    assert capacity_resolve["schema"] == "platform/models-capacity-resolve.schema.json"
     assert {
         entry["name"]: entry["canonicalName"]
         for entry in manifest["methods"]

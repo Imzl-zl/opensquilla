@@ -1684,6 +1684,42 @@ def test_ci_result_gate_covers_every_conditional_job_without_legacy_flags() -> N
     }
 
 
+@pytest.mark.parametrize("runner_os,name", [
+    ("macOS", "window-background-flow"),
+    ("macOS", "onboarding-flow"),
+    ("Linux", "window-background-flow"),
+    ("Windows", "window-background-flow"),
+])
+def test_desktop_case_arguments_work_with_nounset(
+    tmp_path: Path, runner_os: str, name: str,
+) -> None:
+    steps = _workflow("ci.yml")["jobs"]["desktop-recovery-e2e"]["steps"]
+    flow = next(s["run"] for s in steps
+                if s.get("name") == "Run compiled Desktop recovery flows")
+    definition = flow.split("classify_retryable_infrastructure_failure()", 1)[0]
+    definition = definition.replace("${{ matrix.shard }}", "profiles")
+    # Execute the real shell entry point while recording, rather than launching,
+    # its Node command. macOS's system Bash rejects empty arrays under nounset.
+    script = definition + '\nnode() { printf "%s\\n" "$@"; }\n'
+    script += 'run_case "$CASE_NAME" "scripts/synthetic-flow.mjs" 1\n'
+    shell = "/bin/bash" if sys.platform == "darwin" else _bash_executable()
+    result = subprocess.run(
+        [shell, "-euo", "pipefail", "-c", script],
+        env={**os.environ, "CI_REPORT_DIR": tmp_path.as_posix(),
+             "RUNNER_OS": runner_os, "CASE_NAME": name},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    arguments = result.stdout.splitlines()
+    command = arguments[arguments.index("--") + 1:]
+    expected = ["xvfb-run", "-a"] if runner_os == "Linux" else []
+    expected += ["node", "scripts/synthetic-flow.mjs"]
+    if runner_os == "macOS" and name == "window-background-flow":
+        expected += ["--connection-faults", "--flow-control", "--idle-send",
+                     "--background-ms=65000"]
+    assert command == expected
+
+
 def test_desktop_recovery_e2e_runs_compiled_flows_on_all_release_platforms() -> None:
     job = _workflow("ci.yml")["jobs"]["desktop-recovery-e2e"]
     steps = job["steps"]
@@ -2147,12 +2183,16 @@ def test_ci_evidence_artifacts_are_replaceable_across_rerun_attempts() -> None:
 
 def test_webui_chat_recovery_runs_the_verified_dist_through_gateway() -> None:
     job = _workflow("ci.yml")["jobs"]["webui-chat-recovery"]
+    assert job["runs-on"] == "ubuntu-22.04"
     steps = job["steps"]
     download = next(
         step for step in steps if step.get("name") == "Download verified frontend artifact"
     )
     install_gateway = next(
         step for step in steps if step.get("name") == "Install Gateway dependencies"
+    )
+    sandbox = next(
+        step for step in steps if step.get("name") == "Install and verify Linux guest sandbox"
     )
     run = next(
         step
@@ -2171,6 +2211,16 @@ def test_webui_chat_recovery_runs_the_verified_dist_through_gateway() -> None:
     )
     assert stage["working-directory"] == "opensquilla-webui"
     assert steps.index(download) < steps.index(install_gateway) < steps.index(run)
+    assert steps.index(install_gateway) < steps.index(sandbox) < steps.index(run)
+    assert "if" not in sandbox
+    assert not sandbox.get("continue-on-error")
+    assert "apt-get install --yes bubblewrap" in sandbox["run"]
+    assert (
+        "bwrap --unshare-user --unshare-net --ro-bind / / --proc /proc /bin/true"
+        in sandbox["run"]
+    )
+    assert "probe_bwrap()" in sandbox["run"]
+    assert "not probe.available or not probe.supports_perms" in sandbox["run"]
     assert install_gateway["run"] == "uv sync --frozen"
     assert job["env"]["OPENSQUILLA_PLAYWRIGHT_MANAGE_WEBUI"] == "gateway"
     assert job["env"]["OPENSQUILLA_WEBUI_BASE_URL"].endswith(":18791")
@@ -2182,10 +2232,14 @@ def test_webui_chat_recovery_runs_the_verified_dist_through_gateway() -> None:
     }
     required_specs = {
         "assistant-activity.spec.ts",
+        "auth-connection-recovery.spec.ts",
+        "chat-send-lifecycle.spec.ts",
+        "chat-send-lifecycle.real.spec.ts",
         "composer-paste.spec.ts",
         "ensemble-new-task-legacy-turn.spec.ts",
         "goal-mode.spec.ts",
         "history-hydration.spec.ts",
+        "idle-chat-recovery.spec.ts",
         "new-task-ensemble-race.spec.ts",
         "plan-questionnaire-lifecycle.spec.ts",
         "plan-presentation.spec.ts",
@@ -2785,4 +2839,7 @@ def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_
         "tests/test_tools/test_approval_unification.py",
         "tests/test_live_multi_provider_matrix.py",
         "tests/test_live_provider_profile_smoke.py",
+        "tests/test_live_plan_goal_runtime.py",
     }
+    assert "-vv --tb=short" in preflight["run"]
+    assert "--showlocals" not in preflight["run"]
