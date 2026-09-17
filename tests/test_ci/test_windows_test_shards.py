@@ -329,6 +329,11 @@ RECENTLY_ADDED_ACTIVE_TESTS = {
     "tests/test_telemetry_server/test_product_active_pipeline.py",
     "tests/test_telemetry_server/test_product_activity_pipeline.py",
     "tests/test_telemetry_server/test_protocol_upgrade_pipeline.py",
+    # Workspace MD retirement suites use the declared provisional floor until
+    # a comparable three-run Windows refresh supplies measured timings.
+    "tests/test_gateway/test_workspace_md_retirement_rpc.py",
+    "tests/test_identity/test_workspace_md_retirement.py",
+    "tests/test_scheduler/test_heartbeat_retirement.py",
 }
 
 
