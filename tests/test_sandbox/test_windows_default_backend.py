@@ -1126,9 +1126,9 @@ def test_payload_prepends_real_windows_tool_paths_and_grants_user_tool_acl(
         grant["path"]: grant["access"]
         for grant in payload["policy"]["windowsAclPlan"]["autoGrants"]
     }
-    assert grants[str(userprofile / "AppData")] == "RX"
-    assert grants[str(local_appdata)] == "RX"
-    assert grants[str(local_appdata / "OpenAI")] == "RX"
+    assert str(userprofile / "AppData") not in grants
+    assert str(local_appdata) not in grants
+    assert str(local_appdata / "OpenAI") not in grants
     assert grants[str(node_bin)] == "RX"
     assert str(git_cmd) not in grants
 
@@ -1191,10 +1191,65 @@ def test_payload_discovers_codex_bundled_git_and_node_tools(
         grant["path"]: grant["access"]
         for grant in payload["policy"]["windowsAclPlan"]["autoGrants"]
     }
-    assert grants[str(userprofile / ".cache")] == "RX"
-    assert grants[str(userprofile / ".cache" / "codex-runtimes")] == "RX"
+    assert str(userprofile / ".cache") not in grants
+    assert str(userprofile / ".cache" / "codex-runtimes") not in grants
     assert grants[str(git_cmd)] == "RX"
     assert grants[str(node_bin)] == "RX"
+
+
+@pytest.mark.parametrize("parent_parts", [("AppData", "Local"), (".cache",)])
+@pytest.mark.parametrize("explicit_parent_read", [False, True])
+def test_tool_discovery_keeps_ancestor_reads_explicit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_parts: tuple[str, ...],
+    explicit_parent_read: bool,
+) -> None:
+    from opensquilla.sandbox.backend import windows_default as mod
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    userprofile = tmp_path / "user"
+    ancestor = userprofile.joinpath(*parent_parts)
+    tool_root = ancestor / "tools" / "node" / "bin"
+    tool_root.mkdir(parents=True)
+    (tool_root / "node.exe").write_bytes(b"synthetic tool discovery fixture")
+    unrelated = ancestor / "unrelated"
+    unrelated.mkdir()
+    entries = [FileSystemPermissionEntry(workspace, FileSystemAccess.WRITE)]
+    if explicit_parent_read:
+        entries.append(FileSystemPermissionEntry(ancestor, FileSystemAccess.READ))
+    request = replace(
+        _request(workspace),
+        env={
+            "PATH": str(tool_root),
+            "USERPROFILE": str(userprofile),
+            "LOCALAPPDATA": str(userprofile / "AppData" / "Local"),
+            "APPDATA": str(userprofile / "AppData" / "Roaming"),
+        },
+        policy=replace(_policy(), file_system=FileSystemPermissionProfile(entries=tuple(entries))),
+    )
+    monkeypatch.setattr(mod, "_common_windows_tool_dirs", lambda _env: ())
+    monkeypatch.setattr(mod, "_host_tool_env", lambda _request: request.env)
+    monkeypatch.setattr(mod, "_runtime_readonly_roots", lambda: ())
+    monkeypatch.setattr(mod, "runtime_rx_roots", lambda _executable: ())
+    monkeypatch.setattr(mod, "process_executable_rx_roots", lambda _argv, _env: ())
+    monkeypatch.setattr(mod, "_capability_store_path", lambda: tmp_path / "cap_sids.json")
+    monkeypatch.setattr(mod, "_deny_acl_state_path", lambda: tmp_path / "deny_acl.json")
+
+    plan = mod._acl_plan_payload(request)
+    grants = {grant["path"]: grant for grant in plan["autoGrants"]}
+
+    assert grants[str(tool_root)]["access"] == "RX"
+    assert grants[str(workspace)]["access"] == "RWX"
+    assert str(tool_root.parent) not in grants
+    assert str(userprofile / "AppData") not in grants
+    assert str(unrelated) not in grants
+    if explicit_parent_read:
+        assert grants[str(ancestor)]["access"] == "RX"
+        assert grants[str(ancestor)]["kind"] == "policy"
+    else:
+        assert str(ancestor) not in grants
 
 
 def test_payload_encodes_stdin_as_base64(

@@ -815,10 +815,10 @@ def _acl_plan_payload(
             if _acl_sensitive_marker(root) is None
         )
     )
-    tool_traversal_roots = _windows_tool_traversal_roots(
-        tool_rx_roots,
-        host_env=_host_tool_env(request),
-    )
+    # Grant discovered tool directories, not their ancestors. The restricted
+    # token enables SeChangeNotifyPrivilege to traverse those ancestors. RX on
+    # a directory inherits to its children, so granting AppData or .cache here
+    # would rewrite unrelated trees before the requested process can start.
     runtime_acl_roots = tuple(
         root
         for root in runtime_rx_roots(_python_executable())
@@ -832,7 +832,6 @@ def _acl_plan_payload(
             AclGrant(root, AclAccess.RX, AclGrantKind.REQUIRED)
             for root in _workspace_traversal_roots(request.cwd)
         ),
-        *(AclGrant(root, AclAccess.RX, AclGrantKind.REQUIRED) for root in tool_traversal_roots),
         *(AclGrant(root, AclAccess.RX, AclGrantKind.REQUIRED) for root in runtime_acl_roots),
         *(AclGrant(root, AclAccess.RX, AclGrantKind.REQUIRED) for root in tool_rx_roots),
         *(AclGrant(root, AclAccess.RX, AclGrantKind.REQUIRED) for root in process_acl_roots),
@@ -1177,9 +1176,7 @@ def _process_base_env(request: SandboxRequest) -> dict[str, str]:
 
 
 def _is_filesystem_worker_request(request: SandboxRequest) -> bool:
-    return request.action_kind.startswith(
-        ("fs.worker.", "capability.probe.fs.worker.")
-    )
+    return request.action_kind.startswith(("fs.worker.", "capability.probe.fs.worker."))
 
 
 def _request_needs_host_tool_paths(request: SandboxRequest) -> bool:
@@ -1305,52 +1302,6 @@ def _common_windows_tool_dirs(env: Mapping[str, str]) -> tuple[Path, ...]:
                 )
             )
     return tuple(candidates)
-
-
-def _windows_tool_traversal_roots(
-    tool_roots: tuple[Path, ...],
-    *,
-    host_env: Mapping[str, str],
-) -> tuple[Path, ...]:
-    anchors: list[Path] = []
-    for key in ("LOCALAPPDATA", "APPDATA"):
-        value = _env_path(host_env, key)
-        if value is not None and value.parent != value:
-            anchors.append(value.parent)
-    userprofile = _env_path(host_env, "USERPROFILE")
-    if userprofile is not None:
-        anchors.append(userprofile / ".local")
-        anchors.append(userprofile / ".cache")
-
-    roots: list[Path] = []
-    for tool_root in tool_roots:
-        resolved_tool = tool_root.resolve(strict=False)
-        for anchor in anchors:
-            resolved_anchor = anchor.resolve(strict=False)
-            if not _is_relative_to_casefold(resolved_tool, resolved_anchor):
-                continue
-            roots.extend(_path_chain(resolved_anchor, resolved_tool.parent))
-            break
-    return tuple(_dedupe_paths(path for path in roots if _acl_sensitive_marker(path) is None))
-
-
-def _path_chain(start: Path, stop: Path) -> tuple[Path, ...]:
-    start = start.resolve(strict=False)
-    stop = stop.resolve(strict=False)
-    if not _is_relative_to_casefold(stop, start):
-        return ()
-    roots: list[Path] = []
-    current = stop
-    while True:
-        roots.append(current)
-        if current == start:
-            break
-        parent = current.parent
-        if parent == current:
-            return ()
-        current = parent
-    roots.reverse()
-    return tuple(roots)
 
 
 def _program_files_roots(env: Mapping[str, str]) -> tuple[Path, ...]:
