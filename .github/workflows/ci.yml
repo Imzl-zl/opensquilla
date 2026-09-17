@@ -713,7 +713,9 @@ jobs:
     name: WebUI chat recovery
     needs: [plan-ci, frontend-artifact]
     if: ${{ !cancelled() && needs.plan-ci.result == 'success' && needs.frontend-artifact.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'webui-chat-recovery') }}
-    runs-on: ubuntu-latest
+    # Use a runner that permits the real unprivileged Bubblewrap sandbox without
+    # changing host security policy. Migrate before Ubuntu 22.04 retires in April 2027.
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     env:
       OPENSQUILLA_WEBUI_BASE_URL: http://127.0.0.1:18791
@@ -748,6 +750,26 @@ jobs:
 
       - name: Install Gateway dependencies
         run: uv sync --frozen
+
+      - name: Install and verify Linux guest sandbox
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          bwrap --version
+          # Exercise the real unprivileged namespace boundary. Keep host
+          # AppArmor and sysctl restrictions intact; a denial must fail here.
+          bwrap --unshare-user --unshare-net --ro-bind / / --proc /proc /bin/true
+          uv run python - <<'PY'
+          import json
+          from dataclasses import asdict
+          from opensquilla.sandbox.backend.linux_readiness import probe_bwrap
+
+          probe = probe_bwrap()
+          print(json.dumps(asdict(probe), sort_keys=True))
+          if not probe.available or not probe.supports_perms:
+              raise SystemExit("Linux guest sandbox preflight failed: " + probe.message)
+          PY
 
       - name: Install frontend dependencies
         working-directory: opensquilla-webui

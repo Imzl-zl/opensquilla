@@ -1,9 +1,10 @@
-import { expect, test, type Page, type TestInfo } from '@playwright/test'
+import { expect, test, type Page, type TestInfo, type WebSocketRoute } from '@playwright/test'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { helloOkResponse } from './support/gateway-fixture'
 
 const TOKEN = 'synthetic-browser-gateway-token'
 
@@ -98,10 +99,15 @@ async function prepare(page: Page, wsUrl: string, token = '') {
 }
 
 function observe(page: Page) {
-  const hellos: Array<{ principal: { authenticated: boolean; authState: string }; guestSessionKey?: string }> = []
+  const hellos: Array<{
+    principal: { authenticated: boolean; authState: string; guestOwnerId?: string }
+    guestSessionKey?: string
+  }> = []
   const denied: Array<{ method: string; sessionKey: unknown; message: string }> = []
+  const sent: Array<{ method: string; sessionKey: unknown }> = []
   let connections = 0
   page.on('websocket', socket => {
+    if (new URL(socket.url()).pathname !== '/ws') return
     connections += 1
     const requests = new Map<string, { method: string; sessionKey: unknown }>()
     socket.on('framesent', ({ payload }) => {
@@ -111,6 +117,7 @@ function observe(page: Page) {
           method: frame.method,
           sessionKey: frame.params?.key ?? frame.params?.sessionKey ?? null,
         })
+        sent.push(requests.get(frame.id)!)
       }
     })
     socket.on('framereceived', ({ payload }) => {
@@ -122,8 +129,70 @@ function observe(page: Page) {
       }
     })
   })
-  return { hellos, denied, get connections() { return connections } }
+  return { hellos, denied, sent, get connections() { return connections } }
 }
+
+for (const lateHello of [false, true]) {
+  test(`subscribes a fresh guest draft after ${lateHello ? 'a delayed' : 'the first'} handshake`, async ({
+    page, baseURL, request,
+  }, testInfo) => {
+    const gateway = await realAuthGateway(testInfo, new URL(baseURL!).origin, 'token')
+    try {
+      await prepare(page, gateway.wsUrl + (lateHello ? '?holdHandshake=1' : ''))
+      const wire = observe(page)
+      // The preview serves the relative-base bundle; enter through its existing
+      // new-chat URL and let the router canonicalize the draft route.
+      await page.goto('/control/chat?newChat=1')
+      const input = page.locator('.chat-textarea')
+      const send = page.locator('.chat-send-btn[aria-label="Send"]')
+      await input.fill('Synthetic guest draft retained through its first handshake.')
+      if (lateHello) {
+        expect(wire.hellos).toHaveLength(0)
+        expect((await request.post(`${gateway.httpUrl}/release-handshake`)).ok()).toBe(true)
+      }
+      await expect.poll(() => wire.hellos.length).toBe(1)
+      await expect(send).toBeEnabled()
+      await expect(input).toHaveValue('Synthetic guest draft retained through its first handshake.')
+      const owner = wire.hellos[0].principal.guestOwnerId
+      expect(owner).toMatch(/^[0-9a-f]{64}$/)
+      const subscriptions = () => wire.sent.filter(item => item.method === 'sessions.messages.subscribe')
+      await expect.poll(() => subscriptions().length).toBeGreaterThan(0)
+      const key = subscriptions().at(-1)!.sessionKey
+      expect(key).toMatch(new RegExp(`^agent:main:webchat:guest:${owner}:[a-z0-9]+$`))
+      expect(wire.denied.filter(item => item.method === 'sessions.messages.subscribe')).toEqual([])
+      expect(wire.sent.filter(item => item.method === 'chat.send')).toEqual([])
+
+      expect((await request.post(`${gateway.httpUrl}/reconnect`)).ok()).toBe(true)
+      await expect.poll(() => wire.hellos.length).toBe(2)
+      await expect(send).toBeEnabled()
+      await expect(input).toHaveValue('Synthetic guest draft retained through its first handshake.')
+      expect(subscriptions().at(-1)!.sessionKey).toBe(key)
+      expect(wire.hellos[1].principal.guestOwnerId).toBe(owner)
+      expect(wire.connections).toBe(2)
+      expect(wire.denied.filter(item => item.method === 'sessions.messages.subscribe')).toEqual([])
+    } finally { await gateway.stop() }
+  })
+}
+
+test('keeps an explicit foreign session denied without rewriting it or reconnecting', async ({ page, baseURL }, testInfo) => {
+  const gateway = await realAuthGateway(testInfo, new URL(baseURL!).origin, 'token')
+  try {
+    await prepare(page, gateway.wsUrl)
+    const wire = observe(page)
+    const foreignSession = 'agent:main:webchat:synthetic-owner-history'
+    await page.goto(`/control/chat?session=${encodeURIComponent(foreignSession)}`)
+    await expect.poll(() => wire.denied.some(item => (
+      item.method === 'sessions.messages.subscribe' && item.sessionKey === foreignSession
+    ))).toBe(true)
+    await expect(page.locator('.chat-send-btn[aria-label="Send"]')).toBeDisabled()
+    await page.locator('.chat-textarea').fill('Synthetic draft stays in this denied session.')
+    await page.clock.install()
+    await page.clock.fastForward(120_000)
+    expect(new URL(page.url()).searchParams.get('session')).toBe(foreignSession)
+    expect(wire.connections).toBe(1)
+    expect(wire.sent.filter(item => item.method === 'chat.send')).toEqual([])
+  } finally { await gateway.stop() }
+})
 
 test('recovers a rejected browser token through the existing connection panel', async ({ page, baseURL }, testInfo) => {
   const gateway = await realAuthGateway(testInfo, new URL(baseURL!).origin, 'token')
@@ -201,6 +270,52 @@ test('does not describe an origin-policy close as a missing token', async ({ pag
   })
   await page.goto('/control/sessions')
   await page.getByRole('button', { name: /^(Manage gateway connection|Connection:)/ }).click()
+  const token = page.locator('#conn-ws-token')
+  await expect(token).toBeVisible()
+  await expect(page.locator('.conn-status__pill')).not.toHaveText('Token required')
+  await expect(page.locator('.conn-status__reason')).not.toContainText('Authentication failed')
+  await expect(token).not.toBeFocused()
+})
+
+test('keeps connection settings navigation when a policy close settles the initial draft', async ({ page }) => {
+  await page.clock.install()
+  await prepare(page, 'ws://synthetic-policy.invalid/ws')
+  let socket: WebSocketRoute
+  let subscribed = false
+  await page.routeWebSocket('ws://synthetic-policy.invalid/ws', ws => {
+    socket = ws
+    ws.send(JSON.stringify({ type: 'event', event: 'connect.challenge', payload: {} }))
+    ws.onMessage(raw => {
+      const frame = JSON.parse(String(raw))
+      if (frame.method === 'connect') {
+        ws.send(helloOkResponse({ features: { methods: [
+          'sessions.messages.subscribe', 'sessions.messages.hydrate', 'sessions.messages.snapshot',
+        ] } }))
+      } else if (['sessions.messages.subscribe', 'sessions.messages.hydrate', 'sessions.messages.snapshot'].includes(frame.method)) {
+        // The first live bootstrap stays pending until the operator leaves Chat.
+        subscribed = true
+      } else if (frame.type === 'req') {
+        ws.send(JSON.stringify({ type: 'res', id: frame.id, ok: true, payload: {} }))
+      }
+    })
+  })
+  const connection = page.getByRole('button', { name: /^(Manage gateway connection|Connection:)/ })
+  await page.route(/\/(?:assets\/ChatView-[^/]+\.js|src\/views\/ChatView\.vue)(?:\?.*)?$/, async route => {
+    // Give the draft a connected bootstrap rather than an immediate offline result.
+    await expect(connection).toHaveText('Connected')
+    await route.continue()
+  })
+  await page.route(/\/(?:assets\/SettingsView-[^/]+\.js|src\/views\/web\/SettingsView\.vue)(?:\?.*)?$/, async route => {
+    // Reproduce a slow first load of Settings while the initial draft completes.
+    socket.close({ code: 1008, reason: 'origin_policy_rejected' })
+    await expect(connection).toHaveText('Disconnected')
+    await route.continue()
+  })
+  await page.goto('/control/sessions')
+  await expect.poll(() => subscribed).toBe(true)
+  await expect(page).toHaveURL(/\/control\/chat$/)
+  await connection.click()
+  await expect(page).toHaveURL(/\/settings\/gateway#connection$/)
   const token = page.locator('#conn-ws-token')
   await expect(token).toBeVisible()
   await expect(page.locator('.conn-status__pill')).not.toHaveText('Token required')
