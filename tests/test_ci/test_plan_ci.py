@@ -858,7 +858,11 @@ def test_native_shell_changes_require_all_three_platforms(
     assert {"python-targeted", "windows-high-risk", "macos-recovery"} <= set(
         plan["required_suites"]
     )
-    assert "core" in plan["python_matrix"]["windows"]
+    expected_windows = (
+        ["core-1"] if path.startswith("tests/")
+        else suite_config["full_python_matrix"]["windows"]
+    )
+    assert plan["python_matrix"]["windows"] == expected_windows
     assert _platform_cells(plan, "macos-recovery") == {
         ("macos-latest", "recovery")
     }
