@@ -1450,6 +1450,7 @@ jobs:
             regression_args+=(
               tests/test_live_plan_stop_child.py
               tests/test_ci/test_windows_signatures.py
+              tests/test_tools/test_shell_process_isolation.py
             )
           fi
           uv run pytest \

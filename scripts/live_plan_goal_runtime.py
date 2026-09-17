@@ -2000,15 +2000,92 @@ async def plan_recovery_case(case: LiveCase) -> None:
     )
 
 
+def wait_file_evidence(
+    records: Sequence[dict[str, Any]],
+    task: str,
+    workspace: Path,
+    filename: str,
+    expected: str,
+) -> dict[str, bool]:
+    """Require this task to read the fixture and use the observed value in its reply."""
+    owned = [row for row in records if row.get("turn_id") == task]
+    target = (workspace / filename).resolve()
+    observed_at: list[int] = []
+    for row in owned:
+        payload = row.get("payload") or {}
+        if row.get("kind") != "tool_request" or payload.get("name") != "read_file":
+            continue
+        raw_path = (payload.get("arguments") or {}).get("path")
+        if not isinstance(raw_path, str):
+            continue
+        path = Path(raw_path)
+        if (path if path.is_absolute() else workspace / path).resolve() != target:
+            continue
+        call_id = payload.get("tool_use_id")
+        if not isinstance(call_id, str) or not call_id:
+            continue
+        for response in owned:
+            result = response.get("payload") or {}
+            if (
+                response.get("kind") == "tool_response"
+                and result.get("name") == "read_file"
+                and result.get("tool_use_id") == call_id
+                and int(response.get("seq", 0)) > int(row.get("seq", 0))
+                and not result.get("is_error")
+                and isinstance(result.get("result"), str)
+                and expected in result["result"]
+            ):
+                observed_at.append(int(response["seq"]))
+    final = max(
+        (row for row in owned if row.get("kind") == "llm_response"),
+        key=lambda row: int(row.get("seq", 0)),
+        default={},
+    )
+    payload = final.get("payload") or {}
+    return {
+        "read_file_observed": bool(observed_at),
+        "reply_uses_observed_value": bool(
+            observed_at
+            and int(final.get("seq", 0)) > min(observed_at)
+            and payload.get("got_done_event") is True
+            and not payload.get("tool_calls")
+            and isinstance(payload.get("text"), str)
+            and expected in payload["text"]
+        ),
+        "fixture_unchanged": target.read_text(encoding="utf-8") == expected + "\n",
+    }
+
+
 async def wait_case(case: LiveCase, *, cancel: bool = False) -> None:
     a, b = "agent:main:webchat:live-wait-a", "agent:main:webchat:live-wait-b"
     if cancel:
         await case.rpc("plans.setMode", sessionKey=a, mode="plan", expectedRevision=0)
+    files = {
+        "queued": ("wait-queued.txt", "QUEUED_" + uuid.uuid4().hex),
+        "other": ("wait-independent.txt", "INDEPENDENT_" + uuid.uuid4().hex),
+    }
+    for filename, value in files.values():
+        (case.workspace / filename).write_text(value + "\n", encoding="utf-8")
+
+    def read_task(name: str) -> str:
+        filename, _value = files[name]
+        return (
+            "This is a new, independent task. Its goal does not inherit the preceding "
+            "questionnaire or its choices. Use read_file to read the existing workspace "
+            f"file {filename}, then report its single-line contents. This task needs "
+            "no questionnaire and no file changes."
+        )
+
     first = await case.send(a, QUESTION)
     pending = await case.pending(a, first)
-    queued = await case.send(a, "Reply SECOND only. Do not ask any questions.")
-    other = await case.send(b, "Reply OTHER only. Do not call tools.")
+    queued = await case.send(a, read_task("queued"))
+    other = await case.send(b, read_task("other"))
     await case.done(b, other)
+    other_proof = wait_file_evidence(
+        case.records(), other, case.workspace, *files["other"],
+    )
+    case.evidence["independent_read_task"] = other_proof
+    case.check("independent_task_reads_and_reports_fixture", all(other_proof.values()))
     snapshot = await case.snapshot(a)
     case.check("other_session_runs_while_waiting", bool(snapshot["pendingUserInputs"]))
     case.check(
@@ -2035,6 +2112,11 @@ async def wait_case(case: LiveCase, *, cancel: bool = False) -> None:
         case.check("question_answer_idempotent", replay.get("replayed") is True)
         await case.done(a, first)
     await case.done(a, queued)
+    queued_proof = wait_file_evidence(
+        case.records(), queued, case.workspace, *files["queued"],
+    )
+    case.evidence["queued_read_task"] = queued_proof
+    case.check("queued_task_reads_and_reports_fixture", all(queued_proof.values()))
 
 
 def durable_case_state(state: Path, key: str) -> dict[str, Any]:

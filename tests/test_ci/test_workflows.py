@@ -2864,6 +2864,7 @@ def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_
         expected_preflight_files.update({
             "tests/test_live_plan_stop_child.py",
             "tests/test_ci/test_windows_signatures.py",
+            "tests/test_tools/test_shell_process_isolation.py",
         })
         assert '"${{ matrix.shard }}" == "core"' in preflight["run"]
     assert set(re.findall(r"tests/[a-zA-Z0-9_/.]+\.py", preflight["run"])) == (
