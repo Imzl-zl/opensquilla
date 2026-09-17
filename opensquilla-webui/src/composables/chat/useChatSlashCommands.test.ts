@@ -933,7 +933,7 @@ describe('unified skill palette', () => {
     const skillCatalog = { supportsCandidates: () => true, listCandidates } as unknown as SkillCatalog
     return { ...harness(false, [], Promise.resolve(), undefined, { skillCatalog, selectedSkills, ...extra }), selectedSkills, listCandidates }
   }
-  it('shows eight common entries at most and searches the complete catalog', async () => {
+  it('keeps the complete catalog browseable in group order and searches full descriptions', async () => {
     const candidates = ['pdf-toolkit', 'github', 'docx', 'html-coder', 'pptx', 'xlsx', 'custom-skill']
       .map(name => ({ ...candidate, name, instanceId: `skill:${name}`,
         description: 'A brief purpose. Later details contain unique-search-term.' }))
@@ -953,9 +953,17 @@ describe('unified skill palette', () => {
     await Promise.resolve()
 
     expect(api.filteredSlashCmds.value.map(item => item.name)).toEqual([
-      '/new', '/coding', '/compact', 'xlsx', 'docx', 'pptx',
-      '/meta AwesomeWebpageMetaSkill', '/meta meta-short-drama',
+      '/usage', '/goal', '/new', '/coding', '/compact', '/reset', '/meta',
+      'pdf-toolkit', 'github', 'docx', 'html-coder', 'pptx', 'xlsx', 'custom-skill',
+      '/meta meta-paper-write', '/meta meta-skill-creator', '/meta meta-short-drama',
+      '/meta AwesomeWebpageMetaSkill',
     ])
+    expect(api.filteredSlashCmds.value.map(item => item.kind)).toEqual([
+      ...commands.map(() => 'command'), 'command',
+      ...candidates.map(() => 'skill'),
+      'meta', 'meta', 'meta', 'meta',
+    ])
+    expect(api.filteredSlashCmds.value.find(item => item.name === 'custom-skill')?.desc).toBe('A brief purpose.')
 
     inputText.value = '/usage'
     api.handleSlashInput()
@@ -967,7 +975,7 @@ describe('unified skill palette', () => {
     expect(skillCatalog.listCandidates).toHaveBeenCalledOnce()
   })
 
-  it('uses stable skill fallback order when preferred entries are missing', async () => {
+  it('preserves catalog skill order without promoting built-ins or hiding later entries', async () => {
     const candidates = ['custom-first', 'github', 'docx', 'custom-last'].map(name => ({ ...candidate, name }))
     const { api, inputText } = skills({ skillCatalog: {
       supportsCandidates: () => true,
@@ -976,7 +984,13 @@ describe('unified skill palette', () => {
     inputText.value = '/'
     api.handleSlashInput()
     await Promise.resolve()
-    expect(api.filteredSlashCmds.value.map(item => item.name)).toEqual(['docx', 'custom-first', 'github'])
+    expect(api.filteredSlashCmds.value.map(item => item.name)).toEqual(['custom-first', 'github', 'docx', 'custom-last'])
+    inputText.value = '/custom'
+    api.handleSlashInput()
+    expect(api.filteredSlashCmds.value.map(item => item.name)).toEqual(['custom-first', 'custom-last'])
+    inputText.value = '/'
+    api.handleSlashInput()
+    expect(api.filteredSlashCmds.value.map(item => item.name)).toEqual(['custom-first', 'github', 'docx', 'custom-last'])
   })
 
   it('uses maintained Chinese product copy while preserving bilingual search', async () => {

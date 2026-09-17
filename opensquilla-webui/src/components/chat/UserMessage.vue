@@ -27,9 +27,16 @@
          above the text bubble, never packed inside it — text gets a filled
          bubble, images render as bordered bare media, files as icon chips. -->
     <div class="msg-user-stack">
-      <div v-if="message.selectedSkills?.length" class="chat-selected-skills" data-testid="sent-selected-skills">
-        <span class="chat-selected-skills__label">{{ t('chat.skillPalette.selected') }}</span>
-        <span v-for="skill in message.selectedSkills" :key="skill.instanceId" class="attachment-chip">{{ skill.name }}</span>
+      <div
+        v-if="message.selectedSkills?.length"
+        class="msg-user-skills"
+        :aria-label="t('chat.skillPalette.selected')"
+        data-testid="sent-selected-skills"
+      >
+        <span class="msg-user-skills__label">{{ t('chat.skillPalette.selected') }}</span>
+        <span v-for="skill in message.selectedSkills" :key="skill.instanceId" class="msg-user-skills__chip">
+          {{ skill.name }}
+        </span>
       </div>
       <span
         v-if="message.provenanceKind === 'cron'"
@@ -553,6 +560,31 @@ function activateAttachment(attachment: DisplayAttachment) {
   align-items: flex-end;
   gap: 0.375rem;
   min-width: 0;
+}
+
+.msg-user-skills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.375rem;
+  max-width: 82%;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+
+.msg-user-skills__chip {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  color: var(--text);
+  overflow-wrap: anywhere;
 }
 
 .msg-user-cron-source {

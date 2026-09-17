@@ -270,6 +270,11 @@
         <SourcesRow v-if="message.toolCalls?.length" ref="sourcesRowRef" :calls="message.toolCalls" :sources="message.sources ?? []" />
       </div>
 
+      <SkillLoadStatus
+        class="msg-ai-skill-loads"
+        :receipts="message.skillLoads || []"
+      />
+
       <div
         v-if="showFooter"
         class="msg-ai-footer"
@@ -468,6 +473,7 @@ import UnifiedAssistantActivityTimeline from '@/components/chat/UnifiedAssistant
 import ChatArtifactList from '@/components/chat/ChatArtifactList.vue'
 import GoalOutcomeNotice from '@/components/chat/GoalOutcomeNotice.vue'
 import SourcesRow from '@/components/chat/SourcesRow.vue'
+import SkillLoadStatus from '@/components/chat/SkillLoadStatus.vue'
 import ToolCallTimeline from '@/components/chat/ToolCallTimeline.vue'
 import InterruptPart from '@/components/chat/parts/InterruptPart.vue'
 import PlanCard from '@/components/chat/PlanCard.vue'
@@ -1355,6 +1361,10 @@ function fmtUsd(value: number): string {
   align-items: center;
   gap: 0.625rem;
   margin-top: 0.25rem;
+}
+
+.msg-ai-skill-loads {
+  margin-top: 0.375rem;
 }
 
 .msg-ai-footer--goal {

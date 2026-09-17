@@ -4,6 +4,7 @@
       <template v-for="(cmd, i) in items" :key="`${cmd.kind || 'command'}:${cmd.cmd}`">
         <div v-if="i === 0 || cmd.kind !== items[i - 1]?.kind" class="chat-slash-group">
           {{ t(`chat.skillPalette.${cmd.kind || 'command'}`) }}
+          <span class="chat-slash-count">{{ groupSize(i) }}</span>
         </div>
         <button
           type="button"
@@ -34,9 +35,16 @@
 import { useI18n } from 'vue-i18n'
 import type { ChatSlashCommand } from '@/composables/chat/useChatSlashCommands'
 
-defineProps<{ items: ChatSlashCommand[]; activeIndex: number; loading: boolean; error: string }>()
+const props = defineProps<{ items: ChatSlashCommand[]; activeIndex: number; loading: boolean; error: string }>()
 const emit = defineEmits<{ choose: [command: ChatSlashCommand] }>()
 const { t } = useI18n()
+
+function groupSize(start: number): number {
+  const kind = props.items[start]?.kind || 'command'
+  let end = start + 1
+  while (end < props.items.length && (props.items[end]?.kind || 'command') === kind) end += 1
+  return end - start
+}
 
 function status(command: ChatSlashCommand): string {
   const skill = command.skill
@@ -74,11 +82,19 @@ function status(command: ChatSlashCommand): string {
 }
 
 .chat-slash-group {
+  display: flex;
+  align-items: baseline;
+  gap: 0.375rem;
   padding: 0.25rem 0.625rem 0.125rem;
   color: var(--text-muted);
   font-size: 0.6875rem;
   font-weight: 600;
   line-height: 1.4;
+}
+
+.chat-slash-count {
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
 }
 
 .chat-slash-item {

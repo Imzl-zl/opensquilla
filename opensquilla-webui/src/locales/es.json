@@ -3473,7 +3473,7 @@
       "meta": "Workflows",
       "empty": "No matching commands or skills",
       "loading": "Loading skills…",
-      "autoHint": "Escribe un nombre para buscar · Selección automática de habilidades",
+      "autoHint": "Desplázate o busca por nombre · Selección automática de habilidades",
       "upgrade": "Update the Gateway to select skills for a message.",
       "loadFailed": "Skills could not be loaded. Close and reopen the menu to retry.",
       "disabled": "Disabled · Manage",

@@ -111,9 +111,16 @@ async function installGateway(page: Page, holdFirstSend = false, serverQueue = f
       }
       if (frame.method === 'skills.candidates') {
         candidateCalls += 1
-        response(frame.id, { generation: 1, candidates: [{ ...SKILL, generation: 1,
-          description: 'Create spreadsheets', descriptionZh: '创建表格', aliases: ['spreadsheet'],
-          kind: 'skill', source: 'workspace', disabled: false, manualOnly: false, ready: true }] })
+        response(frame.id, { generation: 1, candidates: [
+          { ...SKILL, generation: 1,
+            description: 'Create spreadsheets', descriptionZh: '创建表格', aliases: ['spreadsheet'],
+            kind: 'skill', source: 'workspace', disabled: false, manualOnly: false, ready: true },
+          ...Array.from({ length: 11 }, (_, index) => ({
+            name: `synthetic-skill-${index + 1}`, instanceId: `skill:synthetic-${index + 1}`,
+            digest: 'b'.repeat(64), generation: 1, description: 'A synthetic catalog entry.',
+            aliases: [], kind: 'skill', source: 'workspace', disabled: false, manualOnly: false, ready: true,
+          })),
+        ] })
         return
       }
       if (frame.method === 'sessions.pending_inputs.enqueue') {
@@ -361,6 +368,12 @@ test('unified slash selects bilingual skills lazily and shows real load receipts
   await openChat(page)
   expect(gateway.candidateCalls()).toBe(0)
   const input = page.locator('.chat-textarea')
+  await input.fill('/')
+  await expect(page.locator('.chat-slash-item[data-skill-name]')).toHaveCount(12)
+  await expect(page.locator('.chat-slash-group').filter({ hasText: 'Skills' })).toHaveText('Skills 12')
+  const lastSkill = page.locator('[role="option"][data-skill-name="synthetic-skill-11"]')
+  await lastSkill.scrollIntoViewIfNeeded()
+  await expect(lastSkill).toBeInViewport()
   await input.fill('Analyze /表格')
   await expect(page.locator('[role="option"][data-skill-name="xlsx"]')).toBeVisible()
   const option = page.locator('[role="option"][data-skill-name="xlsx"]')
@@ -381,11 +394,18 @@ test('unified slash selects bilingual skills lazily and shows real load receipts
   await expect.poll(() => gateway.sends.length).toBe(1)
   expect(gateway.sends[0]?.selectedSkills).toEqual([SKILL])
   await expect(page.getByTestId('selected-skills')).toHaveCount(0)
+  await expect(page.getByTestId('sent-selected-skills')).toHaveCSS('display', 'flex')
+  await expect(page.getByTestId('sent-selected-skills')).toHaveCSS('flex-wrap', 'wrap')
   await expect(page.getByTestId('skill-load-status')).toHaveCount(0)
   gateway.loadSkill()
   await expect(page.getByTestId('skill-load-status')).toContainText('Loaded · User selected')
+  const liveReceiptBounds = (await page.getByTestId('skill-load-status').boundingBox())!
+  const userMessageBounds = (await page.locator('.msg-user').boundingBox())!
+  expect(liveReceiptBounds.x).toBeCloseTo(userMessageBounds.x, 0)
+  expect(liveReceiptBounds.width).toBeCloseTo(userMessageBounds.width, 0)
   gateway.finish('succeeded')
   await expect(page.locator('.chat-thread')).toContainText('Synthetic response completed.')
+  await expect(page.locator('.msg-ai').getByTestId('skill-load-status')).toHaveCount(1)
   await page.reload()
   await expect(page.getByTestId('skill-load-status')).toContainText('Loaded · User selected')
   await input.fill('Another spreadsheet request')

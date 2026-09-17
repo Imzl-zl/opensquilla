@@ -62,7 +62,7 @@
       >
         {{ t('chat.pending.reorderRecovering') }}
       </span>
-      <span v-if="item.selectedSkills?.length" class="chat-pending-attachments">
+      <span v-if="item.selectedSkills?.length" class="chat-pending-attachments chat-pending-skills">
         {{ item.selectedSkills.map(skill => skill.name).join(', ') }}
       </span>
       <span v-if="item.attachments?.length" class="chat-pending-attachments">
@@ -693,6 +693,10 @@ onBeforeUnmount(() => {
   margin-top: 2px;
   line-height: 1.35;
   white-space: normal;
+}
+
+.chat-pending-skills {
+  overflow-wrap: anywhere;
 }
 
 .chat-pending-steer-status {

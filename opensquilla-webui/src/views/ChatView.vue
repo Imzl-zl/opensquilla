@@ -308,7 +308,7 @@
           />
         </template>
 
-        <SkillLoadStatus v-if="isStreaming" :receipts="liveSkillLoads[activeStreamTaskId] || []" />
+        <SkillLoadStatus v-if="isStreaming" standalone :receipts="liveSkillLoads[activeStreamTaskId] || []" />
 
         <!-- Streaming AI message: activity stays open while the turn is live.
              Gateway-marked intermediate text remains in the transcript, while

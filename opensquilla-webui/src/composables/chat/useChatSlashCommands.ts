@@ -399,18 +399,7 @@ export function useChatSlashCommands(options: UseChatSlashCommandsOptions) {
         aliases: [...skill.aliases, ...copy.aliases], kind: 'skill', skill,
       }
     })
-    if (!query) {
-      const commonCommands = ['/new', '/coding', '/compact'].flatMap(name =>
-        commands.filter(command => slashCommandKeys(command).includes(name)).slice(0, 1))
-      const preferredSkills = ['xlsx', 'docx', 'pptx']
-      const skillPriority = (name: string) => {
-        const index = preferredSkills.indexOf(name)
-        return index < 0 ? preferredSkills.length : index
-      }
-      const commonSkills = [...skills].sort((a, b) => skillPriority(a.name) - skillPriority(b.name)).slice(0, 3)
-      const commonMeta = PREFERRED_META_NAMES.flatMap(name => meta.filter(item => item.argValue === name)).slice(0, 2)
-      filteredSlashCmds.value = [...commonCommands, ...commonSkills, ...commonMeta]
-    } else filteredSlashCmds.value = [...commands, ...skills, ...meta]
+    filteredSlashCmds.value = [...commands, ...skills, ...meta]
       .map((command, index) => ({ command, index, rank: slashSearchRank(query,
         [command.label, command.name, command.cmd, ...command.aliases],
         [command.desc, ...(command.searchDescriptions || []), command.skill?.description || '', command.skill?.descriptionZh || '']) }))
