@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -94,6 +94,45 @@ async def test_attachment_workfile_context_restores_mapping_and_merges_origin(
     assert caller.attachment_working_files == {}
     saved = await manager.get_session(node.session_key)
     assert saved.origin["synthetic_other_field"] == "preserve"
+
+
+async def test_attachment_workfile_context_without_owner_drops_caller_bindings() -> None:
+    manager = MagicMock()
+    manager.get_session = AsyncMock(return_value=None)
+    manager.update = AsyncMock()
+    runner = TurnRunner(provider_selector=None, session_manager=manager)
+    stale_files = {"old-source": {"path": "old-working-copy", "session_id": "retired"}}
+    caller = ToolContext(
+        attachment_working_files=stale_files,
+        persist_attachment_working_files=AsyncMock(),
+    )
+
+    context = await runner._with_artifact_context(caller, "agent:main:legacy")
+
+    assert context.session_epoch is None
+    assert context.attachment_working_files == {}
+    assert context.persist_attachment_working_files is None
+    assert caller.attachment_working_files == stale_files
+    manager.update.assert_not_awaited()
+
+
+async def test_attachment_workfile_context_propagates_durable_lookup_failure(
+    replay_session: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner, manager, _, node, _, _ = replay_session
+    get_session = manager.get_session
+    identity_resolved = False
+
+    async def fail_after_identity(key: str) -> Any:
+        nonlocal identity_resolved
+        if identity_resolved:
+            raise RuntimeError("synthetic durable lookup failure")
+        identity_resolved = True
+        return await get_session(key)
+
+    monkeypatch.setattr(manager, "get_session", fail_after_identity)
+    with pytest.raises(RuntimeError, match="synthetic durable lookup failure"):
+        await runner._with_artifact_context(ToolContext(), node.session_key)
 
 
 @pytest.mark.parametrize("replacement", ["reset", "epoch"])

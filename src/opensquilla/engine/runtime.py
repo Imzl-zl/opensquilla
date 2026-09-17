@@ -5013,7 +5013,9 @@ class TurnRunner:
         persist_working_files: Callable[[], Awaitable[None]] | None = None
         get_session = getattr(self._session_manager, "get_session", None)
         update_session = getattr(self._session_manager, "update", None)
-        if callable(get_session) and callable(update_session):
+        # The fallback artifact label above is not a durable session owner.
+        # Legacy callers without one must not receive a persistence callback.
+        if session_epoch is not None and callable(get_session) and callable(update_session):
             session = await get_session(session_key)
             if session is not None:
                 if session.session_id != session_id or session.epoch != session_epoch:
