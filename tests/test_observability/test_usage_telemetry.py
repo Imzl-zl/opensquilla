@@ -762,9 +762,17 @@ async def test_standalone_close_preserves_usage_after_upload_timeout(tmp_path, m
     await storage.close()
     entered = asyncio.Event()
     cancelled = asyncio.Event()
+    close_timeout = asyncio.timeout(None)
+
+    def timeout_after_upload_started(delay):
+        assert delay == 0.05
+        return close_timeout
 
     async def blocked_post(endpoint, payload):
         entered.set()
+        # Exercise cancellation of an active request without charging cold
+        # SQLite and identity initialization to this synthetic short deadline.
+        close_timeout.reschedule(asyncio.get_running_loop().time() + 0.05)
         try:
             await asyncio.Event().wait()
         finally:
@@ -772,8 +780,12 @@ async def test_standalone_close_preserves_usage_after_upload_timeout(tmp_path, m
 
     monkeypatch.setattr(usage_telemetry, "_post_payload", blocked_post)
     monkeypatch.setattr(usage_telemetry, "STANDALONE_CLOSE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        usage_telemetry, "asyncio",
+        SimpleNamespace(**(vars(asyncio) | {"timeout": timeout_after_upload_started})),
+    )
     runtime = usage_telemetry.StandaloneUsageTelemetry(config=config, legacy_storage=None)
-    await asyncio.wait_for(runtime.close(), timeout=1)
+    await asyncio.wait_for(runtime.close(), timeout=5)
     assert entered.is_set()
     assert cancelled.is_set()
     restored = await DailyUsageStore.open(path)

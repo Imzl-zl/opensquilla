@@ -19,6 +19,7 @@ from opensquilla.paths import native_io_path
 
 _T = TypeVar("_T")
 _IDENTITY_KEY = "telemetry.daily_usage_store_id"
+_SQLITE_BUSY_TIMEOUT_SECONDS = 5.0
 
 
 class DailyUsageStore:
@@ -44,7 +45,10 @@ class DailyUsageStore:
             self._closed = True
 
     def _with_connection(self, operation: Callable[[sqlite3.Connection], _T]) -> _T:
-        connection = sqlite3.connect(self._path, timeout=1.0)
+        # Separate client processes can share this sidecar.  The per-instance
+        # asyncio lock below cannot serialize those connections, so give
+        # SQLite enough time to wait for another writer on Windows.
+        connection = sqlite3.connect(self._path, timeout=_SQLITE_BUSY_TIMEOUT_SECONDS)
         connection.row_factory = sqlite3.Row
         try:
             with connection:

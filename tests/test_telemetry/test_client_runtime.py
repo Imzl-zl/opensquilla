@@ -558,12 +558,15 @@ async def test_close_allows_inflight_receipt_to_finish_without_releasing_lease(
     offline_uploads.handler = accepted_after_release
     runtime = ScopedTelemetryRuntime(config=_config(tmp_path), upload_interval_seconds=60)
     await runtime.record(_turn_event())
+    # The receipt is the shutdown work under test; initialize the unrelated
+    # empty scope before the upload loop and its close deadline begin.
+    assert await runtime._scope_runtime(TelemetryScope.GROWTH) is not None
     await runtime.start()
     await asyncio.wait_for(entered.wait(), timeout=1)
     closing = asyncio.create_task(runtime.close())
     await asyncio.sleep(0)
     release.set()
-    await asyncio.wait_for(closing, timeout=1)
+    await asyncio.wait_for(closing, timeout=5)
 
     assert len(offline_uploads.requests) == 1
     outbox = await TelemetryOutbox.open(tmp_path, TelemetryScope.RELIABILITY)
@@ -581,17 +584,30 @@ async def test_close_closes_scopes_initialized_by_an_already_running_cycle(
     release = asyncio.Event()
     initialized = []
     scope_runtime = runtime._scope_runtime
+    outboxes = {
+        scope: await TelemetryOutbox.open(tmp_path, scope) for scope in TelemetryScope
+    }
 
-    async def delayed_scope(scope):
+    async def delayed_open(_state_dir, scope):
         if scope is TelemetryScope.RELIABILITY:
             entered.set()
             await release.wait()
+        return outboxes[scope]
+
+    async def track_scope(scope):
         scoped = await scope_runtime(scope)
         if scoped is not None:
             initialized.append(scoped)
         return scoped
 
-    monkeypatch.setattr(runtime, "_scope_runtime", delayed_scope)
+    async def idle_upload(_uploader):
+        return None
+
+    # Keep real outbox ownership/close checks, but finish cold setup before
+    # gating the lazy runtime publication across the shutdown boundary.
+    monkeypatch.setattr(runtime_module, "TelemetryOutbox", SimpleNamespace(open=delayed_open))
+    monkeypatch.setattr(TelemetryUploader, "upload_once", idle_upload)
+    monkeypatch.setattr(runtime, "_scope_runtime", track_scope)
     await runtime.start()
     await asyncio.wait_for(entered.wait(), timeout=1)
     closing = asyncio.create_task(runtime.close())

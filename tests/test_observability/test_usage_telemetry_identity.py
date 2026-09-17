@@ -372,6 +372,54 @@ async def test_standalone_counter_store_concurrent_writers_survive_reopen(tmp_pa
         await reopened.close()
 
 
+async def test_standalone_counter_store_waits_for_another_connection_writer(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "usage.sqlite3"
+    storage = await DailyUsageStore.open(path)
+    holder = sqlite3.connect(path)
+    write_started = threading.Event()
+    connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+
+        def trace(statement):
+            if statement.lstrip().startswith("INSERT INTO telemetry_daily_usage"):
+                write_started.set()
+
+        connection.set_trace_callback(trace)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", traced_connect)
+    holder.execute("BEGIN IMMEDIATE")
+    write = asyncio.create_task(_record_turns(storage))
+    try:
+        assert await asyncio.to_thread(write_started.wait, 5)
+        # Start the hold period only once the real writer reaches SQLite.
+        # This exceeds the old one-second busy timeout without relying on
+        # thread-pool startup time to create contention.
+        await asyncio.sleep(1.2)
+        assert not write.done()
+        holder.rollback()
+        await asyncio.wait_for(write, timeout=5)
+    finally:
+        holder.close()
+        await asyncio.gather(write, return_exceptions=True)
+        await storage.close()
+
+    reopened = await DailyUsageStore.open(path)
+    try:
+        [row] = await reopened.list_pending_daily_usage(before_day=_TODAY.isoformat())
+        assert row["conversation_turns"] == 1
+        assert row["input_tokens"] == 10
+        assert row["output_tokens"] == 2
+        assert row["cached_tokens"] == 3
+        assert row["cache_write_tokens"] == 1
+    finally:
+        await reopened.close()
+
+
 async def test_standalone_counter_store_ack_preserves_newer_totals(tmp_path):
     storage = await DailyUsageStore.open(tmp_path / "usage.sqlite3")
     try:
