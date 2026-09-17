@@ -1,8 +1,9 @@
 import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue'
+import i18n from '@/i18n'
 import { forgetGoalSet, forgetGoalSetsForSession, goalSetIdentity, recoverGoalSet } from '@/utils/chat/goalSetRecovery'
 import { goalErrorMessage as localizeGoalRpcError } from '@/utils/goalErrorPresentation'
 import { createClientRequestId } from '@/utils/chat/messageIdentity'
-import { GoalCenterError, type GoalCenter, type GoalExecutionOptions } from '@/modules/goalCenter'
+import { GoalCenterError, goalUsageSupportsBudget, normalizeGoalUsageCoverage, supportedGoalExecutionOptions, type GoalCenter, type GoalExecutionOptions } from '@/modules/goalCenter'
 import type { GoalContinuity, GoalEvent } from '@/modules/goalContinuity'
 
 export type GoalStatus = 'active' | 'paused' | 'blocked' | 'usage_limited' | 'complete'
@@ -388,8 +389,7 @@ export function normalizeGoal(value: unknown): GoalSnapshot | null {
     tokenBudget: integerField(source, 'tokenBudget', 'token_budget') ?? null,
     budgetTokensUsed: integerField(source, 'budgetTokensUsed', 'budget_tokens_used') ?? 0,
     usageAccountingStartedAtMs: integerField(source, 'usageAccountingStartedAtMs', 'usage_accounting_started_at_ms') ?? null,
-    usageCoverage: stringField(source, 'usageCoverage', 'usage_coverage') === 'complete' ? 'complete'
-      : stringField(source, 'usageCoverage', 'usage_coverage') === 'partial_usage' ? 'partial_usage' : 'partial_history',
+    usageCoverage: normalizeGoalUsageCoverage(stringField(source, 'usageCoverage', 'usage_coverage')),
     executionPolicy: stringField(source, 'executionPolicy', 'execution_policy') === 'background' ? 'background' : 'foreground',
     pauseReason: nullableStringField(source, 'pauseReason', 'pause_reason'),
     blockedReason: nullableStringField(source, 'blockedReason', 'blocked_reason'),
@@ -445,11 +445,52 @@ function goalSnapshotStreamSeq(value: unknown): number | undefined {
 export function useChatGoals(options: UseChatGoalsOptions) {
   const draftArmed = ref(false)
   const draftSettings = ref<GoalExecutionOptions>({})
-  const draftSettingsValid = computed(() => goalExecutionOptionsValid(draftSettings.value))
+  const draftSettingsValid = computed(() => goalExecutionOptionsValid(executionOptionsForConnection(draftSettings.value)))
   const goal = ref<GoalSnapshot | null>(null)
   const busy = ref(false)
   const connectionTakeoverAvailable = ref(false)
   const reattaching = ref(false)
+  const tokenBudgetSupported = ref(false)
+  const backgroundExecutionSupported = ref(false)
+  let capabilitiesGeneration = 0
+  let capabilitiesLoaded = false
+  let capabilitiesRequest: Promise<void> | null = null
+
+  function invalidateExecutionCapabilities() {
+    capabilitiesGeneration += 1
+    capabilitiesLoaded = false
+    capabilitiesRequest = null
+    tokenBudgetSupported.value = false
+    backgroundExecutionSupported.value = false
+  }
+
+  // Load only for Goal settings/submit gestures, never during startup or automatic reconnect.
+  function prepareExecutionSettings(): Promise<void> {
+    if (capabilitiesLoaded) return Promise.resolve()
+    if (capabilitiesRequest) return capabilitiesRequest
+    if (options.connectionAvailable?.() === false || !options.goalCenter.available('goal-mode')) {
+      return Promise.resolve()
+    }
+    const generation = capabilitiesGeneration
+    capabilitiesRequest = options.goalCenter.capabilities().then(capabilities => {
+      if (generation !== capabilitiesGeneration) return
+      tokenBudgetSupported.value = capabilities.tokenBudgetSupported === true
+      backgroundExecutionSupported.value = capabilities.backgroundExecutionSupported === true
+      capabilitiesLoaded = true
+    }).catch(() => {
+      // Optional settings stay unavailable; ordinary Goal commands remain usable.
+    }).finally(() => {
+      if (generation === capabilitiesGeneration) capabilitiesRequest = null
+    })
+    return capabilitiesRequest
+  }
+
+  function executionOptionsForConnection(settings: GoalExecutionOptions, existingGoal?: GoalSnapshot) {
+    return supportedGoalExecutionOptions(settings, {
+      tokenBudgetSupported: tokenBudgetSupported.value,
+      backgroundExecutionSupported: backgroundExecutionSupported.value,
+    }, existingGoal)
+  }
 
   let acceptedSessionId = ''
   let acceptedEpoch = 0
@@ -501,6 +542,7 @@ export function useChatGoals(options: UseChatGoalsOptions) {
 
   function arm() {
     draftArmed.value = true
+    void prepareExecutionSettings()
   }
 
   function disarm() {
@@ -990,7 +1032,7 @@ export function useChatGoals(options: UseChatGoalsOptions) {
 
   async function startGoal(text: string): Promise<boolean> {
     if (!draftSettingsValid.value) return false
-    const executionOptions = { ...draftSettings.value }
+    const requestedExecutionOptions = { ...draftSettings.value }
     const objective = String(text || '').trim()
     if (!goalObjectiveIsValid(objective)) return false
     if (busy.value || startGoalOwner !== null) return false
@@ -1007,7 +1049,20 @@ export function useChatGoals(options: UseChatGoalsOptions) {
       if (owner !== startGoalOwner || key !== options.sessionKey.value) return false
       mutationOwner = owner
       busy.value = true
-      requestIdentity = goalSetIdentity(key, options.currentEpoch?.value ?? 0, objective, executionOptions)
+      // A selected budget/background policy is part of the operation being retried.
+      // Confirm support on the current connection; never silently weaken that intent.
+      if (requestedExecutionOptions.tokenBudget != null || requestedExecutionOptions.executionPolicy === 'background') {
+        await prepareExecutionSettings()
+        if (owner !== mutationOwner || key !== options.sessionKey.value) return false
+        if ((requestedExecutionOptions.tokenBudget != null && !tokenBudgetSupported.value)
+          || (requestedExecutionOptions.executionPolicy === 'background' && !backgroundExecutionSupported.value)) {
+          options.notify?.(i18n.global.t('chat.goal.settingsNotConfirmed'))
+          return false
+        }
+      }
+      // Capability discovery must not change the recovery identity of a user intent.
+      requestIdentity = goalSetIdentity(key, options.currentEpoch?.value ?? 0, objective, requestedExecutionOptions)
+      const executionOptions = executionOptionsForConnection(requestedExecutionOptions)
       const { clientRequestId, clientMessageId } = recoverGoalSet(requestIdentity)
       const result = await options.goalCenter.set({
         sessionKey: key,
@@ -1122,16 +1177,37 @@ export function useChatGoals(options: UseChatGoalsOptions) {
   const pause = () => mutate('goals.pause')
   const resume = () => mutate('goals.resume')
   const clear = () => mutate('goals.clear')
-  const edit = (objective: string, executionOptions: GoalExecutionOptions = {}) => {
-    if (!goalExecutionOptionsValid(executionOptions)) return Promise.resolve(false)
+  const edit = async (objective: string, executionOptions: GoalExecutionOptions = {}) => {
+    if (!goalExecutionOptionsValid(executionOptions)) return false
     const normalized = String(objective || '').trim()
     if (!goalObjectiveIsValid(normalized)) {
       options.notify?.(localizeGoalRpcError(
         new GoalCenterError('invalid', '', { reason: 'invalid-objective' }),
       ))
-      return Promise.resolve(false)
+      return false
     }
-    return mutate('goals.edit', { objective: normalized, ...executionOptions })
+    if (executionOptions.tokenBudget !== undefined || executionOptions.executionPolicy !== undefined) {
+      const target = goal.value
+      const key = options.sessionKey.value
+      if (!target) return false
+      await prepareExecutionSettings()
+      if (options.sessionKey.value !== key || goal.value?.goalId !== target.goalId
+        || goal.value.epoch !== target.epoch) return false
+      if ((executionOptions.tokenBudget !== undefined && !tokenBudgetSupported.value)
+        || (executionOptions.executionPolicy !== undefined && !backgroundExecutionSupported.value)) {
+        options.notify?.(i18n.global.t('chat.goal.settingsNotConfirmed'))
+        return false
+      }
+      if (executionOptions.tokenBudget != null && !goalUsageSupportsBudget(goal.value.usageCoverage)) {
+        options.notify?.(i18n.global.t(goal.value.usageCoverage === 'partial_usage'
+          ? 'chat.goal.pendingUsageReceipts' : 'chat.goal.usageCoverageUnavailable'))
+        return false
+      }
+    }
+    return mutate('goals.edit', {
+      objective: normalized,
+      ...executionOptions,
+    })
   }
 
   async function status(): Promise<GoalSnapshot | null> {
@@ -1171,15 +1247,19 @@ export function useChatGoals(options: UseChatGoalsOptions) {
   }
 
   if (options.connectionEpoch) watch(options.connectionEpoch, () => {
+    invalidateExecutionCapabilities()
     automaticReattachWatermarks.clear()
     clearContinuityRetry()
   }, { flush: 'sync' })
-  onBeforeUnmount(() => { goalSubscription.close(); clearContinuityRetry() })
+  onBeforeUnmount(() => { invalidateExecutionCapabilities(); goalSubscription.close(); clearContinuityRetry() })
 
   return {
     draftArmed,
     draftSettings,
     draftSettingsValid,
+    tokenBudgetSupported,
+    backgroundExecutionSupported,
+    prepareExecutionSettings,
     goal,
     activeGoal,
     lastGoal,

@@ -183,11 +183,15 @@ async def _handle_goals_capabilities(params: dict | None, ctx: RpcContext) -> di
     # The key is accepted so callers can use a uniform session-scoped request;
     # capabilities themselves are process/config scoped and have no side effects.
     if params is not None:
-        _session_key(params)
+        values = _require_params(params)
+        if values:
+            _session_key(values)
     service = _goal_service(ctx)
     config = getattr(service, "config", None)
     return {
         "supported": True,
+        "tokenBudgetSupported": True,
+        "backgroundExecutionSupported": True,
         "executionEnabled": bool(service.execution_enabled),
         "maxTurns": int(getattr(config, "max_turns", 50)),
         "runtimeBudgetSeconds": int(getattr(config, "runtime_budget_seconds", 3600)),

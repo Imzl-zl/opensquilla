@@ -18,6 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   and explicitly enabled background continuation. Physical usage is attributed
   to the root Goal across children and late results. Unknown usage pauses
   budget-driven continuation; Gateway restart always requires explicit resume.
+  Upgraded Goals can budget newly recorded usage. Clients check Gateway support
+  before offering budget and background settings.
 - Human input and approval waits release compute capacity while preserving task
   identity and session exclusion. Unsupported legacy database lineages are
   preserved and rejected consistently, and preview/nightly Desktop profiles

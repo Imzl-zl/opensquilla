@@ -1,4 +1,4 @@
-import type { GoalSnapshot } from '@/modules/goalCenter'
+import { normalizeGoalUsageCoverage, type GoalSnapshot } from '@/modules/goalCenter'
 import { canonicalSessionKey } from '@/utils/chat/sessionKeys'
 
 type JsonObject = Record<string, unknown>
@@ -91,8 +91,7 @@ export function projectGoalSnapshot(value: unknown): GoalSnapshot | null {
     tokenBudget: integer(source.tokenBudget, source.token_budget) ?? null,
     usageAccountingStartedAtMs: integer(source.usageAccountingStartedAtMs, source.usage_accounting_started_at_ms) ?? null,
     budgetTokensUsed: integer(source.budgetTokensUsed, source.budget_tokens_used) ?? 0,
-    usageCoverage: text(source.usageCoverage, source.usage_coverage) === 'complete' ? 'complete'
-      : text(source.usageCoverage, source.usage_coverage) === 'partial_usage' ? 'partial_usage' : 'partial_history',
+    usageCoverage: normalizeGoalUsageCoverage(text(source.usageCoverage, source.usage_coverage)),
     executionPolicy: text(source.executionPolicy, source.execution_policy) === 'background' ? 'background' : 'foreground',
     pauseReason: nullableText(source.pauseReason, source.pause_reason),
     blockedReason: nullableText(source.blockedReason, source.blocked_reason),

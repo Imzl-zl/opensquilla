@@ -4086,6 +4086,8 @@
       "usageReceiptsRecovered": "Usage receipts are complete. Resume the Goal when ready.",
       "usageAccountingSince": "The token budget counts usage recorded since {time}.",
       "usageAccountingPending": "Budget accounting starts with the next model request.",
+      "usageCoverageUnavailable": "Usage accounting is unavailable. A token budget cannot be set.",
+      "settingsNotConfirmed": "This connection has not confirmed support for the selected Goal settings. Your changes were not applied and are kept for retry.",
       "emptyContinuations": "Paused after repeated turns with no output or tool activity. Review the Goal and resume when ready.",
       "removeTokenBudget": "Remove token budget",
       "executionPolicy": "Continue running",

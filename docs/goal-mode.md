@@ -318,6 +318,11 @@ already include them. The snapshot exposes raw usage separately from
 requests and safe finalization can exceed the limit; this is not an exact
 provider billing cap. Increase or remove an exhausted budget before resuming.
 
+The Web UI shows budget and background settings when the connected Gateway
+advertises support. Older remote Gateways retain ordinary Goal controls; update
+the Gateway to use these additional settings. A reconnect preserves an uncertain
+request's identity and its requested budget or background policy.
+
 `usageCoverage` is `complete`, `partial_history` for Goals upgraded from older
 settlement accounting, or `partial_usage` when a request has no trustworthy
 receipt. Historical totals are preserved without inventing descendant usage.

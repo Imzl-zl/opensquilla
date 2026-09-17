@@ -4001,6 +4001,8 @@
       "usageReceiptsRecovered": "使用量の記録が揃いました。準備ができたら Goal を再開してください。",
       "usageAccountingSince": "トークン予算は {time} 以降に記録された使用量を集計します。",
       "usageAccountingPending": "次のモデルリクエストから予算の集計を開始します。",
+      "usageCoverageUnavailable": "使用量の集計状況を確認できないため、トークン予算を設定できません。",
+      "settingsNotConfirmed": "現在の接続では選択した目標設定への対応を確認できません。変更は適用されず、再試行できるよう保持されています。",
       "emptyContinuations": "出力やツール操作のないターンが続いたため一時停止しました。目標を確認してから再開してください。",
       "removeTokenBudget": "トークン予算を解除",
       "executionPolicy": "実行の継続",

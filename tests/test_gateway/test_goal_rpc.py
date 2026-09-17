@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import structlog
 from starlette.websockets import WebSocket
 
 from opensquilla.engine.runtime import TurnRunner
@@ -609,6 +610,8 @@ async def test_capabilities_and_empty_status_are_read_only(tmp_path: Path) -> No
 
         assert capabilities == {
             "supported": True,
+            "tokenBudgetSupported": True,
+            "backgroundExecutionSupported": True,
             "executionEnabled": True,
             "maxTurns": 50,
             "runtimeBudgetSeconds": 3600,
@@ -627,6 +630,106 @@ async def test_capabilities_and_empty_status_are_read_only(tmp_path: Path) -> No
         assert status["epoch"] == 0
         assert status["goal"] is None
         assert stack.events == []
+
+
+@pytest.mark.parametrize(
+    "params",
+    [None, {}, {"sessionKey": SOURCE_KEY}, {"session_key": SOURCE_KEY}, {"key": SOURCE_KEY}],
+    ids=["null", "empty-object", "canonical", "legacy-session-key", "legacy-key"],
+)
+async def test_capabilities_dispatch_accepts_process_or_session_params(
+    tmp_path: Path,
+    params: dict[str, Any] | None,
+) -> None:
+    async with _open_goal_rpc_stack(tmp_path / "capabilities-dispatch.sqlite") as stack:
+        registry = RpcRegistry()
+        register_goals_capabilities_contract(
+            registry,
+            _handle_goals_capabilities,
+            internal_error=RpcHandlerError,
+            guest_allowed_checker=is_guest_rpc_method_allowed,
+        )
+        with structlog.testing.capture_logs() as logs:
+            response = await registry.dispatch(
+                "capabilities-request", "goals.capabilities", params, stack.context,
+            )
+        assert response.ok is True
+        assert response.payload == await _handle_goals_capabilities(None, stack.context)
+        assert not any("contract_mismatch" in record.get("event", "") for record in logs)
+        assert await stack.storage.get_goal(SOURCE_KEY) is None
+        assert await _table_count(stack.storage, "agent_tasks") == 0
+        assert stack.events == []
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"sessionKey": 1}, {"session_key": None}, {"key": False},
+        {"sessionKey": " "}, {"unrelated": True}, False, 0, "", [],
+    ],
+)
+async def test_capabilities_dispatch_preserves_invalid_params_rejection(
+    tmp_path: Path,
+    params: Any,
+) -> None:
+    async with _open_goal_rpc_stack(tmp_path / "capabilities-invalid.sqlite") as stack:
+        registry = RpcRegistry()
+        register_goals_capabilities_contract(
+            registry,
+            _handle_goals_capabilities,
+            internal_error=RpcHandlerError,
+            guest_allowed_checker=is_guest_rpc_method_allowed,
+        )
+        with structlog.testing.capture_logs():
+            response = await registry.dispatch(
+                "capabilities-request", "goals.capabilities", params, stack.context,
+            )
+        assert response.ok is False
+        assert response.error is not None
+        assert response.error.code == "INVALID_REQUEST"
+        assert await stack.storage.get_goal(SOURCE_KEY) is None
+        assert stack.events == []
+
+
+async def test_advertised_goal_settings_are_persisted_by_set_and_edit(tmp_path: Path) -> None:
+    async with _open_goal_rpc_stack(tmp_path / "goal-settings-capabilities.sqlite") as stack:
+        capabilities = await _handle_goals_capabilities({"sessionKey": SOURCE_KEY}, stack.context)
+        assert capabilities["tokenBudgetSupported"] is True
+        assert capabilities["backgroundExecutionSupported"] is True
+        created = await _handle_goals_set(
+            {**_set_params(), "tokenBudget": 19, "executionPolicy": "background"}, stack.context,
+        )
+        assert created["goal"]["tokenBudget"] == 19
+        assert created["goal"]["executionPolicy"] == "background"
+        await _settle_set_task(stack, created)
+        current = await _handle_goals_status({"sessionKey": SOURCE_KEY}, stack.context)
+        edited = await _handle_goals_edit(
+            {**_mutation_params(current["goal"], request_index=2),
+             "objective": current["goal"]["objective"],
+             "tokenBudget": 23, "executionPolicy": "foreground"}, stack.context,
+        )
+        assert edited["goal"]["tokenBudget"] == 23
+        assert edited["goal"]["executionPolicy"] == "foreground"
+        persisted = await stack.storage.get_goal(SOURCE_KEY)
+        assert persisted is not None
+        assert persisted.token_budget == 23 and persisted.background is False
+
+
+def test_legacy_goal_capabilities_remain_valid_without_advertising_new_settings() -> None:
+    from opensquilla.contracts.adapters.goals_contract import validate_goals_capabilities_result
+
+    # Exact default capability payload from this repository's public 8c0934073
+    # handler, before token-budget/background support. No runtime data is used.
+    legacy = {
+        "supported": True, "executionEnabled": True,
+        "maxTurns": 50, "runtimeBudgetSeconds": 3600,
+        "methods": ["goals.set", "goals.status", "goals.edit", "goals.pause",
+                    "goals.resume", "goals.reattach", "goals.clear"],
+    }
+    result = validate_goals_capabilities_result(legacy)
+    assert result == legacy
+    assert "tokenBudgetSupported" not in result
+    assert "backgroundExecutionSupported" not in result
 
 
 @pytest.mark.asyncio
@@ -3871,6 +3974,8 @@ async def test_hot_kill_switch_pauses_leased_goal_and_blocks_new_provider_turn(
             stack.context,
         )
         assert capabilities["executionEnabled"] is False
+        assert capabilities["tokenBudgetSupported"] is True
+        assert capabilities["backgroundExecutionSupported"] is True
 
 
 @pytest.mark.asyncio

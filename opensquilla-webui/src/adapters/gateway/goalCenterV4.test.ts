@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createV4GoalCenter } from './goalCenterV4'
+import { projectGoalSnapshot } from './goalSnapshotProjection'
 
 function transport(response: unknown, supported = true) {
   const requests: Array<{ method: string; params?: Record<string, unknown> }> = []
@@ -51,11 +52,37 @@ describe('createV4GoalCenter', () => {
       maxTurns: 50,
       runtimeBudgetSeconds: 3600,
       methods: ['goals.status'],
+      tokenBudgetSupported: false,
+      backgroundExecutionSupported: false,
     })
     expect(source.requests[0]).toEqual({
       method: 'goals.capabilities',
       params: undefined,
     })
+  })
+
+  it('projects explicit current-server budget and background capabilities', async () => {
+    const center = createV4GoalCenter(transport({
+      supported: true, executionEnabled: true, maxTurns: 50, runtimeBudgetSeconds: 3600,
+      methods: ['goals.set', 'goals.edit'],
+      tokenBudgetSupported: true, backgroundExecutionSupported: true,
+    }))
+    await expect(center.capabilities()).resolves.toMatchObject({
+      tokenBudgetSupported: true, backgroundExecutionSupported: true,
+    })
+  })
+
+  it.each([undefined, 'future_coverage'])('does not invent historical accounting for coverage %s', usageCoverage => {
+    expect(projectGoalSnapshot({ status: 'active', usageCoverage })?.usageCoverage).toBeUndefined()
+    expect(projectGoalSnapshot({ status: 'active', usage_coverage: usageCoverage })?.usageCoverage).toBeUndefined()
+  })
+
+  it('rejects explicit unknown coverage in a validated status response', async () => {
+    const center = createV4GoalCenter(transport({
+      sessionKey: 'agent:demo', sessionId: 's1', epoch: 1,
+      goal: { status: 'active', usageCoverage: 'future_coverage' },
+    }))
+    await expect(center.status('agent:demo')).rejects.toThrow('invalid response')
   })
 
   it('rejects an incomplete capability response at the adapter boundary', async () => {

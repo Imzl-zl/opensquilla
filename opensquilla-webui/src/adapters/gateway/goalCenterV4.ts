@@ -98,6 +98,8 @@ export function createV4GoalCenter(transport: GoalCenterTransport): GoalCenter {
           maxTurns: raw.maxTurns,
           runtimeBudgetSeconds: raw.runtimeBudgetSeconds,
           methods: [...raw.methods],
+          tokenBudgetSupported: raw.tokenBudgetSupported === true,
+          backgroundExecutionSupported: raw.backgroundExecutionSupported === true,
         }
       } catch (error) { throw mapGoalError(error) }
     },

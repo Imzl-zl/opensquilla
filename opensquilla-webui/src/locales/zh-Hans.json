@@ -4085,6 +4085,8 @@
       "usageReceiptsRecovered": "用量回执已补齐。准备好后可继续 Goal。",
       "usageAccountingSince": "Token 预算从 {time} 起累计用量。",
       "usageAccountingPending": "下一次模型请求开始计入预算。",
+      "usageCoverageUnavailable": "用量核算状态不可用，暂时无法设置 Token 预算。",
+      "settingsNotConfirmed": "当前连接尚未确认支持所选 Goal 设置。更改未应用，已保留以供重试。",
       "emptyContinuations": "连续多个回合没有输出或工具活动，已暂停。检查目标后可继续。",
       "removeTokenBudget": "移除 Token 预算",
       "executionPolicy": "持续运行",

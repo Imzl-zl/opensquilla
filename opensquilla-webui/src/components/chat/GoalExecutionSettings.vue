@@ -1,34 +1,37 @@
 <template>
   <div class="goal-settings">
-    <label>
-      <span>{{ t('chat.goal.tokenBudget') }}</span>
-      <input
-        type="number"
-        min="1"
-        step="1"
-        :value="modelValue.tokenBudget ?? ''"
-        :placeholder="t('chat.goal.noTokenBudget')"
-        :disabled="disabled || pendingUsage"
-        :aria-invalid="!valid"
-        @input="updateBudget"
-      >
-    </label>
-    <p v-if="!valid" class="goal-settings__note" role="alert">{{ t('chat.goal.invalidTokenBudget') }}</p>
-    <p v-if="usageCoverage === 'partial_history'" class="goal-settings__note">{{ t('chat.goal.partialUsageHistory') }}</p>
-    <p v-else-if="pendingUsage" class="goal-settings__note">{{ t('chat.goal.pendingUsageReceipts') }}</p>
-    <button
-      v-if="pendingUsage && existingBudget != null && modelValue.tokenBudget !== null"
-      type="button"
-      :disabled="disabled"
-      @click="emit('update:modelValue', { ...modelValue, tokenBudget: null })"
-    >{{ t('chat.goal.removeTokenBudget') }}</button>
-    <p v-if="usageAccountingStartedAtMs != null" class="goal-settings__note">
-      {{ t('chat.goal.usageAccountingSince', { time: new Date(usageAccountingStartedAtMs).toLocaleString() }) }}
-    </p>
-    <p v-else-if="usageCoverage === 'partial_history'" class="goal-settings__note">
-      {{ t('chat.goal.usageAccountingPending') }}
-    </p>
-    <label>
+    <template v-if="tokenBudgetSupported">
+      <label>
+        <span>{{ t('chat.goal.tokenBudget') }}</span>
+        <input
+          type="number"
+          min="1"
+          step="1"
+          :value="modelValue.tokenBudget ?? ''"
+          :placeholder="t('chat.goal.noTokenBudget')"
+          :disabled="disabled || budgetUnavailable"
+          :aria-invalid="!valid"
+          @input="updateBudget"
+        >
+      </label>
+      <p v-if="!valid" class="goal-settings__note" role="alert">{{ t('chat.goal.invalidTokenBudget') }}</p>
+      <p v-if="usageCoverage === 'partial_history'" class="goal-settings__note">{{ t('chat.goal.partialUsageHistory') }}</p>
+      <p v-else-if="pendingUsage" class="goal-settings__note">{{ t('chat.goal.pendingUsageReceipts') }}</p>
+      <p v-else-if="budgetUnavailable" class="goal-settings__note">{{ t('chat.goal.usageCoverageUnavailable') }}</p>
+      <button
+        v-if="budgetUnavailable && existingBudget != null && modelValue.tokenBudget !== null"
+        type="button"
+        :disabled="disabled"
+        @click="emit('update:modelValue', { ...modelValue, tokenBudget: null })"
+      >{{ t('chat.goal.removeTokenBudget') }}</button>
+      <p v-if="usageAccountingStartedAtMs != null" class="goal-settings__note">
+        {{ t('chat.goal.usageAccountingSince', { time: new Date(usageAccountingStartedAtMs).toLocaleString() }) }}
+      </p>
+      <p v-else-if="usageCoverage === 'partial_history'" class="goal-settings__note">
+        {{ t('chat.goal.usageAccountingPending') }}
+      </p>
+    </template>
+    <label v-if="backgroundExecutionSupported">
       <span>{{ t('chat.goal.executionPolicy') }}</span>
       <select
         :value="modelValue.executionPolicy ?? 'foreground'"
@@ -39,19 +42,22 @@
         <option value="background">{{ t('chat.goal.background') }}</option>
       </select>
     </label>
-    <p v-if="modelValue.executionPolicy === 'background'" class="goal-settings__note">{{ t('chat.goal.backgroundHint') }}</p>
+    <p v-if="backgroundExecutionSupported && modelValue.executionPolicy === 'background'" class="goal-settings__note">{{ t('chat.goal.backgroundHint') }}</p>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import type { GoalExecutionOptions } from '@/modules/goalCenter'
+import { goalUsageSupportsBudget, type GoalExecutionOptions } from '@/modules/goalCenter'
 import { goalExecutionOptionsValid } from '@/composables/chat/useChatGoals'
 
 const props = defineProps<{
   modelValue: GoalExecutionOptions
   disabled?: boolean
+  tokenBudgetSupported?: boolean
+  backgroundExecutionSupported?: boolean
+  existingGoal?: boolean
   usageCoverage?: 'complete' | 'partial_history' | 'partial_usage'
   existingBudget?: number | null
   usageAccountingStartedAtMs?: number | null
@@ -59,6 +65,7 @@ const props = defineProps<{
 const emit = defineEmits<{ 'update:modelValue': [value: GoalExecutionOptions] }>()
 const { t } = useI18n()
 const pendingUsage = computed(() => props.usageCoverage === 'partial_usage')
+const budgetUnavailable = computed(() => props.existingGoal && !goalUsageSupportsBudget(props.usageCoverage))
 const valid = computed(() => goalExecutionOptionsValid(props.modelValue))
 
 function updateBudget(event: Event) {

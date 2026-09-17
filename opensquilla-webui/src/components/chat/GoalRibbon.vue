@@ -56,7 +56,10 @@
           <GoalExecutionSettings
             v-model="editSettings"
             :disabled="busy || editSubmitting"
-            :usage-coverage="goal.usageCoverage ?? 'partial_history'"
+            :usage-coverage="goal.usageCoverage"
+            :token-budget-supported="tokenBudgetSupported"
+            :background-execution-supported="backgroundExecutionSupported"
+            existing-goal
             :existing-budget="goal.tokenBudget"
             :usage-accounting-started-at-ms="goal.usageAccountingStartedAtMs"
           />
@@ -161,7 +164,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import { goalExecutionOptionsValid, type GoalSnapshot } from '@/composables/chat/useChatGoals'
-import type { GoalExecutionOptions } from '@/modules/goalCenter'
+import { goalUsageSupportsBudget, type GoalExecutionOptions } from '@/modules/goalCenter'
 import GoalExecutionSettings from './GoalExecutionSettings.vue'
 import ExecutionProgress from './ExecutionProgress.vue'
 import { useDocumentEvent } from '@/composables/useDocumentEvent'
@@ -173,10 +176,13 @@ const props = defineProps<{
   planModeActive?: boolean
   connectionTakeoverAvailable?: boolean
   reattaching?: boolean
+  tokenBudgetSupported?: boolean
+  backgroundExecutionSupported?: boolean
 }>()
 
 const emit = defineEmits<{
   edit: [objective: string, settle: (accepted: boolean) => void, options?: GoalExecutionOptions]
+  'edit-open': []
   pause: []
   resume: []
   takeover: []
@@ -189,6 +195,7 @@ const editSubmitting = ref(false)
 const objectiveExpanded = ref(false)
 const editText = ref(props.goal.objective)
 const editSettings = ref<GoalExecutionOptions>({})
+const initialEditSettings = ref<GoalExecutionOptions>({})
 const editInput = ref<HTMLTextAreaElement | null>(null)
 const actionsRef = ref<HTMLElement | null>(null)
 const menuTrigger = ref<HTMLButtonElement | null>(null)
@@ -265,7 +272,7 @@ const pauseReasonText = computed(() => {
     case 'user':
     case 'user_paused': return t('chat.goal.pausedByUser')
     case 'token_budget': return t('chat.goal.tokenBudgetReached')
-    case 'usage_unknown': return t(props.goal.usageCoverage !== 'partial_usage'
+    case 'usage_unknown': return t(goalUsageSupportsBudget(props.goal.usageCoverage)
       ? 'chat.goal.usageReceiptsRecovered' : 'chat.goal.pendingUsageReceipts')
     case 'empty_continuations': return t('chat.goal.emptyContinuations')
     case 'turn_limit': return t('chat.goal.turnLimitReached')
@@ -325,11 +332,13 @@ const metaText = computed(() => {
 function beginEdit() {
   closeMenu()
   editText.value = props.goal.objective
-  editSettings.value = {
+  initialEditSettings.value = {
     executionPolicy: props.goal.executionPolicy ?? 'foreground',
-    ...(props.goal.usageCoverage !== 'partial_usage' ? { tokenBudget: props.goal.tokenBudget ?? null } : {}),
+    tokenBudget: props.goal.tokenBudget ?? null,
   }
+  editSettings.value = { ...initialEditSettings.value }
   editing.value = true
+  emit('edit-open')
   void nextTick(() => {
     resizeEditInput()
     editInput.value?.focus()
@@ -367,7 +376,12 @@ function submitEdit() {
       return
     }
     void nextTick(() => editInput.value?.focus())
-  }, { ...editSettings.value })
+  }, {
+    ...(editSettings.value.tokenBudget !== initialEditSettings.value.tokenBudget
+      ? { tokenBudget: editSettings.value.tokenBudget } : {}),
+    ...(editSettings.value.executionPolicy !== initialEditSettings.value.executionPolicy
+      ? { executionPolicy: editSettings.value.executionPolicy } : {}),
+  })
 }
 
 function invokeLifecycleAction() {

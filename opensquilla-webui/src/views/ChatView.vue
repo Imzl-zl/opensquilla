@@ -538,9 +538,14 @@
     >
       <ExecutionProgress :progress="ordinaryTaskProgress" />
     </div>
-    <details v-if="goalDraftArmed && !shareMode" class="goal-draft-settings">
+    <details v-if="goalDraftArmed && !shareMode && (goalTokenBudgetSupported || goalBackgroundExecutionSupported)" class="goal-draft-settings">
       <summary>{{ t('chat.goal.settings') }}</summary>
-      <GoalExecutionSettings v-model="goalDraftSettings" :disabled="goalBusy" />
+      <GoalExecutionSettings
+        v-model="goalDraftSettings"
+        :disabled="goalBusy"
+        :token-budget-supported="goalTokenBudgetSupported"
+        :background-execution-supported="goalBackgroundExecutionSupported"
+      />
     </details>
     <Transition name="goal-run-dock">
       <div v-if="activeGoalRun" ref="goalRunDockRef" class="goal-run-dock">
@@ -551,6 +556,9 @@
           :plan-mode-active="initialCollaborationMode === 'plan'"
           :connection-takeover-available="goalConnectionTakeoverAvailable"
           :reattaching="goalReattaching"
+          :token-budget-supported="goalTokenBudgetSupported"
+          :background-execution-supported="goalBackgroundExecutionSupported"
+          @edit-open="prepareGoalExecutionSettings"
           @edit="editGoalFromRibbon"
           @pause="pauseGoal"
           @resume="resumeGoal"
@@ -3236,6 +3244,9 @@ applyGoalSnapshot = snapshot => { chatGoals.applyHydration(snapshot) }
 const {
   draftArmed: goalDraftArmed,
   draftSettings: goalDraftSettings,
+  tokenBudgetSupported: goalTokenBudgetSupported,
+  backgroundExecutionSupported: goalBackgroundExecutionSupported,
+  prepareExecutionSettings: prepareGoalExecutionSettings,
   goal: currentGoalRun,
   activeGoal: activeGoalRun,
   lastGoal: lastGoalRun,

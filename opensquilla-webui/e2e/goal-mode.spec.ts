@@ -124,6 +124,7 @@ async function installFakeGoalGateway(
   options: {
     sessionRouting?: boolean
     goalRemoval?: boolean
+    legacyGoalSettings?: boolean
     history?: Array<Record<string, unknown>>
   } = {},
 ): Promise<MockGoalGateway> {
@@ -185,7 +186,8 @@ async function installFakeGoalGateway(
           auth: {
             principal: {
               isOwner: true,
-              ...(options.sessionRouting ? { authState: 'authenticated' } : {}),
+              authenticated: false,
+              authState: 'authenticated',
             },
           },
         }))
@@ -237,6 +239,7 @@ async function installFakeGoalGateway(
           executionEnabled: true,
           maxTurns: 50,
           runtimeBudgetSeconds: 3_600,
+          ...(!options.legacyGoalSettings ? { tokenBudgetSupported: true, backgroundExecutionSupported: true } : {}),
           methods: ['goals.set', ...(options.goalRemoval ? ['goals.clear'] : [])],
         },
         'models.routing.get': { mode: 'direct' },
@@ -355,6 +358,28 @@ async function installFakeGoalGateway(
     },
   }
 }
+
+test('An older Gateway keeps Goal objective edits usable without unsupported settings', { tag: '@plan-goal-runtime' }, async ({ page }) => {
+  const gateway = await installFakeGoalGateway(page, { goalRemoval: true, legacyGoalSettings: true })
+  await page.goto(CONTROL_URL + 'chat?session=' + encodeURIComponent(SESSION_KEY))
+  await expect(page.locator('.chat-textarea')).toBeEditable()
+  expect(gateway.methods).not.toContain('goals.capabilities')
+  // Matches the pre-budget Gateway snapshot: no coverage or execution settings.
+  gateway.emitGoal(goalSnapshot({ status: 'paused', activeTaskId: null, executionState: 'idle' }))
+  const ribbon = page.locator('.goal-ribbon')
+  await ribbon.getByRole('button', { name: 'Goal actions', exact: true }).click()
+  await ribbon.getByRole('menuitem', { name: 'Edit goal' }).click()
+  await expect.poll(() => gateway.methods.filter(method => method === 'goals.capabilities').length).toBe(1)
+  await expect(ribbon.getByLabel('Token budget', { exact: true })).toHaveCount(0)
+  await expect(ribbon.locator('select')).toHaveCount(0)
+  await ribbon.locator('textarea').fill('Verify the legacy Goal objective')
+  await ribbon.locator('button[type="submit"]').click()
+  await expect.poll(() => gateway.editParams.length).toBe(1)
+  expect(gateway.editParams[0]).toMatchObject({ objective: 'Verify the legacy Goal objective' })
+  expect(gateway.editParams[0]).not.toHaveProperty('tokenBudget')
+  expect(gateway.editParams[0]).not.toHaveProperty('executionPolicy')
+  await expect(ribbon.locator('textarea')).toHaveCount(0)
+})
 
 for (const width of [1280, 390]) {
   test(`Goal budget and background settings survive edit and refresh at ${width}px`, { tag: '@plan-goal-runtime' }, async ({ page }) => {
@@ -1087,6 +1112,17 @@ test('Goal mode continues through a real Gateway, refresh, and deterministic pro
     await expect(ribbon).toContainText('1 turns')
     await expect(ribbon.locator('.goal-ribbon__progress')).toHaveCount(0)
     await expect(page.locator('.msg-ai').filter({ hasText: REAL_FIRST_REPLY })).toBeVisible()
+
+    // Optional settings load only when the operator opens the editor.
+    expect(sentRpcMethods).not.toContain('goals.capabilities')
+    await ribbon.getByRole('button', { name: 'Goal actions', exact: true }).click()
+    await ribbon.getByRole('menuitem', { name: 'Edit goal' }).click()
+    await expect(ribbon.getByLabel('Token budget', { exact: true })).toBeEnabled()
+    await expect(ribbon.locator('select')).toBeEnabled()
+    const capabilitiesRequest = rpcFrames.find(frame => frame.direction === 'sent' && frame.method === 'goals.capabilities')
+    const capabilitiesResponse = rpcFrames.find(frame => frame.direction === 'received' && frame.id === capabilitiesRequest?.id)
+    expect(capabilitiesResponse?.payload).toMatchObject({ tokenBudgetSupported: true, backgroundExecutionSupported: true })
+    await ribbon.getByRole('button', { name: 'Cancel', exact: true }).click()
 
     // Reload while Task 2 is blocked inside the real provider. The new page
     // must reconnect, hydrate the persisted Goal snapshot/transcript, and keep

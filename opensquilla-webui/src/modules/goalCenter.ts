@@ -1,6 +1,17 @@
 import type { InjectionKey } from 'vue'
 
 export type GoalStatus = string
+export type GoalUsageCoverage = 'complete' | 'partial_history' | 'partial_usage'
+
+/** Missing/future coverage never implies that budget accounting is trustworthy. */
+export function normalizeGoalUsageCoverage(value: unknown): GoalUsageCoverage | undefined {
+  return value === 'complete' || value === 'partial_history' || value === 'partial_usage'
+    ? value : undefined
+}
+
+export function goalUsageSupportsBudget(value: unknown): boolean {
+  return value === 'complete' || value === 'partial_history'
+}
 
 /** Domain projection of a durable goal; wire aliases stay in the adapter. */
 export interface GoalExecutionOptions {
@@ -95,6 +106,23 @@ export interface GoalCapabilities {
   readonly maxTurns: number
   readonly runtimeBudgetSeconds: number
   readonly methods: readonly string[]
+  readonly tokenBudgetSupported: boolean
+  readonly backgroundExecutionSupported: boolean
+}
+
+/** Omit unsupported settings while preserving ordinary Goal commands. */
+export function supportedGoalExecutionOptions(
+  options: GoalExecutionOptions,
+  capabilities: Pick<GoalCapabilities, 'tokenBudgetSupported' | 'backgroundExecutionSupported'>,
+  existingGoal?: { usageCoverage?: GoalUsageCoverage },
+): GoalExecutionOptions {
+  return {
+    ...(capabilities.tokenBudgetSupported && options.tokenBudget !== undefined
+      && (options.tokenBudget === null || !existingGoal || goalUsageSupportsBudget(existingGoal.usageCoverage))
+      ? { tokenBudget: options.tokenBudget } : {}),
+    ...(capabilities.backgroundExecutionSupported && options.executionPolicy !== undefined
+      ? { executionPolicy: options.executionPolicy } : {}),
+  }
 }
 
 export type GoalCenterErrorCode = 'not-found' | 'unsupported' | 'forbidden' | 'conflict' | 'unavailable' | 'invalid'

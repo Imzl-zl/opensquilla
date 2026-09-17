@@ -4001,6 +4001,8 @@
       "usageReceiptsRecovered": "Die Nutzungsbelege sind vollständig. Setze das Ziel fort, wenn du bereit bist.",
       "usageAccountingSince": "Das Token-Budget zählt die seit {time} erfasste Nutzung.",
       "usageAccountingPending": "Die Budgeterfassung beginnt mit der nächsten Modellanfrage.",
+      "usageCoverageUnavailable": "Die Nutzungserfassung ist nicht verfügbar. Ein Token-Budget kann nicht festgelegt werden.",
+      "settingsNotConfirmed": "Diese Verbindung hat die ausgewählten Zieleinstellungen nicht bestätigt. Ihre Änderungen wurden nicht angewendet und bleiben für einen erneuten Versuch erhalten.",
       "emptyContinuations": "Nach mehreren Runden ohne Ausgabe oder Werkzeugaktivität pausiert. Prüfe das Ziel und setze es fort, wenn du bereit bist.",
       "removeTokenBudget": "Token-Budget entfernen",
       "executionPolicy": "Weiter ausführen",

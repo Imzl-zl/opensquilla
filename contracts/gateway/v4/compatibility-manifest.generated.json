@@ -544,7 +544,7 @@
       "lifecycle": "stable",
       "name": "goals.capabilities",
       "schema": "goals/goals-capabilities.schema.json",
-      "schemaSha256": "af06932edad864a22dbdd3f30bac3f6f5379121092d947f4d1b1bc4190cc6bb1"
+      "schemaSha256": "fc8911d403bc577533131b1b61f1ce4aad1f51d638b25644c6bc16fd8ab054d0"
     },
     {
       "lifecycle": "stable",
@@ -1480,7 +1480,7 @@
     "generatorSha256": "806c30bfc7e30c2c0db1b084fbaf32aca759430ef2dda49bed8a9e3952312a65",
     "methodCount": 217,
     "schemaCount": 227,
-    "schemaTreeSha256": "679f243c8530110baab109679a5b523e20ed4294e7a63a5a59e4e7625577d97d"
+    "schemaTreeSha256": "256af3d51335721348b992164065e5aa3613d34614c2adc7bed5124839df8fd3"
   },
   "wireVersion": 4
 }
