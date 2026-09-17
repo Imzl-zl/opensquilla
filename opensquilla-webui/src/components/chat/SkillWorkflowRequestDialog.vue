@@ -46,9 +46,59 @@ useDialogA11y(dialogRef, ref(true), () => emit('cancel'), { initialFocus: inputR
 </script>
 
 <style scoped>
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+  background: var(--scrim);
+}
+
+.modal {
+  width: min(520px, 100%);
+  max-height: calc(100dvh - var(--sp-8));
+  overflow-y: auto;
+  padding: var(--sp-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-modal);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.modal__title {
+  margin: 0 0 var(--sp-4);
+  color: var(--text);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.modal__body {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
 .skill-workflow-request {
+  display: block;
   width: 100%;
-  margin-top: 0.5rem;
+  margin-top: var(--sp-2);
   resize: vertical;
+}
+
+.modal__footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+  margin-top: var(--sp-4);
+}
+
+.modal__footer .btn {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 </style>

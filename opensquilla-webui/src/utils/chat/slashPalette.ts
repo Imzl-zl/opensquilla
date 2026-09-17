@@ -1,5 +1,12 @@
 export interface SlashQueryRange { start: number; end: number; query: string }
 
+export function shortSlashDescription(description: string, limit = 64): string {
+  const firstLine = description.trim().split(/\r?\n/, 1)[0] || ''
+  const sentence = firstLine.replace(/`/g, '').match(/^.*?(?:[。！？!?]|\.(?=\s|$)|$)/u)?.[0] || ''
+  const characters = Array.from(sentence)
+  return characters.length > limit ? characters.slice(0, limit - 1).join('').trimEnd() + '…' : sentence
+}
+
 /** Only a standalone slash token at the caret is a palette query. */
 export function slashQueryAt(text: string, caret = text.length): SlashQueryRange | null {
   const before = text.slice(0, caret)

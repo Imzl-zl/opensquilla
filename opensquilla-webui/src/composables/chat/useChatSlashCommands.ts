@@ -2,7 +2,7 @@ import { computed, getCurrentScope, onScopeDispose, ref, watch, type Ref } from 
 import type { SkillCatalog } from '@/modules/skillCatalog'
 import type { SkillCandidate } from '@/types/skills'
 import type { SelectedSkillRef } from '@/types/selectedSkills'
-import { replaceSlashQuery, slashQueryAt, slashSearchRank, type SlashQueryRange } from '@/utils/chat/slashPalette'
+import { replaceSlashQuery, shortSlashDescription, slashQueryAt, slashSearchRank, type SlashQueryRange } from '@/utils/chat/slashPalette'
 import i18n from '@/i18n'
 import {
   MetaRunCenterError,
@@ -41,6 +41,7 @@ export interface ChatSlashCommand {
   cmd: string
   label: string
   desc: string
+  searchDescriptions?: string[]
   aliases: string[]
   execution?: {
     action?: string
@@ -274,6 +275,7 @@ function makeArgCandidate(parent: ChatSlashCommand, choice: ArgumentChoice): Cha
     cmd: full,
     label: full,
     desc: localizedMetaDescription(choice),
+    searchDescriptions: [choice.description],
     aliases: [],
     execution: parent.execution,
     argValue: choice.value,
@@ -286,16 +288,32 @@ function makeArgCandidate(parent: ChatSlashCommand, choice: ArgumentChoice): Cha
   }
 }
 
+const PALETTE_COPY: Record<string, { key: string; aliases: string[] }> = {
+  xlsx: { key: 'xlsx', aliases: ['Excel', 'spreadsheet', '表格'] },
+  docx: { key: 'docx', aliases: ['Word', 'document', '文档'] },
+  pptx: { key: 'pptx', aliases: ['PowerPoint', 'presentation', '幻灯片', '演示'] },
+  'pdf-toolkit': { key: 'pdf', aliases: ['PDF', '文档'] },
+  github: { key: 'github', aliases: ['GitHub', 'repository', '代码仓库'] },
+  'html-coder': { key: 'html', aliases: ['HTML', 'webpage', '网页'] },
+  AwesomeWebpageMetaSkill: { key: 'webpage', aliases: ['website', '网站'] },
+  'meta-kid-project-planner': { key: 'kidsProject', aliases: ['children', '儿童', '创意项目'] },
+  'meta-short-drama': { key: 'shortDrama', aliases: ['video', '短剧', '视频'] },
+  'meta-skill-creator': { key: 'skillCreator', aliases: ['workflow', '工作流'] },
+  'meta-paper-write': { key: 'paperWriting', aliases: ['paper', '论文'] },
+}
+const PREFERRED_META_NAMES = ['AwesomeWebpageMetaSkill', 'meta-short-drama', 'meta-paper-write']
+
+function paletteCopy(name: string, description: string): { label: string; desc: string; aliases: string[] } {
+  const copy = PALETTE_COPY[name]
+  return copy ? {
+    label: i18n.global.t(`chat.skillPalette.items.${copy.key}.name`),
+    desc: i18n.global.t(`chat.skillPalette.items.${copy.key}.description`),
+    aliases: copy.aliases,
+  } : { label: name, desc: shortSlashDescription(description), aliases: [] }
+}
+
 function localizedMetaDescription(choice: ArgumentChoice): string {
-  const keys: Record<string, string> = {
-    AwesomeWebpageMetaSkill: 'chat.metaDescriptions.webpage',
-    'meta-kid-project-planner': 'chat.metaDescriptions.kidsProject',
-    'meta-short-drama': 'chat.metaDescriptions.shortDrama',
-    'meta-skill-creator': 'chat.metaDescriptions.skillCreator',
-    'meta-paper-write': 'chat.metaDescriptions.paperWriting',
-  }
-  const key = keys[choice.value]
-  return key ? i18n.global.t(key) : choice.description
+  return paletteCopy(choice.value, choice.description).desc
 }
 
 export function useChatSlashCommands(options: UseChatSlashCommandsOptions) {
@@ -310,7 +328,7 @@ export function useChatSlashCommands(options: UseChatSlashCommandsOptions) {
   const skillCandidates = ref<SkillCandidate[]>([])
   const skillsLoading = ref(false)
   const skillsError = ref('')
-  const metaDraft = ref<{ name: string; text: string; originalText: string; sessionKey: string } | null>(null)
+  const metaDraft = ref<{ name: string; label?: string; text: string; originalText: string; sessionKey: string } | null>(null)
   let queryRange: SlashQueryRange | null = null
   let candidatesLoaded = false
   let candidateEpoch = 0
@@ -366,20 +384,36 @@ export function useChatSlashCommands(options: UseChatSlashCommandsOptions) {
   function updatePalette() {
     if (!queryRange) return
     const query = queryRange.query
-    const commands = slashCmds.value.map(command => ({ ...withLiveDescription(command), kind: 'command' as const }))
+    const commands = slashCmds.value.map(command => ({
+      ...withLiveDescription(command), searchDescriptions: [command.desc], kind: 'command' as const,
+    }))
     const meta = slashCmds.value.flatMap(parent => (parent.argumentChoices || []).map(choice => ({
       ...makeArgCandidate(parent, choice), kind: 'meta' as const,
-      label: choice.value, desc: localizedMetaDescription(choice),
+      ...paletteCopy(choice.value, choice.description),
     })))
-    const skills: ChatSlashCommand[] = skillCandidates.value.map(skill => ({
-      name: skill.name, cmd: '/' + skill.name, label: skill.name,
-      desc: String(i18n.global.locale.value).startsWith('zh') ? skill.descriptionZh || skill.description : skill.description,
-      aliases: [...skill.aliases], kind: 'skill', skill,
-    }))
-    filteredSlashCmds.value = [...commands, ...skills, ...meta]
+    const skills: ChatSlashCommand[] = skillCandidates.value.map(skill => {
+      const copy = paletteCopy(skill.name, String(i18n.global.locale.value).startsWith('zh')
+        ? skill.descriptionZh || skill.description : skill.description)
+      return {
+        ...copy, name: skill.name, cmd: '/' + skill.name,
+        aliases: [...skill.aliases, ...copy.aliases], kind: 'skill', skill,
+      }
+    })
+    if (!query) {
+      const commonCommands = ['/new', '/coding', '/compact'].flatMap(name =>
+        commands.filter(command => slashCommandKeys(command).includes(name)).slice(0, 1))
+      const preferredSkills = ['xlsx', 'docx', 'pptx']
+      const skillPriority = (name: string) => {
+        const index = preferredSkills.indexOf(name)
+        return index < 0 ? preferredSkills.length : index
+      }
+      const commonSkills = [...skills].sort((a, b) => skillPriority(a.name) - skillPriority(b.name)).slice(0, 3)
+      const commonMeta = PREFERRED_META_NAMES.flatMap(name => meta.filter(item => item.argValue === name)).slice(0, 2)
+      filteredSlashCmds.value = [...commonCommands, ...commonSkills, ...commonMeta]
+    } else filteredSlashCmds.value = [...commands, ...skills, ...meta]
       .map((command, index) => ({ command, index, rank: slashSearchRank(query,
         [command.label, command.name, command.cmd, ...command.aliases],
-        [command.desc, command.skill?.description || '', command.skill?.descriptionZh || '']) }))
+        [command.desc, ...(command.searchDescriptions || []), command.skill?.description || '', command.skill?.descriptionZh || '']) }))
       .filter(item => item.rank >= 0)
       .sort((a, b) => a.rank - b.rank || a.index - b.index)
       .map(item => item.command)
@@ -407,12 +441,7 @@ export function useChatSlashCommands(options: UseChatSlashCommandsOptions) {
   const metaSkillChoices = computed(() => {
     const command = slashCmds.value.find(c => slashCommandKey(c.name) === '/meta')
     const choices = command?.argumentChoices || []
-    const preferred = [
-      'AwesomeWebpageMetaSkill',
-      'meta-short-drama',
-      'meta-paper-write',
-    ]
-    return preferred
+    return PREFERRED_META_NAMES
       .map(name => choices.find(choice => choice.value === name))
       .filter((choice): choice is ArgumentChoice => Boolean(choice))
   })
@@ -617,15 +646,24 @@ export function useChatSlashCommands(options: UseChatSlashCommandsOptions) {
 
   function withLiveDescription(command: ChatSlashCommand): ChatSlashCommand {
     const action = command?.execution?.action || command.cmd || command.name
-    if (action !== 'coding.mode' && action !== '/coding') return command
-    return {
-      ...command,
-      desc: i18n.global.t(
+    if (action === 'coding.mode' || action === '/coding') return {
+      ...command, desc: i18n.global.t(
         options.codingModeEnabled.value
           ? 'chat.codingMode.commandDisable'
           : 'chat.codingMode.commandEnable',
       ),
     }
+    const names: Record<string, string> = {
+      new_chat: 'new', '/new': 'new',
+      compact_context: 'compact', 'sessions.contextCompact': 'compact', '/compact': 'compact',
+      'goal.set': 'goal', '/goal': 'goal', 'meta.menu': 'meta',
+      'plans.setMode': 'plan', 'plans.toggleMode': 'plan', '/plan': 'plan',
+      reset_session: 'reset', 'sessions.reset': 'reset', '/reset': 'reset',
+      usage_status: 'usage', 'usage.status': 'usage', '/usage': 'usage',
+    }
+    return { ...command, desc: names[action]
+      ? i18n.global.t(`chat.skillPalette.commandDescriptions.${names[action]}`)
+      : shortSlashDescription(command.desc) }
   }
 
   function handleSlashInput() {
@@ -712,7 +750,7 @@ export function useChatSlashCommands(options: UseChatSlashCommandsOptions) {
         return
       }
       const originalText = options.inputText.value
-      metaDraft.value = { name: cmd.argValue!, originalText,
+      metaDraft.value = { name: cmd.argValue!, label: cmd.label, originalText,
         text: queryRange ? replaceSlashQuery(originalText, queryRange).trim() : '',
         sessionKey: options.sessionKey.value }
       closeSlashMenu()

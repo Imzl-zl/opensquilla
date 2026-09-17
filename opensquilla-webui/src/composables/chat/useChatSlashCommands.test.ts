@@ -1,5 +1,6 @@
 import { nextTick, ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
+import i18n, { loadLocaleMessages } from '@/i18n'
 
 import { parseMetaCommandInvocation, useChatSlashCommands, type UseChatSlashCommandsOptions } from './useChatSlashCommands'
 import type { SkillCatalog } from '@/modules/skillCatalog'
@@ -385,6 +386,7 @@ describe('unified Meta request collector', () => {
 
     expect(api.metaDraft.value).toEqual({
       name: 'meta-research',
+      label: 'meta-research',
       text: 'Compare  two products',
       originalText: original,
       sessionKey: 'agent:main:webchat:test',
@@ -931,6 +933,75 @@ describe('unified skill palette', () => {
     const skillCatalog = { supportsCandidates: () => true, listCandidates } as unknown as SkillCatalog
     return { ...harness(false, [], Promise.resolve(), undefined, { skillCatalog, selectedSkills, ...extra }), selectedSkills, listCandidates }
   }
+  it('shows eight common entries at most and searches the complete catalog', async () => {
+    const candidates = ['pdf-toolkit', 'github', 'docx', 'html-coder', 'pptx', 'xlsx', 'custom-skill']
+      .map(name => ({ ...candidate, name, instanceId: `skill:${name}`,
+        description: 'A brief purpose. Later details contain unique-search-term.' }))
+    const skillCatalog = {
+      supportsCandidates: () => true,
+      listCandidates: vi.fn(async () => ({ generation: 1, candidates })),
+    } as unknown as SkillCatalog
+    const commands = ['/usage', '/goal', '/new', '/coding', '/compact', '/reset'].map(name => ({ name, aliases: [] }))
+    const { api, inputText } = harness(false, [...commands, {
+      name: '/meta', aliases: [], execution: { action: 'meta.menu' },
+      argument_choices: ['meta-paper-write', 'meta-skill-creator', 'meta-short-drama', 'AwesomeWebpageMetaSkill']
+        .map(value => ({ value, description: 'A complete workflow description.' })),
+    }], Promise.resolve(), undefined, { skillCatalog })
+    await api.loadSlashCommands()
+    inputText.value = '/'
+    api.handleSlashInput()
+    await Promise.resolve()
+
+    expect(api.filteredSlashCmds.value.map(item => item.name)).toEqual([
+      '/new', '/coding', '/compact', 'xlsx', 'docx', 'pptx',
+      '/meta AwesomeWebpageMetaSkill', '/meta meta-short-drama',
+    ])
+
+    inputText.value = '/usage'
+    api.handleSlashInput()
+    expect(api.filteredSlashCmds.value[0]?.name).toBe('/usage')
+    inputText.value = '/unique-search-term'
+    api.handleSlashInput()
+    expect(api.filteredSlashCmds.value).toHaveLength(candidates.length)
+    expect(api.filteredSlashCmds.value.find(item => item.name === 'custom-skill')?.desc).toBe('A brief purpose.')
+    expect(skillCatalog.listCandidates).toHaveBeenCalledOnce()
+  })
+
+  it('uses stable skill fallback order when preferred entries are missing', async () => {
+    const candidates = ['custom-first', 'github', 'docx', 'custom-last'].map(name => ({ ...candidate, name }))
+    const { api, inputText } = skills({ skillCatalog: {
+      supportsCandidates: () => true,
+      listCandidates: vi.fn(async () => ({ generation: 1, candidates })),
+    } as unknown as SkillCatalog })
+    inputText.value = '/'
+    api.handleSlashInput()
+    await Promise.resolve()
+    expect(api.filteredSlashCmds.value.map(item => item.name)).toEqual(['docx', 'custom-first', 'github'])
+  })
+
+  it('uses maintained Chinese product copy while preserving bilingual search', async () => {
+    const previousLocale = i18n.global.locale.value
+    await loadLocaleMessages('zh-Hans')
+    i18n.global.locale.value = 'zh-Hans'
+    try {
+      const { api, inputText } = harness(false, ['/new', '/coding', '/compact'].map(name => ({ name, aliases: [] })),
+        Promise.resolve(), undefined, { skillCatalog: {
+          supportsCandidates: () => true,
+          listCandidates: vi.fn(async () => ({ generation: 1, candidates: [{ ...candidate, descriptionZh: 'Use an implementation package and lengthy trigger rules.' }] })),
+        } as unknown as SkillCatalog })
+      await api.loadSlashCommands()
+      inputText.value = '/'
+      api.handleSlashInput()
+      await Promise.resolve()
+      expect(api.filteredSlashCmds.value.slice(0, 3).map(item => item.desc)).toEqual(['新建聊天', '开启编程模式', '压缩当前对话上下文'])
+      expect(api.filteredSlashCmds.value.find(item => item.name === 'xlsx')).toMatchObject({ label: 'Excel 表格', desc: '创建、编辑与分析电子表格' })
+      inputText.value = '/EXCEL'
+      api.handleSlashInput()
+      expect(api.filteredSlashCmds.value[0]?.name).toBe('xlsx')
+    } finally {
+      i18n.global.locale.value = previousLocale
+    }
+  })
   it('loads lazily, searches Chinese and English locally, and only replaces the query', async () => {
     const { api, inputText, selectedSkills, listCandidates } = skills()
     await api.loadSlashCommands()
@@ -990,11 +1061,11 @@ describe('unified skill palette', () => {
   })
   it('keeps ordinary commands available when the gateway does not support skills', async () => {
     const skillCatalog = { supportsCandidates: () => false } as SkillCatalog
-    const { api, inputText } = harness(true, [], Promise.resolve(), undefined, { skillCatalog })
+    const { api, inputText } = harness(true, [{ name: '/new', aliases: [] }], Promise.resolve(), undefined, { skillCatalog })
     await api.loadSlashCommands()
     inputText.value = '/'
     api.handleSlashInput()
-    expect(api.filteredSlashCmds.value.some(item => item.name === '/plan')).toBe(true)
+    expect(api.filteredSlashCmds.value.some(item => item.name === '/new')).toBe(true)
     expect(api.skillsError.value).not.toBe('')
   })
   it('shows usage in the UI and sends new-chat to the new session action', async () => {

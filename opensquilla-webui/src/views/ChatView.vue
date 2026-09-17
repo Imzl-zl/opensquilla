@@ -562,7 +562,7 @@
       <ChatSlashPalette :items="filteredSlashCmds" :active-index="slashIdx"
         :loading="skillsLoading" :error="skillsError" @choose="completeSlashCmd" />
     </div>
-    <SkillWorkflowRequestDialog v-if="metaDraft" v-model="metaDraft.text" :name="metaDraft.name"
+    <SkillWorkflowRequestDialog v-if="metaDraft" v-model="metaDraft.text" :name="metaDraft.label || metaDraft.name"
       @cancel="metaDraft = null" @launch="void launchMetaDraft()" />
 
     <PendingQueue

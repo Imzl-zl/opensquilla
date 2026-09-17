@@ -3556,7 +3556,7 @@
       "meta": "Workflows",
       "empty": "No matching commands or skills",
       "loading": "Loading skills…",
-      "autoHint": "Skills can also be used automatically without selecting one.",
+      "autoHint": "Type a name to search all · Skills match automatically",
       "upgrade": "Update the Gateway to select skills for a message.",
       "loadFailed": "Skills could not be loaded. Close and reopen the menu to retry.",
       "disabled": "Disabled · Manage",
@@ -3580,7 +3580,62 @@
       "selected": "Selected",
       "unsupported": "Update the Gateway before sending a message with selected skills.",
       "continue": "Continue",
-      "commandWithSkills": "Selected skills apply to a chat message. Remove the skill labels before running a command."
+      "commandWithSkills": "Selected skills apply to a chat message. Remove the skill labels before running a command.",
+      "commandDescriptions": {
+        "new": "Start a new chat",
+        "compact": "Shorten the current context",
+        "goal": "Set a long-running goal",
+        "meta": "Choose a workflow",
+        "plan": "Plan the current task",
+        "reset": "Reset this conversation",
+        "usage": "View token usage"
+      },
+      "items": {
+        "xlsx": {
+          "name": "Excel spreadsheets",
+          "description": "Create, edit, and analyze spreadsheets"
+        },
+        "docx": {
+          "name": "Word documents",
+          "description": "Create and edit documents"
+        },
+        "pptx": {
+          "name": "PowerPoint slides",
+          "description": "Create and edit presentations"
+        },
+        "pdf": {
+          "name": "PDF tools",
+          "description": "Read, merge, and edit PDFs"
+        },
+        "github": {
+          "name": "GitHub",
+          "description": "Work with issues and pull requests"
+        },
+        "html": {
+          "name": "Web pages",
+          "description": "Build and edit HTML pages"
+        },
+        "webpage": {
+          "name": "Website builder",
+          "description": "Build a complete website"
+        },
+        "kidsProject": {
+          "name": "Kids’ projects",
+          "description": "Plan a creative project for children"
+        },
+        "shortDrama": {
+          "name": "Short drama",
+          "description": "Turn an idea into a video"
+        },
+        "skillCreator": {
+          "name": "Workflow builder",
+          "description": "Combine skills into a workflow"
+        },
+        "paperWriting": {
+          "name": "Academic writing",
+          "description": "Research and draft a paper"
+        }
+      }
     },
     "sessionCreated": {
       "title": "Chat created",

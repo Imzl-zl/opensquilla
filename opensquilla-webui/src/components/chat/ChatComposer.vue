@@ -1283,6 +1283,19 @@ defineExpose<ChatComposerExpose>({
 
 }
 
+.chat-selected-skills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.chat-selected-skills__label {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
 .attachment-chip {
   display: inline-flex;
   align-items: center;

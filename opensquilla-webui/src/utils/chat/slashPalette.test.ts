@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { replaceSlashQuery, slashQueryAt, slashSearchRank } from './slashPalette'
+import { replaceSlashQuery, shortSlashDescription, slashQueryAt, slashSearchRank } from './slashPalette'
 
 describe('slash palette queries', () => {
+  it('summarizes unknown skills without truncating file extensions or Unicode characters', () => {
+    expect(shortSlashDescription('Edit .docx files. Requires an internal package.')).toBe('Edit .docx files.')
+    expect(shortSlashDescription('处理文档。安装底层依赖后执行。')).toBe('处理文档。')
+    expect(shortSlashDescription('First line\nImplementation details')).toBe('First line')
+    expect(shortSlashDescription('😀'.repeat(70))).toBe('😀'.repeat(63) + '…')
+  })
   it('replaces only the query at the caret, preserving the rest of a draft', () => {
     const text = '请分析 /表格 并保留摘要'
     const range = slashQueryAt(text, 7)!
