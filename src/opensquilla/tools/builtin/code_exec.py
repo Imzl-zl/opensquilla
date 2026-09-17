@@ -45,6 +45,7 @@ from opensquilla.sandbox.permissions import (
     FileSystemPermissionProfile,
 )
 from opensquilla.sandbox.policy import LevelHints
+from opensquilla.sandbox.runtime_launcher import ChildRole, internal_child_argv
 from opensquilla.sandbox.types import (
     ApprovedHostExecution,
     DenialResult,
@@ -1024,6 +1025,13 @@ def _is_current_python(python_bin: str) -> bool:
         return selected == current
 
 
+def _python_execution_argv(python_bin: str, code: str) -> tuple[str, ...]:
+    """Keep packaged code in its runtime without treating the Gateway as Python."""
+    if bool(getattr(sys, "frozen", False)) and _is_current_python(python_bin):
+        return internal_child_argv(ChildRole.PYTHON_CODE, args=(code,))
+    return python_bin, "-c", code
+
+
 def _policy_with_bubblewrap_python_runtime(
     policy: SandboxPolicy,
     *,
@@ -1328,7 +1336,7 @@ async def execute_code(
     ):
         decision, _policy, request = await gate_action(
             action_kind="code.exec",
-            argv=(python_bin, "-c", code),
+            argv=_python_execution_argv(python_bin, code),
             cwd=workdir_path,
             env=safe_env,
             hints=hints,
@@ -1364,7 +1372,7 @@ async def execute_code(
                 )
                 backend_policy = _trusted_managed_network_policy(backend_policy, runtime)
                 backend_request = SandboxRequest(
-                    argv=(python_bin, "-c", code),
+                    argv=_python_execution_argv(python_bin, code),
                     cwd=request.cwd,
                     action_kind=request.action_kind,
                     policy=backend_policy,
@@ -1469,7 +1477,7 @@ async def execute_code(
     try:
         capture = await BoundedOutputCapture.create("execute_code", streams=("stdout", "stderr"))
         proc = await create_owned_subprocess_exec(
-            python_bin, "-c", code, stdout=asyncio.subprocess.PIPE,
+            *_python_execution_argv(python_bin, code), stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, cwd=str(workdir_path), env=safe_env,
         )
         process_started = True
