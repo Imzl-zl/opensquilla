@@ -69,6 +69,7 @@ from opensquilla.subprocess_encoding import decode_subprocess_output
 _OUTPUT_BYTE_CAP = 1_048_576
 _HELPER_PAYLOAD_ENV = "OPENSQUILLA_WINDOWS_DEFAULT_PAYLOAD"
 _HELPER_ERROR_PREFIX = "OPENSQUILLA_WINDOWS_DEFAULT_HELPER_ERROR "
+_HELPER_TIMEOUT_PREFIX = b"\nOPENSQUILLA_WINDOWS_DEFAULT_HELPER_TIMEOUT "
 _HELPER_TIMEOUT_GRACE_S = 30.0
 _WINDOWS_PROCESS_BASE_ENV_KEYS = (
     "SystemRoot",
@@ -212,6 +213,10 @@ class WindowsDefaultBackend(Backend):
         if owner is not None:
             await owner.terminate(graceful_timeout=0.0, kill_timeout=1.0)
         elapsed = time.monotonic() - started
+        stderr_bytes, helper_timed_out = _extract_authenticated_helper_timeout(
+            stderr_bytes,
+            expected_nonce=str(payload["helperNonce"]),
+        )
         stdout, trunc_out = _decode_capped(stdout_bytes)
         stderr, trunc_err = _decode_capped(stderr_bytes)
         helper_error = _authenticated_helper_error(
@@ -231,7 +236,7 @@ class WindowsDefaultBackend(Backend):
             policy_used=request.policy.summary(),
             truncated_stdout=trunc_out,
             truncated_stderr=trunc_err,
-            timed_out=False,
+            timed_out=proc.returncode == 124 and helper_timed_out,
         )
 
 
@@ -310,6 +315,47 @@ def _is_capability_probe_request(request: SandboxRequest) -> bool:
     return request.action_kind == "capability.probe" or request.action_kind.startswith(
         "capability.probe.fs.worker."
     )
+
+
+def _extract_authenticated_helper_timeout(
+    stderr: bytes,
+    *,
+    expected_nonce: str,
+) -> tuple[bytes, bool]:
+    """Remove trusted timeout frames before output truncation or decoding."""
+    if not expected_nonce:
+        return stderr, False
+    chunks: list[bytes] = []
+    cursor = 0
+    search_from = 0
+    timed_out = False
+    while (start := stderr.find(_HELPER_TIMEOUT_PREFIX, search_from)) >= 0:
+        content_start = start + len(_HELPER_TIMEOUT_PREFIX)
+        end = stderr.find(b"\n", content_start)
+        if end < 0:
+            break
+        search_from = content_start
+        try:
+            payload = json.loads(stderr[content_start:end])
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        nonce = payload.get("nonce")
+        if (
+            isinstance(nonce, str)
+            and nonce.isascii()
+            and secrets.compare_digest(nonce, expected_nonce)
+            and payload.get("timed_out") is True
+        ):
+            # The leading and trailing LF belong to the control frame, so a
+            # user's unterminated stderr line and arbitrary bytes stay intact.
+            chunks.append(stderr[cursor:start])
+            cursor = end + 1
+            search_from = cursor
+            timed_out = True
+    chunks.append(stderr[cursor:])
+    return b"".join(chunks), timed_out
 
 
 def _authenticated_helper_error(

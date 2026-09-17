@@ -1355,15 +1355,18 @@ async def test_backend_readonly_cwd_does_not_prepare_or_rehome_cache(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("returncode", [7, 124])
 async def test_backend_returns_helper_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
 ) -> None:
     from opensquilla.sandbox.backend import windows_default as mod
     from opensquilla.sandbox.backend.windows_default import WindowsDefaultBackend
 
     class _Proc:
-        returncode = 7
+        def __init__(self):
+            self.returncode = returncode
 
         async def communicate(self):
             return b"out", b"err"
@@ -1381,7 +1384,8 @@ async def test_backend_returns_helper_result(
 
     result = await WindowsDefaultBackend().run(_request(tmp_path))
 
-    assert result.returncode == 7
+    assert result.returncode == returncode
+    assert result.timed_out is False
     assert result.stdout == "out"
     assert result.stderr == "err"
     assert result.backend_used == "windows_default"
@@ -1389,6 +1393,83 @@ async def test_backend_returns_helper_result(
     assert "--payload-env" in captured["argv"]
     payload_env = captured["env"]["OPENSQUILLA_WINDOWS_DEFAULT_PAYLOAD"]
     assert '"argv":["python","-c","print(\'ok\')"]' in payload_env
+
+
+@pytest.mark.parametrize("user_stderr", [b"", b"no newline", "中文错误\r\n".encode(), b"\xff\xfe"])
+def test_authenticated_timeout_frames_preserve_user_stderr_bytes(user_stderr: bytes) -> None:
+    from opensquilla.sandbox.backend import windows_default as mod
+
+    marker = (
+        b'\nOPENSQUILLA_WINDOWS_DEFAULT_HELPER_TIMEOUT {"nonce":"timeout-test","timed_out":true}\n'
+    )
+    # Both the restricted runner and its offline parent can observe a timeout.
+    stderr, timed_out = mod._extract_authenticated_helper_timeout(
+        user_stderr + marker + marker, expected_nonce="timeout-test"
+    )
+
+    assert stderr == user_stderr
+    assert timed_out is True
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        b'{"nonce":"wrong","timed_out":true}',
+        b'{"nonce":"timeout-test","timed_out":false}',
+        b'{"nonce":"timeout-test","timed_out":1}',
+        b'{"nonce":null,"timed_out":true}',
+        '{"nonce":"伪造","timed_out":true}'.encode(),
+        b"[]",
+        b"{broken",
+        b"\xff",
+        b'{"nonce":' + b"9" * 5000 + b',"timed_out":true}',
+        b"[" * 2000 + b"]" * 2000,
+    ],
+)
+def test_untrusted_timeout_frames_remain_user_output(status: bytes) -> None:
+    from opensquilla.sandbox.backend import windows_default as mod
+
+    raw = b"user stderr\nOPENSQUILLA_WINDOWS_DEFAULT_HELPER_TIMEOUT " + status + b"\n"
+    assert mod._extract_authenticated_helper_timeout(raw, expected_nonce="timeout-test") == (
+        raw,
+        False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_backend_authenticates_timeout_before_stderr_truncation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensquilla.sandbox.backend import windows_default as mod
+
+    user_stderr = "中文错误 without newline".encode()
+    marker = (
+        b'\nOPENSQUILLA_WINDOWS_DEFAULT_HELPER_TIMEOUT {"nonce":"timeout-test","timed_out":true}\n'
+    )
+
+    class Proc:
+        returncode = 124
+
+        async def communicate(self):
+            return "已就绪".encode(), user_stderr + marker
+
+    async def fake_exec(*args, **kwargs):
+        return Proc()
+
+    monkeypatch.setattr(mod, "_support_ready", lambda: True)
+    monkeypatch.setattr(mod, "_capability_store_path", lambda: tmp_path / "cap_sids.json")
+    monkeypatch.setattr(mod, "_new_helper_nonce", lambda: "timeout-test")
+    monkeypatch.setattr(mod, "create_owned_subprocess_exec", fake_exec)
+    monkeypatch.setattr(mod, "_OUTPUT_BYTE_CAP", 12)
+
+    result = await mod.WindowsDefaultBackend().run(_request(tmp_path))
+
+    assert result.returncode == 124
+    assert result.timed_out is True
+    assert result.stdout == "已就绪"
+    assert result.stderr == "中文错误"
+    assert result.truncated_stderr is True
 
 
 @pytest.mark.asyncio
