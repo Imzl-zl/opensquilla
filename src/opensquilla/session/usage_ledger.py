@@ -193,6 +193,8 @@ class UsageEventRecord:
     unknown_reason: str | None
     origin: str
     schema_version: int
+    root_turn_id: str | None = None
+    goal_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

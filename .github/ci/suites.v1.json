@@ -8,7 +8,12 @@
     "tests/test_engine/test_request_execution_identity.py",
     "tests/test_gateway/test_session_model_routing_rpc.py",
     "tests/test_tools/test_execution_status.py",
-    "tests/test_provider_ensemble.py"
+    "tests/test_provider_ensemble.py",
+    "tests/test_sandbox/test_trusted_sandbox_execution.py",
+    "tests/test_tools/test_approval_unification.py",
+    "tests/test_live_multi_provider_matrix.py",
+    "tests/test_live_provider_profile_smoke.py",
+    "tests/test_live_plan_goal_runtime.py"
   ],
   "baseline_suites": [
     "dependency-audit",
@@ -299,7 +304,12 @@
         "tests/test_engine/test_request_execution_identity.py",
         "tests/test_gateway/test_session_model_routing_rpc.py",
         "tests/test_tools/test_execution_status.py",
-        "tests/test_provider_ensemble.py"
+        "tests/test_provider_ensemble.py",
+        "tests/test_sandbox/test_trusted_sandbox_execution.py",
+        "tests/test_tools/test_approval_unification.py",
+        "tests/test_live_multi_provider_matrix.py",
+        "tests/test_live_provider_profile_smoke.py",
+        "tests/test_live_plan_goal_runtime.py"
       ]
     },
     "release-packaging": {
