@@ -82,6 +82,8 @@ class UsageEventStart:
     provider: str | None = None
     model: str | None = None
     origin: str = "live_provider"
+    root_turn_id: str | None = None
+    goal_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +197,8 @@ class UsageEventRecord:
     schema_version: int
     root_turn_id: str | None = None
     goal_id: str | None = None
+    # Response-only commit outcome for downstream observers; never stored or billed.
+    transition_applied: bool = field(default=False, compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)

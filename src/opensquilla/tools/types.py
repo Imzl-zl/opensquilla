@@ -307,6 +307,7 @@ class ToolContext:
         default=None, repr=False
     )
 
+    usage_root_turn_id: str | None = None
 
 
 def is_goal_owned_main_default_turn(ctx: ToolContext | None) -> bool:

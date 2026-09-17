@@ -918,6 +918,22 @@ class GoalService:
             ctx=ctx,
         )
 
+    async def on_usage_changed(self, goal_id: str) -> None:
+        """Publish committed usage, including descendants finishing after their owner."""
+        goal = await self._storage.get_goal_by_id(goal_id)
+        if goal is None:
+            return
+        async with self._lock(goal.session_key):
+            goal = await self._storage.get_goal_by_id(goal_id)
+            if goal is None:
+                return
+            await self._emit_goal(
+                goal, event_type="updated", session_key=goal.session_key,
+                session_id=goal.session_id, epoch=goal.session_epoch,
+                state_revision=goal.state_revision, progress_revision=goal.progress_revision,
+            )
+
+
     async def status(self, session_key: str) -> dict[str, Any]:
         key = canonicalize_session_key(session_key)
         session = await self._storage.get_session(key)

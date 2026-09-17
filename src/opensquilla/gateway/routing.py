@@ -711,6 +711,7 @@ def tool_context_from_envelope(
         user_input_provider=envelope.runtime_services.get("user_input_provider"),
         suspend_compute_slot=envelope.runtime_services.get("suspend_compute_slot"),
         update_progress=envelope.runtime_services.get("update_progress"),
+        usage_root_turn_id=envelope.metadata.get("usage_root_turn_id"),
         plan_revision=envelope.runtime_services.get("plan_revision"),
         plan_run=envelope.runtime_services.get("plan_run"),
         goal_context=envelope.runtime_services.get("goal_context"),

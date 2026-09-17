@@ -5206,3 +5206,129 @@ async def test_goal_reattach_contract_maps_invalid_result_without_running_twice(
     assert calls == 1
     assert error.value.code == "INTERNAL_ERROR"
     assert error.value.message == "goals.reattach response violated its v4 contract"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+async def test_queued_gateway_child_and_grandchild_usage_stays_with_root_goal(
+    tmp_path: Path,
+) -> None:
+    from opensquilla.gateway.routing import build_subagent_route_envelope
+    from opensquilla.session.usage_ledger import UsageEventCompletion, UsageEventStart
+
+    root_started = asyncio.Event()
+    release_root = asyncio.Event()
+    child_started = asyncio.Event()
+    release_child = asyncio.Event()
+    calls: list[UsageEventStart] = []
+
+    async def handler(run: TaskRun) -> None:
+        if run.envelope.session_key == SOURCE_KEY:
+            root_started.set()
+            await release_root.wait()
+            await stack.service.commit_model_status(
+                run.goal_context, status="complete", reason=None
+            )
+            return
+        if run.envelope.session_key.endswith(":child"):
+            child_started.set()
+            await release_child.wait()
+        call = UsageEventStart(
+            event_id=f"call-{run.task_id}",
+            execution_id=run.task_id,
+            call_index=1,
+            turn_id=run.task_id,
+            session_id=run.envelope.session_id,
+            session_epoch=run.envelope.session_epoch,
+            root_turn_id=run.envelope.metadata["usage_root_turn_id"],
+            parent_turn_id=run.envelope.metadata["parent_task_id"],
+            started_at_ms=200,
+        )
+        calls.append(call)
+        await stack.storage.start_usage_event(call)
+        await stack.storage.finalize_usage_event(
+            call.event_id,
+            UsageEventCompletion(
+                completed_at_ms=250, input_tokens=7, output_tokens=3, total_tokens=10
+            ),
+        )
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "gateway-child-usage.sqlite",
+        handler=handler,
+        wire_lifecycle=True,
+    ) as stack:
+        created = await _handle_goals_set(_set_params(), stack.context)
+        await asyncio.wait_for(root_started.wait(), 2)
+        parent = await stack.storage.get_session(SOURCE_KEY)
+        assert parent is not None
+        child_key = "agent:main:subagent:child"
+        child_session = await stack.manager.create(child_key, agent_id="main")
+        child = await stack.runtime.enqueue(
+            build_subagent_route_envelope(
+                session_key=child_key,
+                session_id=child_session.session_id,
+                session_epoch=0,
+                parent_session_key=SOURCE_KEY,
+                parent_session_id=parent.session_id,
+                parent_session_epoch=parent.epoch,
+                parent_task_id=created["taskId"],
+                spawn_depth=1,
+            ),
+            "Synthetic child work",
+            run_kind="subagent",
+        )
+        assert child.status == AgentTaskStatus.QUEUED
+        release_root.set()
+        await stack.runtime.wait(created["taskId"], timeout=2)
+        await asyncio.wait_for(child_started.wait(), 2)
+        grandchild_key = "agent:main:subagent:grandchild"
+        grandchild_session = await stack.manager.create(grandchild_key, agent_id="main")
+        grandchild = await stack.runtime.enqueue(
+            build_subagent_route_envelope(
+                session_key=grandchild_key,
+                session_id=grandchild_session.session_id,
+                session_epoch=0,
+                parent_session_key=child_key,
+                parent_session_id=child_session.session_id,
+                parent_session_epoch=0,
+                parent_task_id=child.task_id,
+                spawn_depth=2,
+            ),
+            "Synthetic grandchild work",
+            run_kind="subagent",
+        )
+        release_child.set()
+        child_result = await stack.runtime.wait(child.task_id, timeout=2)
+        assert child_result.status == AgentTaskStatus.SUCCEEDED, child_result.model_dump()
+        assert (
+            await stack.runtime.wait(grandchild.task_id, timeout=2)
+        ).status == AgentTaskStatus.SUCCEEDED
+        assert len(calls) == 2
+        assert {call.root_turn_id for call in calls} == {created["taskId"]}
+        assert {call.session_id for call in calls} == {
+            child_session.session_id,
+            grandchild_session.session_id,
+        }
+        goal = await stack.storage.get_goal(SOURCE_KEY)
+        assert goal is not None and goal.status == "complete"
+        assert goal.total_tokens == goal.budget_tokens_used == 20
+        for call in calls:
+            record = await stack.storage.start_usage_event(call)
+            assert record is not None and record.goal_id == goal.goal_id

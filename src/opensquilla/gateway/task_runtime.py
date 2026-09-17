@@ -61,6 +61,7 @@ from opensquilla.gateway.terminal_activity import (
 from opensquilla.safety.injection_guard import xml_escape
 from opensquilla.session.goals import (
     GOAL_OBJECTIVE_UPDATE_DETAIL_KEY,
+    GoalClaimCandidate,
     GoalObjectiveUpdate,
     effective_goal_turn_context,
 )
@@ -2123,6 +2124,44 @@ class TaskRuntime:
             self._driver_tasks_by_session.pop(session_key, None)
         self._signal_driver_state_changed()
 
+    async def _completion_goal_candidate(
+        self, envelope: RouteEnvelope, run_kind: str
+    ) -> Mapping[str, Any] | None:
+        """Carry only a completed child's durable parent Goal into normal claim CAS."""
+        provenance = envelope.input_provenance
+        if (
+            run_kind != "runtime_send"
+            or not isinstance(provenance, Mapping)
+            or provenance.get("kind") != "internal_system"
+            or provenance.get("source_tool") != "subagent_completion"
+        ):
+            return None
+        parent_task_id = provenance.get("parent_task_id")
+        if not isinstance(parent_task_id, str) or not parent_task_id:
+            return None
+        parent = await self._storage.get_agent_task(parent_task_id)
+        if parent is None or parent.session_key != envelope.session_key:
+            return None
+        details = parent.details or {}
+        context = effective_goal_turn_context(details)
+        if (
+            context is None
+            or context.task_id != parent_task_id
+            or context.session_id != envelope.session_id
+            or context.epoch != envelope.session_epoch
+            or details.get("session_id") != context.session_id
+            or details.get("session_epoch") != context.epoch
+        ):
+            return None
+        # A later Goal in the same session must never inherit this old group's
+        # authority. The existing activation claim checks this frozen identity
+        # against the live Goal and keeps paused/complete/replaced Goals closed.
+        return GoalClaimCandidate(
+            session_id=context.session_id,
+            epoch=context.epoch,
+            goal_id=context.goal_id,
+        ).as_task_detail()
+
     async def _reserve_persist_and_activate(
         self,
         envelope: RouteEnvelope,
@@ -2147,6 +2186,7 @@ class TaskRuntime:
     ) -> TaskHandle:
         """Persist and activate one direct enqueue without cancellation drift."""
 
+        goal_candidate = await self._completion_goal_candidate(envelope, run_kind)
         reservation = await self.reserve(
             envelope,
             message,
@@ -2164,12 +2204,16 @@ class TaskRuntime:
             accepted_run_mode_override=accepted_run_mode_override,
             task_id=task_id,
             provider_request_correlation=provider_request_correlation,
-
             update_envelope_cache=update_envelope_cache,
             overflow_policy=overflow_policy,
+            goal_candidate=goal_candidate,
         )
         try:
-            if self._accepted_config_provider is not None:
+            if (
+                self._accepted_config_provider is not None
+                or str(reservation.runtime_task.envelope.source_kind) == "subagent"
+                or goal_candidate is not None
+            ):
                 await self.freeze_acceptance(reservation)
             # ``enqueue`` holds the per-session admission gate across this
             # owner CAS, task commit, and activation. Reset takes the same
@@ -2600,6 +2644,31 @@ class TaskRuntime:
         accepted_config: Any = _USE_ACCEPTED_CONFIG_PROVIDER,
     ) -> None:
         """Capture once, optionally backfilling callers that already committed."""
+
+        task = reservation.runtime_task
+        metadata = dict(task.envelope.metadata)
+        parent_task_id = metadata.get("parent_task_id")
+        if str(task.envelope.source_kind) == "subagent" and isinstance(parent_task_id, str):
+            parent = await self._storage.get_agent_task(parent_task_id)
+            if parent is None:
+                raise ValueError("Subagent usage attribution requires its durable parent task")
+            parent_details = parent.details or {}
+            if (
+                metadata.get("parent_session_key") != parent.session_key
+                or metadata.get("parent_session_id") != parent_details.get("session_id")
+                or metadata.get("parent_session_epoch") != parent_details.get("session_epoch")
+            ):
+                raise ValueError("Subagent parent generation changed before admission")
+            parent_metadata = parent_details.get("metadata") or {}
+            metadata["usage_root_turn_id"] = (
+                parent_metadata.get("usage_root_turn_id") or parent_task_id
+            )
+        else:
+            metadata["usage_root_turn_id"] = task.task_id
+        task.envelope = replace(task.envelope, metadata=metadata)
+        details = dict(reservation.task_record.details or {})
+        details["metadata"] = metadata
+        reservation.task_record.details = details
 
         await self.validate_acceptance(
             reservation.runtime_task.envelope,
@@ -3277,6 +3346,7 @@ class TaskRuntime:
                 persisted=persisted,
                 capability=capability,
             )
+
 
     async def apply_goal_objective_edit(
         self,
@@ -4720,10 +4790,10 @@ class TaskRuntime:
 
         runtime_services = {
             **task.envelope.runtime_services,
-            "suspend_compute_slot": lambda: self._suspend_compute_slot(task),
             "update_progress": update_progress,
             "plan_storage": self._storage,
             "plan_event_emitter": self._emit,
+            "suspend_compute_slot": lambda: self._suspend_compute_slot(task),
         }
         # WebChat has a request-id response RPC and reconnect hydration. Other
         # interactive surfaces retain the terminating compatibility protocol
@@ -5956,7 +6026,6 @@ class TaskRuntime:
             return
         await self._wait_for_subagent_slot(task)
         await self._acquire_fair_slot(task, mark_running=False)
-
 
     async def _acquire_fair_slot(
         self,

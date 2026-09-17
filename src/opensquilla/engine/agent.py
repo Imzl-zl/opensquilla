@@ -17245,6 +17245,12 @@ class Agent:
                 execution_id=child_execution_id,
                 agent_run_id=child_execution_id,
                 turn_id=child_execution_id,
+                root_turn_id=(
+                    parent_usage_context.root_turn_id
+                    or parent_usage_context.turn_id
+                    or parent_usage_context.execution_id
+                    if parent_usage_context is not None else None
+                ),
                 parent_turn_id=(
                     parent_usage_context.turn_id or parent_usage_context.execution_id
                     if parent_usage_context is not None

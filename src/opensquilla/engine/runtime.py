@@ -6595,6 +6595,8 @@ class TurnRunner:
                     execution_id=turn_id,
                     agent_run_id=turn_id,
                     turn_id=turn_id,
+                    root_turn_id=getattr(tool_context, "usage_root_turn_id", None) or turn_id,
+                    parent_turn_id=getattr(tool_context, "parent_task_id", None),
                     session_id=pipeline_session_id,
                     session_epoch=(
                         expected_session_epoch
