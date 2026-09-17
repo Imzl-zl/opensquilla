@@ -38,6 +38,9 @@ from opensquilla.git_runtime import (
 STATUS_TIMEOUT_SECONDS = 10.0
 DIFF_TIMEOUT_SECONDS = 15.0
 WRITE_TIMEOUT_SECONDS = 20.0
+# A push is the only call here that can wait on a network and a credential
+# helper, so it gets its own budget.
+PUSH_TIMEOUT_SECONDS = 60.0
 DEFAULT_MAX_ENTRIES = 500
 DEFAULT_MAX_DIFF_BYTES = 512 * 1024
 
@@ -60,6 +63,14 @@ AvailabilityReason = Literal[
     "timed_out",
     "failed",
 ]
+# Reasons a write is refused before it could change anything. Each one is a
+# different thing for the operator to do next, so they are separate codes
+# rather than one "failed".
+PreconditionCode = Literal[
+    "untracked_path",
+    "nothing_staged",
+    "no_upstream",
+]
 
 _WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:")
 _SEPARATOR_RE = re.compile(r"[\\/]")
@@ -80,6 +91,20 @@ _CHANGE_PRIORITY: tuple[tuple[str, ChangeType], ...] = (
 
 class WorkspacePathError(ValueError):
     """A caller-supplied path is not a repository-relative path."""
+
+
+class WorkspaceGitPreconditionError(RuntimeError):
+    """A write was refused before it could remove or rewrite anything.
+
+    Distinct from :class:`WorkspaceGitUnavailableError`, which means Git ran and
+    would not do it. These are the cases the caller can act on, so they carry a
+    code of their own instead of collapsing into a generic failure.
+    """
+
+    def __init__(self, code: PreconditionCode, message: str) -> None:
+        self.code = code
+        self.message = message
+        super().__init__(message)
 
 
 class WorkspaceGitUnavailableError(RuntimeError):
@@ -211,6 +236,170 @@ def stage_paths(
             result=result,
         )
     return repo_paths
+
+
+def _require_tracked(
+    workspace_path: str,
+    repo_paths: Sequence[str],
+    timeout: float,
+    environment: Mapping[str, str] | None,
+) -> None:
+    """Refuse a discard for a path Git does not track yet.
+
+    Restoring an untracked path would have to *delete* the file instead, and a
+    file the agent just created is exactly the one a reviewer must not lose to a
+    mis-click. The panel does not offer the action for those rows; this keeps the
+    API from offering it either.
+    """
+
+    for repo_path in repo_paths:
+        result = run_git(
+            ("ls-files", "--error-unmatch", "--", repo_path),
+            cwd=workspace_path,
+            timeout=timeout,
+            environment=environment,
+        )
+        if result.state is GitRunState.OK:
+            continue
+        if result.returncode == 1:
+            raise WorkspaceGitPreconditionError(
+                "untracked_path",
+                f"{repo_path} is not tracked, so there is nothing to restore it from.",
+            )
+        raise WorkspaceGitUnavailableError(
+            _availability_reason(result.state) or "failed",
+            result=result,
+        )
+
+
+def discard_paths(
+    workspace_path: str,
+    paths: Sequence[str],
+    *,
+    timeout: float = WRITE_TIMEOUT_SECONDS,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Restore the *worktree* of tracked paths from the index.
+
+    This discards uncommitted edits, so it is the one operation here that can
+    lose work. It restores from the index rather than from ``HEAD``: a path that
+    also has staged content keeps that staged content, which is what "discard
+    these edits" means when the same file is staged and edited.
+    """
+
+    repo_paths = tuple(normalize_repo_path(path) for path in paths)
+    if not repo_paths:
+        raise WorkspacePathError("at least one path is required")
+    _require_tracked(workspace_path, repo_paths, timeout, environment)
+    result = run_git(
+        ("restore", "--worktree", "--", *repo_paths),
+        cwd=workspace_path,
+        timeout=timeout,
+        environment=environment,
+    )
+    if result.state is not GitRunState.OK:
+        raise WorkspaceGitUnavailableError(
+            _write_availability_reason(result),
+            result=result,
+        )
+    return repo_paths
+
+
+def commit_index(
+    workspace_path: str,
+    message: str,
+    *,
+    timeout: float = WRITE_TIMEOUT_SECONDS,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
+    """Commit the index and return ``(sha, subject)``.
+
+    Only the index is committed; nothing is staged implicitly, because a commit
+    that silently includes files the operator did not choose is the mistake this
+    whole surface exists to prevent. An empty index is refused up front with its
+    own code rather than surfacing Git's "nothing to commit" prose.
+
+    Git's own identity and signing configuration are left in force: an unknown
+    author or a signing prompt must fail loudly here rather than be worked
+    around with a synthetic identity.
+    """
+
+    subject = message.strip()
+    if not subject:
+        raise WorkspacePathError("a commit message is required")
+    # `--quiet` reports the answer as an exit status: 0 means the index holds no
+    # changes, 1 means it does. Anything else is a real Git failure, so the two
+    # are separated rather than both being treated as "no changes".
+    staged = run_git(
+        ("diff", "--cached", "--quiet"),
+        cwd=workspace_path,
+        timeout=timeout,
+        environment=environment,
+    )
+    if staged.state is GitRunState.OK:
+        raise WorkspaceGitPreconditionError(
+            "nothing_staged",
+            "Nothing is staged, so there is nothing to commit.",
+        )
+    if staged.returncode != 1:
+        raise WorkspaceGitUnavailableError(
+            _write_availability_reason(staged),
+            result=staged,
+        )
+    result = run_git(
+        ("commit", "-m", message),
+        cwd=workspace_path,
+        timeout=timeout,
+        environment=environment,
+    )
+    if result.state is not GitRunState.OK:
+        raise WorkspaceGitUnavailableError(
+            _write_availability_reason(result),
+            result=result,
+        )
+    head = run_git(
+        ("rev-parse", "HEAD"),
+        cwd=workspace_path,
+        timeout=timeout,
+        environment=environment,
+    )
+    sha = head.stdout_text.strip() if head.state is GitRunState.OK else ""
+    return sha, subject.splitlines()[0]
+
+
+def push_current_branch(
+    workspace_path: str,
+    *,
+    upstream: str | None,
+    timeout: float = PUSH_TIMEOUT_SECONDS,
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    """Push the current branch to its upstream, never forcing.
+
+    ``upstream`` comes from the status read the caller already made, so a branch
+    without one is refused here instead of guessing a remote and publishing a
+    branch the operator did not name. Credentials are the environment's problem:
+    the child gets no terminal, and Git's own refusal is reported verbatim.
+    """
+
+    if not upstream:
+        raise WorkspaceGitPreconditionError(
+            "no_upstream",
+            "This branch has no upstream, so there is nothing to push it to.",
+        )
+    result = run_git(
+        ("push",),
+        cwd=workspace_path,
+        timeout=timeout,
+        environment=environment,
+        allow_user_interaction=True,
+    )
+    if result.state is not GitRunState.OK:
+        raise WorkspaceGitUnavailableError(
+            _write_availability_reason(result),
+            result=result,
+        )
+    return result.stdout_text.strip() or result.stderr_text.strip()
 
 
 def normalize_repo_path(value: object) -> str:
@@ -647,5 +836,11 @@ __all__ = [
     "read_workspace_changes",
     "read_workspace_diff",
     "stage_paths",
+    "commit_index",
+    "discard_paths",
+    "push_current_branch",
+    "PreconditionCode",
+    "PUSH_TIMEOUT_SECONDS",
+    "WorkspaceGitPreconditionError",
     "WRITE_TIMEOUT_SECONDS",
 ]

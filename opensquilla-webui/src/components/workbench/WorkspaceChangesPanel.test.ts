@@ -13,6 +13,11 @@ import {
 } from '@/modules/workspaceChanges'
 import WorkspaceChangesPanel from './WorkspaceChangesPanel.vue'
 
+const confirmMock = vi.hoisted(() => vi.fn(async () => true))
+vi.mock('@/composables/useConfirm', () => ({
+  useConfirm: () => ({ confirm: confirmMock }),
+}))
+
 function changes(overrides: Partial<WorkspaceChanges> = {}): WorkspaceChanges {
   return {
     available: true,
@@ -75,6 +80,12 @@ function reader(overrides: Partial<WorkspaceChangesReader> = {}): WorkspaceChang
       staged: request.staged,
       affectedPaths: [...request.paths],
     })),
+    discardPaths: vi.fn(async request => [...request.paths]),
+    commitIndex: vi.fn(async request => ({
+      sha: 'a'.repeat(40),
+      subject: request.message.split('\n')[0],
+    })),
+    pushBranch: vi.fn(async () => ({ upstream: 'origin/main', output: 'up to date' })),
     ...overrides,
   }
 }
@@ -723,6 +734,172 @@ describe('WorkspaceChangesPanel', () => {
     await nextTick()
 
     expect(root()?.classList.contains('is-wrapped')).toBe(false)
+    mounted.unmount()
+  })
+
+  it('folds a section away so a long list cannot hide the others', async () => {
+    const mounted = mountPanel(reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [
+          entry({ path: 'src/a.ts', staged: false, unstaged: true }),
+          entry({ path: 'src/new.ts', changeType: 'untracked' }),
+        ],
+        totalCount: 2,
+      })),
+    }))
+    await settle()
+
+    const body = (key: string) => mounted.element.querySelector<HTMLElement>(
+      `#wb-changes-group-${key}`,
+    )
+    const toggle = (key: string) => mounted.element.querySelector<HTMLButtonElement>(
+      `[data-testid="changes-group-toggle"][data-group="${key}"]`,
+    )
+
+    expect(toggle('unstaged')?.getAttribute('aria-expanded')).toBe('true')
+    expect(body('unstaged')?.style.display).not.toBe('none')
+
+    toggle('unstaged')?.click()
+    await nextTick()
+
+    expect(toggle('unstaged')?.getAttribute('aria-expanded')).toBe('false')
+    expect(body('unstaged')?.style.display).toBe('none')
+    // The other section is untouched, which is the point of folding one away.
+    expect(body('untracked')?.style.display).not.toBe('none')
+    mounted.unmount()
+  })
+
+  it('commits the staged work with the typed message', async () => {
+    const port = reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [entry({ path: 'src/a.ts', changeType: 'added', staged: true, unstaged: false })],
+      })),
+    })
+    const mounted = mountPanel(port)
+    await settle()
+
+    const commitButton = mounted.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-commit"]',
+    )
+    const message = mounted.element.querySelector<HTMLInputElement>(
+      '[data-testid="changes-commit-message"]',
+    )
+    // Nothing is written until there is a message and something staged.
+    expect(commitButton?.disabled).toBe(true)
+
+    if (message) {
+      message.value = '  tighten the thing  '
+      message.dispatchEvent(new Event('input'))
+    }
+    await nextTick()
+    expect(commitButton?.disabled).toBe(false)
+
+    commitButton?.click()
+    await settle()
+
+    expect(port.commitIndex).toHaveBeenCalledWith({
+      workspaceId: 'workspace-1',
+      message: 'tighten the thing',
+    })
+    expect(message?.value).toBe('')
+    expect(mounted.element.querySelector('[data-testid="changes-notice"]')?.textContent)
+      .toContain('Committed aaaaaaa tighten the thing')
+    mounted.unmount()
+  })
+
+  it('keeps commit unavailable while nothing is staged', async () => {
+    const mounted = mountPanel(reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [entry({ path: 'src/a.ts', staged: false, unstaged: true })],
+      })),
+    }))
+    await settle()
+
+    const message = mounted.element.querySelector<HTMLInputElement>(
+      '[data-testid="changes-commit-message"]',
+    )
+    expect(message?.disabled).toBe(true)
+    if (message) {
+      message.value = 'message with nothing staged'
+      message.dispatchEvent(new Event('input'))
+    }
+    await nextTick()
+    expect(mounted.element.querySelector('[data-testid="changes-commit"]')?.hasAttribute('disabled'))
+      .toBe(true)
+    mounted.unmount()
+  })
+
+  it('pushes only when the branch has an upstream', async () => {
+    const withoutUpstream = mountPanel(reader())
+    await settle()
+    expect(withoutUpstream.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-push"]',
+    )?.disabled).toBe(true)
+    withoutUpstream.unmount()
+
+    const port = reader({
+      readChanges: vi.fn(async () => changes({ upstream: 'origin/main' })),
+    })
+    const mounted = mountPanel(port)
+    await settle()
+
+    const push = mounted.element.querySelector<HTMLButtonElement>('[data-testid="changes-push"]')
+    expect(push?.disabled).toBe(false)
+    push?.click()
+    await settle()
+
+    expect(port.pushBranch).toHaveBeenCalledWith({ workspaceId: 'workspace-1' })
+    expect(mounted.element.querySelector('[data-testid="changes-notice"]')?.textContent)
+      .toContain('Pushed to origin/main')
+    mounted.unmount()
+  })
+
+  it('asks before discarding, and does nothing when the answer is no', async () => {
+    const port = reader()
+    const mounted = mountPanel(port)
+    await settle()
+
+    confirmMock.mockResolvedValueOnce(false)
+    mounted.element.querySelector<HTMLButtonElement>('[data-testid="changes-discard-action"]')?.click()
+    await settle()
+
+    expect(confirmMock).toHaveBeenCalled()
+    expect(port.discardPaths).not.toHaveBeenCalled()
+    mounted.unmount()
+
+    const confirming = reader()
+    const second = mountPanel(confirming)
+    await settle()
+    second.element.querySelector<HTMLButtonElement>('[data-testid="changes-discard-action"]')?.click()
+    await settle()
+
+    expect(confirming.discardPaths).toHaveBeenCalledWith({
+      workspaceId: 'workspace-1',
+      paths: ['src/a.ts'],
+    })
+    expect(second.element.querySelector('[data-testid="changes-notice"]')?.textContent)
+      .toContain('Discarded changes to 1 file(s)')
+    second.unmount()
+  })
+
+  it('never offers to discard a file Git does not track', async () => {
+    const mounted = mountPanel(reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [
+          entry({ path: 'src/a.ts', staged: false, unstaged: true }),
+          entry({ path: 'src/new.ts', changeType: 'untracked' }),
+        ],
+        totalCount: 2,
+      })),
+    }))
+    await settle()
+
+    const rowFor = (path: string) => [...mounted.element.querySelectorAll('.wb-changes__row')]
+      .find(row => row.textContent?.includes(path))
+    expect(rowFor('src/a.ts')?.querySelector('[data-testid="changes-discard-action"]'))
+      .not.toBeNull()
+    expect(rowFor('src/new.ts')?.querySelector('[data-testid="changes-discard-action"]'))
+      .toBeNull()
     mounted.unmount()
   })
 

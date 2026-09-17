@@ -20,7 +20,10 @@ from opensquilla.gateway.auth import Principal
 from opensquilla.gateway.config import GatewayConfig
 from opensquilla.gateway.rpc import RpcContext
 from opensquilla.gateway.rpc_workspaces import (
+    _handle_workspaces_git_commit,
     _handle_workspaces_git_diff,
+    _handle_workspaces_git_discard,
+    _handle_workspaces_git_push,
     _handle_workspaces_git_stage,
     _handle_workspaces_git_status,
     _handle_workspaces_list,
@@ -101,6 +104,9 @@ def _owner_ctx_without_storage() -> RpcContext:
         ),
         ("_handle_workspaces_update", {}, "INVALID_PARAMS"),
         ("_handle_workspaces_git_stage", {}, "INVALID_PARAMS"),
+        ("_handle_workspaces_git_discard", {}, "INVALID_PARAMS"),
+        ("_handle_workspaces_git_commit", {}, "INVALID_PARAMS"),
+        ("_handle_workspaces_git_push", {}, "INVALID_PARAMS"),
         ("_handle_workspaces_pin", {}, "INVALID_PARAMS"),
         ("_handle_workspaces_remove", {}, "INVALID_PARAMS"),
         ("_handle_workspaces_history_delete", {}, "INVALID_PARAMS"),
@@ -131,6 +137,15 @@ async def test_workspace_contract_error_metadata_has_real_handler_fixture(
             "_handle_workspaces_git_stage",
             {"workspaceId": "workspace", "staged": True, "paths": ["a.txt"]},
         ),
+        (
+            "_handle_workspaces_git_discard",
+            {"workspaceId": "workspace", "paths": ["a.txt"]},
+        ),
+        (
+            "_handle_workspaces_git_commit",
+            {"workspaceId": "workspace", "message": "message"},
+        ),
+        ("_handle_workspaces_git_push", {"workspaceId": "workspace"}),
         ("_handle_workspaces_pin", {"workspaceId": "workspace", "pinned": True}),
         ("_handle_workspaces_remove", {"workspaceId": "workspace"}),
         ("_handle_workspaces_history_delete", {"workspaceId": "workspace"}),
@@ -1864,6 +1879,9 @@ async def _open_trusted_workspace(
             _handle_workspaces_git_stage,
             {"workspaceId": "missing", "staged": True, "paths": ["a.txt"]},
         ),
+        (_handle_workspaces_git_discard, {"workspaceId": "missing", "paths": ["a.txt"]}),
+        (_handle_workspaces_git_commit, {"workspaceId": "missing", "message": "m"}),
+        (_handle_workspaces_git_push, {"workspaceId": "missing"}),
     ),
 )
 async def test_git_reads_require_a_local_owner(
@@ -1900,6 +1918,10 @@ async def test_git_reads_require_a_local_owner(
             _handle_workspaces_git_stage,
             {"workspaceId": "ws", "staged": True, "paths": "a.txt"},
         ),
+        (_handle_workspaces_git_discard, {"workspaceId": "ws", "paths": []}),
+        (_handle_workspaces_git_commit, {"workspaceId": "ws"}),
+        (_handle_workspaces_git_commit, {"workspaceId": "ws", "message": "   "}),
+        (_handle_workspaces_git_push, {"workspaceId": "  "}),
     ),
 )
 async def test_git_reads_reject_invalid_params(
@@ -2242,3 +2264,127 @@ async def test_git_stage_reports_gits_own_message_when_the_index_does_not_move(
 
     assert raised.value.code == "GIT_FAILED"
     assert "untracked.txt" in raised.value.message
+
+
+@pytest.mark.asyncio
+async def test_git_discard_restores_the_worktree_and_refuses_untracked(
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+    tmp_path: Path,
+    git_workspace_env: None,
+) -> None:
+    from opensquilla.gateway.rpc import RpcHandlerError
+
+    ctx, _ = workspace_ctx
+    project = tmp_path / "repo"
+    _init_git_repository(project)
+    (project / "tracked.txt").write_text("committed\n", encoding="utf-8")
+    _commit_in(project)
+    (project / "tracked.txt").write_text("edited\n", encoding="utf-8")
+    (project / "fresh.txt").write_text("agent work\n", encoding="utf-8")
+    workspace_id = await _open_trusted_workspace(ctx, project)
+
+    discarded = await _handle_workspaces_git_discard(
+        {"workspaceId": workspace_id, "paths": ["tracked.txt"]},
+        ctx,
+    )
+
+    assert discarded == {"discardedPaths": ["tracked.txt"]}
+    assert (project / "tracked.txt").read_text(encoding="utf-8") == "committed\n"
+
+    # An untracked path is refused, and the file it would have deleted is still
+    # there: the panel never offers this, and neither does the API.
+    with pytest.raises(RpcHandlerError) as raised:
+        await _handle_workspaces_git_discard(
+            {"workspaceId": workspace_id, "paths": ["fresh.txt"]},
+            ctx,
+        )
+
+    assert raised.value.code == "UNTRACKED_PATH"
+    assert (project / "fresh.txt").read_text(encoding="utf-8") == "agent work\n"
+
+
+@pytest.mark.asyncio
+async def test_git_commit_requires_something_staged_and_reports_the_commit(
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+    tmp_path: Path,
+    git_workspace_env: None,
+) -> None:
+    from opensquilla.gateway.rpc import RpcHandlerError
+
+    ctx, _ = workspace_ctx
+    project = tmp_path / "repo"
+    _init_git_repository(project)
+    (project / "file.txt").write_text("one\n", encoding="utf-8")
+    _commit_in(project)
+    workspace_id = await _open_trusted_workspace(ctx, project)
+
+    with pytest.raises(RpcHandlerError) as empty:
+        await _handle_workspaces_git_commit(
+            {"workspaceId": workspace_id, "message": "nothing to do"},
+            ctx,
+        )
+
+    assert empty.value.code == "NOTHING_STAGED"
+
+    (project / "file.txt").write_text("two\n", encoding="utf-8")
+    await _handle_workspaces_git_stage(
+        {"workspaceId": workspace_id, "staged": True, "paths": ["file.txt"]},
+        ctx,
+    )
+    committed = await _handle_workspaces_git_commit(
+        {"workspaceId": workspace_id, "message": "second change"},
+        ctx,
+    )
+
+    assert len(committed["sha"]) == 40
+    assert committed["subject"] == "second change"
+    status = await _handle_workspaces_git_status({"workspaceId": workspace_id}, ctx)
+    assert status["entries"] == []
+
+
+@pytest.mark.asyncio
+async def test_git_push_requires_an_upstream_and_publishes_to_it(
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+    tmp_path: Path,
+    git_workspace_env: None,
+) -> None:
+    """A local bare repository stands in for the remote, so this stays offline."""
+
+    from opensquilla.gateway.rpc import RpcHandlerError
+
+    ctx, _ = workspace_ctx
+    project = tmp_path / "repo"
+    _init_git_repository(project)
+    (project / "file.txt").write_text("one\n", encoding="utf-8")
+    _commit_in(project)
+    workspace_id = await _open_trusted_workspace(ctx, project)
+
+    # No remote at all yet: the handler must say so instead of guessing one.
+    with pytest.raises(RpcHandlerError) as raised:
+        await _handle_workspaces_git_push({"workspaceId": workspace_id}, ctx)
+
+    assert raised.value.code == "NO_UPSTREAM"
+
+    origin = tmp_path / "origin.git"
+    origin.mkdir()
+    _git_in(
+        origin,
+        ("-c", "init.templateDir=", "init", "--bare", "-q"),
+    )
+    _git_in(project, ("remote", "add", "origin", str(origin)))
+    _git_in(project, ("push", "-u", "origin", "main"))
+    (project / "file.txt").write_text("two\n", encoding="utf-8")
+    await _handle_workspaces_git_stage(
+        {"workspaceId": workspace_id, "staged": True, "paths": ["file.txt"]},
+        ctx,
+    )
+    await _handle_workspaces_git_commit(
+        {"workspaceId": workspace_id, "message": "second"},
+        ctx,
+    )
+
+    pushed = await _handle_workspaces_git_push({"workspaceId": workspace_id}, ctx)
+
+    assert pushed["upstream"] == "origin/main"
+    status = await _handle_workspaces_git_status({"workspaceId": workspace_id}, ctx)
+    assert (status["ahead"], status["behind"]) == (0, 0)

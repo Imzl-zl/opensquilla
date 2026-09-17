@@ -19,13 +19,17 @@ import pytest
 from opensquilla import git_runtime, workspace_git_changes
 from opensquilla.git_runtime import GitRunState
 from opensquilla.workspace_git_changes import (
+    WorkspaceGitPreconditionError,
     WorkspaceGitUnavailableError,
     WorkspacePathError,
     WorkspaceStatusParseError,
+    commit_index,
+    discard_paths,
     is_untracked_path,
     normalize_repo_path,
     parse_numstat,
     parse_porcelain_status,
+    push_current_branch,
     read_workspace_changes,
     read_workspace_diff,
     stage_paths,
@@ -594,6 +598,164 @@ def test_stage_paths_rejects_escaping_paths_before_running_git(
 def test_stage_paths_requires_at_least_one_path() -> None:
     with pytest.raises(WorkspacePathError):
         stage_paths(".", ())
+
+
+def test_discard_restores_the_worktree_from_the_index_not_from_head(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    """Discarding edits must not also throw away staged content.
+
+    The same file is staged *and* edited, which is the case where restoring from
+    HEAD instead of the index would silently delete the staged version.
+    """
+
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    (repository / "tracked.txt").write_text("committed\n", encoding="utf-8")
+    _commit_all(repository, git_environment)
+    (repository / "tracked.txt").write_text("staged\n", encoding="utf-8")
+    stage_paths(str(repository), ("tracked.txt",), environment=git_environment)
+    (repository / "tracked.txt").write_text("unstaged\n", encoding="utf-8")
+
+    discarded = discard_paths(
+        str(repository), ("tracked.txt",), environment=git_environment
+    )
+
+    assert discarded == ("tracked.txt",)
+    # The edit is gone; the staged content is what remains.
+    assert (repository / "tracked.txt").read_text(encoding="utf-8") == "staged\n"
+    changes = read_workspace_changes(str(repository), environment=git_environment)
+    assert [(entry.path, entry.staged, entry.unstaged) for entry in changes.entries] == [
+        ("tracked.txt", True, False)
+    ]
+
+
+def test_discard_refuses_an_untracked_path_without_deleting_it(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    """A file the agent just created is the one a mis-click must not lose."""
+
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    _commit_all(repository, git_environment)
+    (repository / "fresh.txt").write_text("agent work\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceGitPreconditionError) as raised:
+        discard_paths(str(repository), ("fresh.txt",), environment=git_environment)
+
+    assert raised.value.code == "untracked_path"
+    assert (repository / "fresh.txt").read_text(encoding="utf-8") == "agent work\n"
+
+
+def test_discard_recreates_a_deleted_tracked_file(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    (repository / "tracked.txt").write_text("kept\n", encoding="utf-8")
+    _commit_all(repository, git_environment)
+    (repository / "tracked.txt").unlink()
+
+    discard_paths(str(repository), ("tracked.txt",), environment=git_environment)
+
+    assert (repository / "tracked.txt").read_text(encoding="utf-8") == "kept\n"
+
+
+def test_commit_refuses_an_empty_index(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    """Refused with its own reason, not with Git's prose."""
+
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    _commit_all(repository, git_environment)
+
+    with pytest.raises(WorkspaceGitPreconditionError) as raised:
+        commit_index(str(repository), "nothing here", environment=git_environment)
+
+    assert raised.value.code == "nothing_staged"
+
+
+def test_commit_commits_only_the_index(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    (repository / "staged.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repository, git_environment)
+    (repository / "staged.txt").write_text("two\n", encoding="utf-8")
+    (repository / "loose.txt").write_text("not staged\n", encoding="utf-8")
+    stage_paths(str(repository), ("staged.txt",), environment=git_environment)
+
+    sha, subject = commit_index(
+        str(repository),
+        "tighten the thing\n\nlonger body",
+        environment=git_environment,
+    )
+
+    assert len(sha) == 40
+    assert subject == "tighten the thing"
+    # The unstaged file is still uncommitted, i.e. nothing was swept in.
+    changes = read_workspace_changes(str(repository), environment=git_environment)
+    assert [(entry.path, entry.change_type) for entry in changes.entries] == [
+        ("loose.txt", "untracked")
+    ]
+    logged = _git(("log", "-1", "--pretty=%s"), cwd=repository, environment=git_environment)
+    assert logged.strip() == "tighten the thing"
+
+
+def test_push_refuses_a_branch_without_an_upstream(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    _commit_all(repository, git_environment)
+
+    with pytest.raises(WorkspaceGitPreconditionError) as raised:
+        push_current_branch(
+            str(repository), upstream=None, environment=git_environment
+        )
+
+    assert raised.value.code == "no_upstream"
+
+
+def test_push_publishes_to_the_tracked_upstream(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    """A local bare repository stands in for the remote, so this stays offline."""
+
+    origin = tmp_path / "origin.git"
+    origin.mkdir()
+    _git(
+        ("-c", "init.templateDir=", "init", "--bare", "-q"),
+        cwd=origin,
+        environment=git_environment,
+    )
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    (repository / "file.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repository, git_environment)
+    _git(("remote", "add", "origin", str(origin)), cwd=repository, environment=git_environment)
+    _git(("push", "-u", "origin", "main"), cwd=repository, environment=git_environment)
+    (repository / "file.txt").write_text("two\n", encoding="utf-8")
+    stage_paths(str(repository), ("file.txt",), environment=git_environment)
+    commit_index(str(repository), "second", environment=git_environment)
+
+    output = push_current_branch(
+        str(repository), upstream="origin/main", environment=git_environment
+    )
+
+    assert "main" in output
+    # The remote now has the commit, so the local branch is no longer ahead.
+    changes = read_workspace_changes(str(repository), environment=git_environment)
+    assert (changes.ahead, changes.behind) == (0, 0)
 
 
 def test_stage_paths_reports_gits_own_output_on_failure(

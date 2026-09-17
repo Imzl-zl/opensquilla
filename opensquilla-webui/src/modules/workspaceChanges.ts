@@ -79,6 +79,25 @@ export interface WorkspaceIndexChange {
   readonly affectedPaths: readonly string[]
 }
 
+export interface WorkspacePathListRequest {
+  readonly workspaceId: string
+  readonly paths: readonly string[]
+}
+
+/**
+ * A commit was created. `sha` is empty when Git committed but could not report
+ * the object, so callers must render `subject` rather than assume a sha.
+ */
+export interface WorkspaceCommit {
+  readonly sha: string
+  readonly subject: string
+}
+
+export interface WorkspacePush {
+  readonly upstream: string
+  readonly output: string
+}
+
 export interface WorkspaceChangesReader {
   readChanges(
     workspaceId: string,
@@ -92,6 +111,21 @@ export interface WorkspaceChangesReader {
     request: WorkspaceIndexChangeRequest,
     options?: { signal?: AbortSignal },
   ): Promise<WorkspaceIndexChange>
+  /** Restores tracked paths' worktree from the index. Loses uncommitted edits. */
+  discardPaths(
+    request: WorkspacePathListRequest,
+    options?: { signal?: AbortSignal },
+  ): Promise<readonly string[]>
+  /** Commits the index. Nothing is staged implicitly. */
+  commitIndex(
+    request: { workspaceId: string; message: string },
+    options?: { signal?: AbortSignal },
+  ): Promise<WorkspaceCommit>
+  /** Pushes the current branch to the upstream it already tracks. */
+  pushBranch(
+    request: { workspaceId: string },
+    options?: { signal?: AbortSignal },
+  ): Promise<WorkspacePush>
 }
 
 export const WORKSPACE_CHANGES_KEY: InjectionKey<WorkspaceChangesReader> = Symbol('WorkspaceChanges')

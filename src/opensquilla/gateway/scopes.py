@@ -148,6 +148,9 @@ METHOD_SCOPES: dict[str, str] = {
     "workspaces.git.status": READ_SCOPE,  # Read-only working-tree inspection.
     "workspaces.git.diff": READ_SCOPE,  # Read-only working-tree inspection.
     "workspaces.git.stage": WRITE_SCOPE,  # Mutates the workspace index only.
+    "workspaces.git.discard": WRITE_SCOPE,  # Restores worktree content from the index.
+    "workspaces.git.commit": WRITE_SCOPE,  # Commits the index.
+    "workspaces.git.push": WRITE_SCOPE,  # Publishes the current branch upstream.
     "sessions.messages.snapshot": READ_SCOPE,
     "sessions.messages.snapshot.read": READ_SCOPE,
     "transport.flow.update": READ_SCOPE,

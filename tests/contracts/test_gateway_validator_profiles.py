@@ -22,14 +22,14 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
     specs = runner.discover_contracts()
     targets = runner.load_production_targets(specs)
 
-    assert len(targets) == 200
+    assert len(targets) == 203
     assert Counter(role for roles in targets.values() for role in roles) == {
-        "result": 190,
-        "params": 21,
+        "result": 193,
+        "params": 24,
         "payload": 9,
         "frame": 1,
     }
-    assert sum(len(spec.targets) for spec in specs) == 882
+    assert sum(len(spec.targets) for spec in specs) == 894
     assert targets[("method", "sessions.executionLog.read")] == ("params", "result")
     assert targets[("method", "sessions.list")] == ("result",)
     assert targets[("method", "skills.install.status")] == ("result",)
@@ -40,9 +40,12 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
     # The workspace Git reads validate only the gateway-to-UI direction.
     assert targets[("method", "workspaces.git.status")] == ("result",)
     assert targets[("method", "workspaces.git.diff")] == ("result",)
-    # The first workspace Git write is the bidirectional exception: a path list
-    # leaves the UI, and the paths it applied come back.
+    # Every workspace Git write is bidirectional: the request carries the paths
+    # or the message, and the acknowledgement comes back.
     assert targets[("method", "workspaces.git.stage")] == ("params", "result")
+    assert targets[("method", "workspaces.git.discard")] == ("params", "result")
+    assert targets[("method", "workspaces.git.commit")] == ("params", "result")
+    assert targets[("method", "workspaces.git.push")] == ("params", "result")
     assert targets[("method", "transport.flow.update")] == ("params", "result")
     assert targets[("method", "onboarding.llmProfile.upsertAndActivate")] == (
         "params", "result",

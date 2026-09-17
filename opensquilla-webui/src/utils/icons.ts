@@ -7,7 +7,7 @@ export type IconName =
   | 'send' | 'play' | 'stop' | 'paperclip' | 'plus' | 'share' | 'trash'
   | 'refresh' | 'download' | 'save' | 'menu' | 'moreHorizontal' | 'user' | 'search' | 'eye' | 'eye-off'
   | 'edit' | 'info' | 'settings' | 'gear' | 'gauge' | 'router' | 'regenerate'
-  | 'pencil' | 'fork' | 'listChecks' | 'chevronDown' | 'chevronLeft' | 'chevronRight' | 'arrowUp' | 'wrapText' | 'minus'
+  | 'pencil' | 'fork' | 'listChecks' | 'chevronDown' | 'chevronLeft' | 'chevronRight' | 'arrowUp' | 'wrapText' | 'minus' | 'undo'
   | 'expand' | 'collapse'
   | 'panel-left-open' | 'panel-left-close' | 'panel-right-open' | 'panel-right-close'
   | 'sidebar-visible' | 'sidebar-hidden'
@@ -80,6 +80,9 @@ const ICONS: Record<IconName, IconDef> = {
   wrapText:   { path: '<line x1="3" y1="6" x2="21" y2="6"/><path d="M3 12h15a3 3 0 1 1 0 6h-4"/><polyline points="16 16 14 18 16 20"/><line x1="3" y1="18" x2="10" y2="18"/>', strokeWidth: 1.6 },
   // The pair to `plus`: stage adds to the index, unstage takes it back out.
   minus:      { path: '<line x1="5" y1="12" x2="19" y2="12"/>' },
+  // Discard: an arrow bending back, the shape every source-control list uses
+  // for "throw these edits away".
+  undo:       { path: '<polyline points="9 14 4 9 9 4"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>', strokeWidth: 1.7 },
   expand:     { path: '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>', strokeWidth: 1.5 },
   collapse:   { path: '<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="10" y1="14" x2="3" y2="21"/><line x1="14" y1="10" x2="21" y2="3"/>', strokeWidth: 1.5 },
   'panel-left-open':  { path: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/><path d="M14 9l6 6-6 6"/>' },

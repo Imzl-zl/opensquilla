@@ -21,10 +21,39 @@ import {
   validateWorkspacesGitStageParams,
   validateWorkspacesGitStageResult,
 } from '@/contracts/generated/v4/workspacesGitStageValidators.mjs'
+import {
+  WORKSPACES_GIT_DISCARD_METHOD,
+  type WorkspacesGitDiscardParams,
+  type WorkspacesGitDiscardResult,
+} from '@/contracts/generated/v4/workspacesGitDiscard'
+import {
+  validateWorkspacesGitDiscardParams,
+  validateWorkspacesGitDiscardResult,
+} from '@/contracts/generated/v4/workspacesGitDiscardValidators.mjs'
+import {
+  WORKSPACES_GIT_COMMIT_METHOD,
+  type WorkspacesGitCommitParams,
+  type WorkspacesGitCommitResult,
+} from '@/contracts/generated/v4/workspacesGitCommit'
+import {
+  validateWorkspacesGitCommitParams,
+  validateWorkspacesGitCommitResult,
+} from '@/contracts/generated/v4/workspacesGitCommitValidators.mjs'
+import {
+  WORKSPACES_GIT_PUSH_METHOD,
+  type WorkspacesGitPushParams,
+  type WorkspacesGitPushResult,
+} from '@/contracts/generated/v4/workspacesGitPush'
+import {
+  validateWorkspacesGitPushParams,
+  validateWorkspacesGitPushResult,
+} from '@/contracts/generated/v4/workspacesGitPushValidators.mjs'
 import type {
   WorkspaceChanges,
   WorkspaceChangesReader,
+  WorkspaceCommit,
   WorkspaceIndexChange,
+  WorkspacePush,
 } from '@/modules/workspaceChanges'
 
 function optionsFor(signal?: AbortSignal): RpcCallOptions | undefined {
@@ -136,6 +165,60 @@ export function createV4WorkspaceChanges(
         staged: result.staged,
         affectedPaths: result.affectedPaths,
       }
+    },
+
+    async discardPaths(request, options): Promise<readonly string[]> {
+      const params = requireParams<WorkspacesGitDiscardParams>(
+        { workspaceId: request.workspaceId, paths: [...request.paths] },
+        validateWorkspacesGitDiscardParams,
+        WORKSPACES_GIT_DISCARD_METHOD,
+      )
+      const result = requireResult<WorkspacesGitDiscardResult>(
+        await transport.request(
+          WORKSPACES_GIT_DISCARD_METHOD,
+          params as unknown as Record<string, unknown>,
+          optionsFor(options?.signal),
+        ),
+        validateWorkspacesGitDiscardResult,
+        WORKSPACES_GIT_DISCARD_METHOD,
+      )
+      return result.discardedPaths
+    },
+
+    async commitIndex(request, options): Promise<WorkspaceCommit> {
+      const params = requireParams<WorkspacesGitCommitParams>(
+        { workspaceId: request.workspaceId, message: request.message },
+        validateWorkspacesGitCommitParams,
+        WORKSPACES_GIT_COMMIT_METHOD,
+      )
+      const result = requireResult<WorkspacesGitCommitResult>(
+        await transport.request(
+          WORKSPACES_GIT_COMMIT_METHOD,
+          params as unknown as Record<string, unknown>,
+          optionsFor(options?.signal),
+        ),
+        validateWorkspacesGitCommitResult,
+        WORKSPACES_GIT_COMMIT_METHOD,
+      )
+      return { sha: result.sha, subject: result.subject }
+    },
+
+    async pushBranch(request, options): Promise<WorkspacePush> {
+      const params = requireParams<WorkspacesGitPushParams>(
+        { workspaceId: request.workspaceId },
+        validateWorkspacesGitPushParams,
+        WORKSPACES_GIT_PUSH_METHOD,
+      )
+      const result = requireResult<WorkspacesGitPushResult>(
+        await transport.request(
+          WORKSPACES_GIT_PUSH_METHOD,
+          params as unknown as Record<string, unknown>,
+          optionsFor(options?.signal),
+        ),
+        validateWorkspacesGitPushResult,
+        WORKSPACES_GIT_PUSH_METHOD,
+      )
+      return { upstream: result.upstream, output: result.output }
     },
   }
 }

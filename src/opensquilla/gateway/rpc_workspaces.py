@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from typing import Any, cast
 
@@ -33,10 +33,14 @@ from opensquilla.project_workspaces import (
 from opensquilla.session.models import ProjectWorkspace
 from opensquilla.session.storage import ProjectSessionSnapshotMismatchError
 from opensquilla.workspace_git_changes import (
+    WorkspaceGitPreconditionError,
     WorkspaceGitUnavailableError,
     WorkspacePathError,
+    commit_index,
+    discard_paths,
     is_untracked_path,
     normalize_repo_path,
+    push_current_branch,
     read_workspace_changes,
     read_workspace_diff,
     stage_paths,
@@ -45,6 +49,14 @@ from opensquilla.workspace_git_changes import (
 _d = get_dispatcher()
 
 _MAX_GIT_ERROR_CHARS = 400
+
+# A refused write names what the operator should do next, so each precondition
+# gets its own wire code instead of one "failed".
+_PRECONDITION_ERROR_CODES = {
+    "untracked_path": "UNTRACKED_PATH",
+    "nothing_staged": "NOTHING_STAGED",
+    "no_upstream": "NO_UPSTREAM",
+}
 
 
 async def _settle_despite_cancellation[T](awaitable: Awaitable[T]) -> T:
@@ -461,13 +473,39 @@ async def _handle_workspaces_git_stage(
         # a missing parameter, and the Contract declares both codes separately.
         raise RpcHandlerError("INVALID_PATH", str(exc)) from exc
     workspace_path = await _git_workspace_path(ctx, workspace_id)
+    applied = await _run_git_write(
+        lambda: stage_paths(workspace_path, repo_paths, staged=staged)
+    )
+    return {"staged": staged, "affectedPaths": list(applied)}
+
+
+def _paths_param(values: dict[str, Any]) -> tuple[str, ...]:
+    raw_paths = values.get("paths")
+    if not isinstance(raw_paths, list) or not raw_paths:
+        raise RpcHandlerError("INVALID_PARAMS", "paths must be a non-empty array")
     try:
-        applied = await asyncio.to_thread(
-            stage_paths,
-            workspace_path,
-            repo_paths,
-            staged=staged,
-        )
+        return tuple(normalize_repo_path(path) for path in raw_paths)
+    except WorkspacePathError as exc:
+        # A present path that escapes the workspace is a different failure from
+        # a missing parameter, and the Contract declares both codes separately.
+        raise RpcHandlerError("INVALID_PATH", str(exc)) from exc
+
+
+async def _run_git_write[T](operation: Callable[[], T]) -> T:
+    """Run one workspace write in a worker thread and map its failures.
+
+    Every write on this surface fails in the same three shapes, so the mapping
+    lives here: Git is absent, Git ran and refused (reported in its own words),
+    or the request was refused before it could change anything.
+    """
+
+    try:
+        return await asyncio.to_thread(operation)
+    except WorkspaceGitPreconditionError as exc:
+        raise RpcHandlerError(
+            _PRECONDITION_ERROR_CODES[exc.code],
+            exc.message,
+        ) from exc
     except WorkspaceGitUnavailableError as exc:
         if exc.reason != "failed":
             raise RpcHandlerError(
@@ -475,7 +513,61 @@ async def _handle_workspaces_git_stage(
                 f"Git is unavailable for this workspace ({exc.reason}).",
             ) from exc
         raise RpcHandlerError("GIT_FAILED", _git_failure_message(exc.result)) from exc
-    return {"staged": staged, "affectedPaths": list(applied)}
+
+
+async def _handle_workspaces_git_discard(
+    params: dict | None,
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    _require_owner(ctx)
+    values = _params(params)
+    workspace_id = _workspace_id(values)
+    repo_paths = _paths_param(values)
+    workspace_path = await _git_workspace_path(ctx, workspace_id)
+    discarded = await _run_git_write(
+        lambda: discard_paths(workspace_path, repo_paths)
+    )
+    return {"discardedPaths": list(discarded)}
+
+
+async def _handle_workspaces_git_commit(
+    params: dict | None,
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    _require_owner(ctx)
+    values = _params(params)
+    workspace_id = _workspace_id(values)
+    raw_message = values.get("message")
+    if not isinstance(raw_message, str) or not raw_message.strip():
+        raise RpcHandlerError("INVALID_PARAMS", "message is required")
+    workspace_path = await _git_workspace_path(ctx, workspace_id)
+    sha, subject = await _run_git_write(
+        lambda: commit_index(workspace_path, raw_message)
+    )
+    return {"sha": sha, "subject": subject}
+
+
+async def _handle_workspaces_git_push(
+    params: dict | None,
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    """Push the current branch to the upstream the status read already named.
+
+    The upstream is re-read here rather than taken from the request, so a caller
+    cannot choose where the branch is published.
+    """
+
+    _require_owner(ctx)
+    workspace_id = _workspace_id(params)
+    workspace_path = await _git_workspace_path(ctx, workspace_id)
+    changes = await asyncio.to_thread(read_workspace_changes, workspace_path)
+    output = await _run_git_write(
+        lambda: push_current_branch(
+            workspace_path,
+            upstream=changes.upstream,
+        )
+    )
+    return {"upstream": str(changes.upstream), "output": output}
 
 
 _WORKSPACE_CATALOG_CONTRACT_IMPLEMENTATIONS = {
@@ -483,6 +575,9 @@ _WORKSPACE_CATALOG_CONTRACT_IMPLEMENTATIONS = {
     "workspaces.git.status": _handle_workspaces_git_status,
     "workspaces.git.diff": _handle_workspaces_git_diff,
     "workspaces.git.stage": _handle_workspaces_git_stage,
+    "workspaces.git.discard": _handle_workspaces_git_discard,
+    "workspaces.git.commit": _handle_workspaces_git_commit,
+    "workspaces.git.push": _handle_workspaces_git_push,
     "workspaces.open": _handle_workspaces_open,
     "workspaces.update": _handle_workspaces_update,
     "workspaces.pin": _handle_workspaces_pin,

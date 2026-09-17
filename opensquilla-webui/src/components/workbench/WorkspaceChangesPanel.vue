@@ -43,6 +43,52 @@
       </div>
     </header>
 
+    <!-- The commit message sits above the sections, the way every
+         source-control surface arranges it: state first, then what you say
+         about it. -->
+    <div v-if="changes?.available" class="wb-changes__commit">
+      <input
+        v-model="commitMessage"
+        type="text"
+        class="wb-changes__commit-input"
+        :placeholder="t('workbench.changes.commitPlaceholder')"
+        :aria-label="t('workbench.changes.commitPlaceholder')"
+        :disabled="indexBusy || !hasStaged"
+        data-testid="changes-commit-message"
+        @keydown.enter.prevent="commitIndex()"
+      >
+      <button
+        type="button"
+        class="wb-changes__icon-button"
+        :disabled="indexBusy || !canCommit"
+        :aria-busy="indexBusy"
+        :aria-label="t('workbench.changes.commit')"
+        :title="t('workbench.changes.commit')"
+        data-testid="changes-commit"
+        @click="commitIndex()"
+      >
+        <Icon name="check" :size="12" />
+      </button>
+      <button
+        type="button"
+        class="wb-changes__icon-button"
+        :disabled="indexBusy || !changes.upstream"
+        :aria-busy="indexBusy"
+        :aria-label="t('workbench.changes.push')"
+        :title="changes.upstream
+          ? t('workbench.changes.push')
+          : t('workbench.changes.pushUnavailable')"
+        data-testid="changes-push"
+        @click="pushBranch()"
+      >
+        <Icon name="arrowUp" :size="12" />
+      </button>
+    </div>
+
+    <p v-if="notice" class="wb-changes__note" role="status" data-testid="changes-notice">
+      {{ notice }}
+    </p>
+
     <p v-if="loading && !changes" class="wb-changes__note" role="status">
       {{ t('workbench.changes.loading') }}
     </p>
@@ -87,9 +133,23 @@
       >
         <section v-for="group in groups" :key="group.key" class="wb-changes__group">
           <h4 class="wb-changes__group-head">
-            <Icon :name="group.icon" :size="12" />
-            <span>{{ group.label }}</span>
-            <span class="wb-changes__group-count">{{ group.entries.length }}</span>
+            <button
+              type="button"
+              class="wb-changes__group-toggle"
+              :aria-expanded="!collapsed.has(group.key)"
+              :aria-controls="`wb-changes-group-${group.key}`"
+              data-testid="changes-group-toggle"
+              :data-group="group.key"
+              @click="toggleGroup(group.key)"
+            >
+              <Icon
+                :name="collapsed.has(group.key) ? 'chevronRight' : 'chevronDown'"
+                :size="12"
+              />
+              <Icon :name="group.icon" :size="12" />
+              <span>{{ group.label }}</span>
+              <span class="wb-changes__group-count">{{ group.entries.length }}</span>
+            </button>
             <!-- The whole-set action belongs to the group it applies to, so there
                  is no separate "stage everything" concept to explain. -->
             <button
@@ -106,6 +166,7 @@
               <Icon :name="group.indexAction === 'stage' ? 'plus' : 'minus'" :size="12" />
             </button>
           </h4>
+          <div v-show="!collapsed.has(group.key)" :id="`wb-changes-group-${group.key}`">
           <!-- The row is a container so the selectable area and the index action
                can be siblings: a button cannot contain another button. -->
           <div
@@ -144,22 +205,39 @@
             </span>
             <Icon v-else-if="entry.staged" name="check" :size="12" class="wb-changes__check" />
           </button>
-          <!-- One icon per row, the way a source-control list does it, so a row
-               stays a single line however many actions it grows. -->
-          <button
-            type="button"
-            class="wb-changes__icon-button wb-changes__row-action"
-            :disabled="indexBusy"
-            :aria-busy="indexBusy"
-            :aria-label="t(`workbench.changes.${indexAction(entry)}`)"
-            :title="t(`workbench.changes.${indexAction(entry)}`)"
-            data-testid="changes-index-action"
-            :data-index-action="indexAction(entry)"
-            :data-entry-key="entryKey(entry)"
-            @click="applyIndexChange(entry)"
-          >
-            <Icon :name="indexAction(entry) === 'stage' ? 'plus' : 'minus'" :size="12" />
-          </button>
+          <!-- One icon per action, the way a source-control list does it, so a
+               row stays a single line however many actions it grows. -->
+          <div class="wb-changes__row-actions">
+            <button
+              v-if="entry.changeType !== 'untracked'"
+              type="button"
+              class="wb-changes__icon-button wb-changes__row-action"
+              :disabled="indexBusy"
+              :aria-busy="indexBusy"
+              :aria-label="t('workbench.changes.discard')"
+              :title="t('workbench.changes.discard')"
+              data-testid="changes-discard-action"
+              :data-entry-key="entryKey(entry)"
+              @click="discardEntry(entry)"
+            >
+              <Icon name="undo" :size="12" />
+            </button>
+            <button
+              type="button"
+              class="wb-changes__icon-button wb-changes__row-action"
+              :disabled="indexBusy"
+              :aria-busy="indexBusy"
+              :aria-label="t(`workbench.changes.${indexAction(entry)}`)"
+              :title="t(`workbench.changes.${indexAction(entry)}`)"
+              data-testid="changes-index-action"
+              :data-index-action="indexAction(entry)"
+              :data-entry-key="entryKey(entry)"
+              @click="applyIndexChange(entry)"
+            >
+              <Icon :name="indexAction(entry) === 'stage' ? 'plus' : 'minus'" :size="12" />
+            </button>
+          </div>
+          </div>
           </div>
         </section>
       </div>
@@ -263,6 +341,7 @@
 import { computed, inject, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
+import { useConfirm } from '@/composables/useConfirm'
 import {
   WORKSPACE_CHANGES_KEY,
   type WorkspaceChangeEntry,
@@ -350,6 +429,21 @@ function resetSplitter() {
 const errorMessage = ref('')
 const indexBusy = ref(false)
 const indexError = ref('')
+const commitMessage = ref('')
+/** One slot for the last write's outcome, so a success is as visible as a
+ * failure instead of leaving the list as the only evidence. */
+const notice = ref('')
+const { confirm } = useConfirm()
+
+/** Groups the operator folded away, so a long list cannot hide the others. */
+const collapsed = ref(new Set<string>())
+
+function toggleGroup(key: string) {
+  const next = new Set(collapsed.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  collapsed.value = next
+}
 const selectedKey = ref('')
 const diff = ref<WorkspaceFileDiff | null>(null)
 const diffLoading = ref(false)
@@ -649,6 +743,7 @@ async function runIndexChange(paths: readonly string[], staged: boolean) {
   const selectedPath = selectedEntry.value?.path
   indexBusy.value = true
   indexError.value = ''
+  notice.value = ''
   try {
     await activeReader.stagePaths({
       workspaceId: props.workspaceId,
@@ -676,6 +771,105 @@ async function runIndexChange(paths: readonly string[], staged: boolean) {
 
 function applyIndexChange(entry: WorkspaceChangeEntry) {
   return runIndexChange([entry.path], indexAction(entry) === 'stage')
+}
+
+/**
+ * Discard one file's uncommitted worktree edits.
+ *
+ * The only operation here that can lose work, so it asks first and names the
+ * file in the question. Untracked rows never offer it: restoring one would have
+ * to delete the file, and that is not a decision to make from a list icon.
+ */
+async function discardEntry(entry: WorkspaceChangeEntry) {
+  const activeReader = reader
+  if (!activeReader || indexBusy.value) return
+  const confirmed = await confirm({
+    title: t('workbench.changes.discardTitle'),
+    body: t('workbench.changes.discardBody', { path: entry.path }),
+    primaryLabel: t('workbench.changes.discard'),
+  })
+  if (!confirmed) return
+  indexBusy.value = true
+  indexError.value = ''
+  notice.value = ''
+  try {
+    const discarded = await activeReader.discardPaths({
+      workspaceId: props.workspaceId,
+      paths: [entry.path],
+    })
+    await reload(true)
+    const refreshed = changes.value?.entries.find(
+      candidate => candidate.path === entry.path,
+    )
+    if (refreshed) {
+      await select(refreshed)
+    } else {
+      selectedKey.value = ''
+      diff.value = null
+    }
+    notice.value = t('workbench.changes.discarded', { count: discarded.length })
+  } catch (error) {
+    indexError.value = error instanceof Error
+      ? error.message
+      : t('workbench.changes.indexFailed')
+  } finally {
+    indexBusy.value = false
+  }
+}
+
+const hasStaged = computed(() => Boolean(
+  changes.value?.entries.some(entry => entry.staged),
+))
+
+const canCommit = computed(() => (
+  hasStaged.value && commitMessage.value.trim().length > 0
+))
+
+async function commitIndex() {
+  const activeReader = reader
+  if (!activeReader || indexBusy.value || !canCommit.value) return
+  indexBusy.value = true
+  indexError.value = ''
+  notice.value = ''
+  try {
+    const committed = await activeReader.commitIndex({
+      workspaceId: props.workspaceId,
+      message: commitMessage.value.trim(),
+    })
+    commitMessage.value = ''
+    selectedKey.value = ''
+    diff.value = null
+    await reload()
+    notice.value = t('workbench.changes.committed', {
+      sha: committed.sha.slice(0, 7),
+      subject: committed.subject,
+    })
+  } catch (error) {
+    indexError.value = error instanceof Error
+      ? error.message
+      : t('workbench.changes.indexFailed')
+  } finally {
+    indexBusy.value = false
+  }
+}
+
+async function pushBranch() {
+  const activeReader = reader
+  if (!activeReader || indexBusy.value) return
+  indexBusy.value = true
+  indexError.value = ''
+  notice.value = ''
+  try {
+    const pushed = await activeReader.pushBranch({ workspaceId: props.workspaceId })
+    await reload(true)
+    notice.value = t('workbench.changes.pushed', { upstream: pushed.upstream })
+  } catch (error) {
+    indexError.value = error instanceof Error
+      ? error.message
+      : t('workbench.changes.indexFailed')
+  } finally {
+    indexBusy.value = false
+  }
 }
 
 function applyGroupIndexChange(group: WorkspaceChangeGroup) {
@@ -890,6 +1084,33 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   max-height: none;
 }
 
+.wb-changes__commit {
+  display: flex;
+  flex: none;
+  gap: 0.375rem;
+  align-items: center;
+}
+
+.wb-changes__commit-input {
+  min-width: 0;
+  flex: 1;
+  padding: 0.25rem 0.5rem;
+  color: var(--text);
+  font: inherit;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.wb-changes__commit-input:disabled {
+  color: var(--text-muted);
+}
+
+.wb-changes__commit-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .wb-changes__group-head {
   display: flex;
   position: sticky;
@@ -906,6 +1127,28 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   text-transform: uppercase;
   background: var(--bg-elevated);
   border-bottom: 1px solid var(--border);
+}
+
+/* Folding a section is how a long unstaged list stops hiding the staged and
+   untracked ones; the toggle owns the whole header so the target is the row. */
+.wb-changes__group-toggle {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  gap: 0.375rem;
+  align-items: center;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.wb-changes__group-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .wb-changes__group-count {
@@ -948,28 +1191,33 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   cursor: pointer;
 }
 
-/* The action shares the row's trailing column with the line counts: at rest the
-   column shows the numbers, and on hover or selection the action takes their
-   place. It is drawn in the same column rather than taking layout space,
+/* The actions share the row's trailing column with the line counts: at rest the
+   column shows the numbers, and on hover or selection the actions take their
+   place. They are drawn in the same column rather than taking layout space,
    because reserving it measured as 79 of 91 rows wrapping to a second line in a
    narrow dock. Opaque and on the row's own background, so the swap is clean. */
-.wb-changes__row-action {
+.wb-changes__row-actions {
+  display: flex;
   position: absolute;
   top: 50%;
   /* Matches the row's own trailing padding, which is where the counts end. */
   right: 0.5rem;
   transform: translateY(-50%);
+  gap: 0.125rem;
+  opacity: 0;
+}
+
+.wb-changes__row-action {
   /* An action, not a label: the muted tier is for metadata, so the glyph keeps
      the normal foreground and only its chip changes on hover. */
   color: var(--text);
   background: var(--bg-elevated);
   border-color: transparent;
-  opacity: 0;
 }
 
-.wb-changes__row:hover .wb-changes__row-action,
-.wb-changes__row:focus-within .wb-changes__row-action,
-.wb-changes__row.is-selected .wb-changes__row-action {
+.wb-changes__row:hover .wb-changes__row-actions,
+.wb-changes__row:focus-within .wb-changes__row-actions,
+.wb-changes__row.is-selected .wb-changes__row-actions {
   opacity: 1;
 }
 
@@ -983,7 +1231,6 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 }
 
 .wb-changes__row-action:focus-visible {
-  opacity: 1;
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
