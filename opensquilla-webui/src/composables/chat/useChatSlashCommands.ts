@@ -196,7 +196,7 @@ function slashCommandKeys(command: Pick<ChatSlashCommand, 'aliases' | 'cmd' | 'n
 }
 
 function isMenuCommand(command: ChatSlashCommand): boolean {
-  return slashCommandKeys(command).some(key => key === '/new' || key === '/meta')
+  return !slashCommandKeys(command).some(key => key === '/reset' || key === '/usage')
 }
 
 function normalizeSlashCommand(cmd: SlashCommandPayload): ChatSlashCommand {

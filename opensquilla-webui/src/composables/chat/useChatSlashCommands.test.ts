@@ -151,8 +151,6 @@ function harness(
 }
 
 describe('useChatSlashCommands plan compatibility', () => {
-  const planCommand = { name: '/plan', cmd: '/plan', label: '/plan', desc: 'Plan the task', aliases: [], execution: { action: 'plans.setMode' } }
-
   it('allows command completion with skill tags but blocks direct menu execution', async () => {
     const skill = { name: 'tables', instanceId: 'skill:tables', digest: 'a'.repeat(64) }
     const selectedSkills = ref([skill])
@@ -160,12 +158,12 @@ describe('useChatSlashCommands plan compatibility', () => {
     await api.loadSlashCommands()
     inputText.value = '/pl'
     api.handleSlashInput()
-    api.completeSlashCmd(planCommand)
+    api.completeSlashCmd(api.filteredSlashCmds.value[0]!)
     expect(inputText.value).toBe('/plan')
     expect(notify).not.toHaveBeenCalled()
 
     api.handleSlashInput()
-    api.activateSlashCmd(planCommand)
+    api.activateSlashCmd(api.filteredSlashCmds.value[0]!)
     await Promise.resolve()
 
     expect(activatePlanMode).not.toHaveBeenCalled()
@@ -215,9 +213,8 @@ describe('useChatSlashCommands plan compatibility', () => {
     inputText.value = '/pl'
     api.handleSlashInput()
 
-    expect(api.filteredSlashCmds.value).toEqual([])
-    await expect(api.classifySlashCommand('/plan')).resolves.toBe('registered')
-    api.selectSlashCmd(planCommand)
+    expect(api.filteredSlashCmds.value.map(command => command.name)).toEqual(['/plan'])
+    api.selectSlashCmd(api.filteredSlashCmds.value[0])
     await Promise.resolve()
     expect(activatePlanMode).toHaveBeenCalledOnce()
     expect(inputText.value).toBe('')
@@ -232,7 +229,7 @@ describe('useChatSlashCommands plan compatibility', () => {
     expect(api.filteredSlashCmds.value).toEqual([])
   })
 
-  it('keeps Plan commands registered without showing them in the menu', async () => {
+  it('prefers the exact /plan candidate over longer command prefixes', async () => {
     const { api, inputText } = harness(true, [{
       name: '/planning',
       description: 'A different command',
@@ -243,12 +240,10 @@ describe('useChatSlashCommands plan compatibility', () => {
     inputText.value = '/plan'
     api.handleSlashInput()
 
-    expect(api.filteredSlashCmds.value).toEqual([])
-    await expect(api.classifySlashCommand('/plan')).resolves.toBe('registered')
-    await expect(api.classifySlashCommand('/planning')).resolves.toBe('registered')
+    expect(api.filteredSlashCmds.value.map(command => command.name)).toEqual(['/plan', '/planning'])
   })
 
-  it('keeps gateway Plan aliases executable without menu entries', async () => {
+  it('does not inject a duplicate when the gateway exposes /plan as an alias', async () => {
     const { api, inputText } = harness(true, [{
       name: '/planning',
       description: 'Enter Plan mode',
@@ -259,9 +254,8 @@ describe('useChatSlashCommands plan compatibility', () => {
     inputText.value = '/plan'
     api.handleSlashInput()
 
-    expect(api.filteredSlashCmds.value).toEqual([])
-    await expect(api.classifySlashCommand('/plan')).resolves.toBe('registered')
-    await expect(api.classifySlashCommand('/planning')).resolves.toBe('registered')
+    expect(api.filteredSlashCmds.value).toHaveLength(1)
+    expect(api.filteredSlashCmds.value[0].name).toBe('/planning')
   })
 
   it('recomputes candidates when the command catalog arrives after the input', async () => {
@@ -275,8 +269,7 @@ describe('useChatSlashCommands plan compatibility', () => {
     connection.resolve()
     await loading
 
-    expect(api.filteredSlashCmds.value).toEqual([])
-    await expect(api.classifySlashCommand('/plan')).resolves.toBe('registered')
+    expect(api.filteredSlashCmds.value.map(command => command.name)).toEqual(['/plan'])
   })
 
   it('activates Plan mode before dispatching an optional Plan prompt', async () => {
@@ -314,7 +307,7 @@ describe('useChatSlashCommands plan compatibility', () => {
     inputText.value = '/plan'
     api.handleSlashInput()
 
-    api.selectSlashCmd(planCommand)
+    api.selectSlashCmd(api.filteredSlashCmds.value[0])
     await Promise.resolve()
 
     expect(inputText.value).toBe('/plan')
@@ -652,17 +645,17 @@ describe('useChatSlashCommands Coding mode', () => {
     expect(inputText.value).toBe('')
   })
 
-  it('omits /coding from the menu in either mode', async () => {
+  it('describes the next /coding action from the current global state', async () => {
     const { api, codingModeEnabled, inputText } = harness(false, [codingCommand])
     await api.loadSlashCommands()
     inputText.value = '/coding'
 
     api.handleSlashInput()
-    expect(api.filteredSlashCmds.value).toEqual([])
+    expect(api.filteredSlashCmds.value[0].desc).toBe('Enable Coding mode.')
 
     codingModeEnabled.value = true
     api.handleSlashInput()
-    expect(api.filteredSlashCmds.value).toEqual([])
+    expect(api.filteredSlashCmds.value[0].desc).toBe('Disable Coding mode.')
   })
 
   it('completes a partial /coding candidate without toggling the mode', async () => {
@@ -674,7 +667,7 @@ describe('useChatSlashCommands Coding mode', () => {
     await api.loadSlashCommands()
     inputText.value = '/co'
     api.handleSlashInput()
-    const candidate = { ...codingCommand, cmd: '/coding', label: '/coding', desc: '' }
+    const candidate = api.filteredSlashCmds.value[0]
 
     api.activateSlashCmd(candidate)
 
@@ -693,7 +686,7 @@ describe('useChatSlashCommands Coding mode', () => {
     inputText.value = '/coding'
     api.handleSlashInput()
 
-    api.activateSlashCmd({ ...codingCommand, cmd: '/coding', label: '/coding', desc: '' })
+    api.activateSlashCmd(api.filteredSlashCmds.value[0])
     await Promise.resolve()
 
     expect(setCodingModeEnabled).toHaveBeenCalledWith(true)
@@ -940,7 +933,7 @@ describe('unified skill palette', () => {
     const skillCatalog = { supportsCandidates: () => true, listCandidates } as unknown as SkillCatalog
     return { ...harness(false, [], Promise.resolve(), undefined, { skillCatalog, selectedSkills, ...extra }), selectedSkills, listCandidates }
   }
-  it('shows only new and meta commands while keeping all skills and workflows browseable', async () => {
+  it('omits reset and usage from the menu while keeping all skills and workflows browseable', async () => {
     const candidates = ['pdf-toolkit', 'github', 'docx', 'html-coder', 'pptx', 'xlsx', 'custom-skill']
       .map(name => ({ ...candidate, name, instanceId: `skill:${name}`,
         description: 'A brief purpose. Later details contain unique-search-term.' }))
@@ -960,22 +953,23 @@ describe('unified skill palette', () => {
     await Promise.resolve()
 
     expect(api.filteredSlashCmds.value.map(item => item.name)).toEqual([
-      '/new', '/meta',
+      '/goal', '/new', '/coding', '/compact', '/meta',
       'pdf-toolkit', 'github', 'docx', 'html-coder', 'pptx', 'xlsx', 'custom-skill',
       '/meta meta-paper-write', '/meta meta-skill-creator', '/meta meta-short-drama',
       '/meta AwesomeWebpageMetaSkill',
     ])
     expect(api.filteredSlashCmds.value.map(item => item.kind)).toEqual([
-      'command', 'command',
+      ...commands.filter(command => !['/usage', '/reset'].includes(command.name)).map(() => 'command'), 'command',
       ...candidates.map(() => 'skill'),
       'meta', 'meta', 'meta', 'meta',
     ])
     expect(api.filteredSlashCmds.value.find(item => item.name === 'custom-skill')?.desc).toBe('A brief purpose.')
 
-    for (const name of ['/usage', '/goal', '/coding', '/compact', '/reset']) {
+    for (const name of ['/usage', '/reset']) {
       inputText.value = name
       api.handleSlashInput()
       expect(api.filteredSlashCmds.value.filter(item => item.kind === 'command')).toEqual([])
+      await expect(api.classifySlashCommand(name)).resolves.toBe('registered')
     }
     inputText.value = '/unique-search-term'
     api.handleSlashInput()
@@ -1016,7 +1010,7 @@ describe('unified skill palette', () => {
       inputText.value = '/'
       api.handleSlashInput()
       await Promise.resolve()
-      expect(api.filteredSlashCmds.value.filter(item => item.kind === 'command').map(item => item.desc)).toEqual(['新建聊天'])
+      expect(api.filteredSlashCmds.value.slice(0, 3).map(item => item.desc)).toEqual(['新建聊天', '开启编程模式', '压缩当前对话上下文'])
       expect(api.filteredSlashCmds.value.find(item => item.name === 'xlsx')).toMatchObject({ label: 'Excel 表格', desc: '创建、编辑与分析电子表格' })
       inputText.value = '/EXCEL'
       api.handleSlashInput()
