@@ -3517,6 +3517,8 @@
     "aiGeneratedLabel": "KI-generierter Inhalt, nur als Referenz.",
     "removeAttachment": "Anhang entfernen",
     "remove": "Entfernen",
+    "projectFileTarget": "Projektdatei: {path}",
+    "importedFileTarget": "Importierte Kopie",
     "fileLabel": "Datei",
     "add": "Hinzufügen",
     "attachFiles": "Dateien anhängen",

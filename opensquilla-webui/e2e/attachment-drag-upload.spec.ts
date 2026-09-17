@@ -62,7 +62,8 @@ async function mockRpc(page: Page, capturedSends: CapturedSend[], options: MockR
           : {}
         if (method === 'connect') {
           ws.send(helloOkResponse({
-            auth: { principal: { isOwner: true, authenticated: true, authState: 'authenticated' } },
+            auth: { principal: { isOwner: true, authenticated: true, authState: 'authenticated',
+            } },
           }))
           return
         }
@@ -167,6 +168,16 @@ async function readDownloadBytes(download: Download): Promise<Buffer> {
 async function openMockedChat(page: Page, capturedSends: CapturedSend[], options: MockRpcOptions = {}, url = CONTROL_URL) {
   await mockApprovals(page)
   await mockRpc(page, capturedSends, options)
+  if (process.env.OPENSQUILLA_PLAYWRIGHT_MANAGE_WEBUI === 'preview') {
+    // The gateway normalizes relative built entry assets against /control.
+    // Raw Vite preview needs the same entry projection on this nested route.
+    await page.route('**/control/chat/new*', async route => {
+      if (!route.request().isNavigationRequest()) return route.fallback()
+      const response = await route.fetch()
+      const body = (await response.text()).replace(/(src|href)="\.\//g, '$1="/control/')
+      await route.fulfill({ response, body })
+    })
+  }
   await page.goto(url)
   await expect(page.locator('.chat-textarea')).toBeVisible()
   await expect(page.locator('.conn-pill.connected')).toBeVisible()
@@ -446,13 +457,26 @@ test.describe('attachment drag upload', () => {
     expect(layout.animationName).toBe('none')
   })
 
-  test('drops and sends a small inline file without leaking local paths', async ({ page }) => {
+  for (const intake of ['picker', 'drop', 'paste'] as const) {
+  test(`attaches and sends a small inline file through ${intake} without leaking local paths`, async ({ page }) => {
     const capturedSends: CapturedSend[] = []
     await openMockedChat(page, capturedSends)
 
-    await dropFiles(page, [
-      { name: 'small.txt', type: 'text/plain', text: 'hello from inline drop' },
-    ])
+    const text = 'hello from ordinary attachment intake'
+    if (intake === 'picker') {
+      await page.locator('input[type="file"]').setInputFiles({
+        name: 'small.txt', mimeType: 'text/plain', buffer: Buffer.from(text),
+      })
+    } else if (intake === 'paste') {
+      await page.locator('.chat-textarea').focus()
+      await page.locator('.chat-textarea').evaluate((element, content) => {
+        const clipboardData = new DataTransfer()
+        clipboardData.items.add(new File([content], 'small.txt', { type: 'text/plain' }))
+        element.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData }))
+      }, text)
+    } else {
+      await dropFiles(page, [{ name: 'small.txt', type: 'text/plain', text }])
+    }
     await expect(page.locator('.attachment-chip')).toContainText('small.txt')
     await expect(page.locator('.attachment-chip--busy')).toHaveCount(0)
 
@@ -469,11 +493,12 @@ test.describe('attachment drag upload', () => {
       name: 'small.txt',
       type: 'text/plain',
     })
-    expect(String(attachment.data || '')).toBeTruthy()
+    expect(Buffer.from(String(attachment.data || ''), 'base64').toString()).toBe(text)
     expect(attachment.file_uuid).toBeUndefined()
     expect(JSON.stringify(params)).not.toContain('/Users/')
     expect(JSON.stringify(params)).not.toContain('small.txt/')
   })
+  }
 
   test('keeps non-image history replay attachments as file chips', async ({ page }) => {
     const capturedSends: CapturedSend[] = []

@@ -3517,6 +3517,8 @@
     "aiGeneratedLabel": "Contenu généré par l’IA, fourni à titre indicatif.",
     "removeAttachment": "Supprimer la pièce jointe",
     "remove": "Supprimer",
+    "projectFileTarget": "Fichier du projet : {path}",
+    "importedFileTarget": "Copie importée",
     "fileLabel": "Fichier",
     "add": "Ajouter",
     "attachFiles": "Joindre des fichiers",

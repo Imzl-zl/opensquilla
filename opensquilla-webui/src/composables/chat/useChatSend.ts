@@ -49,7 +49,8 @@ import {
   hasSendableModelInputImageAttachment,
   isSendableAttachment,
   serializeDisplayAttachment,
-  serializeSendableAttachment,
+  serializeChatFiles,
+  snapshotAttachment,
   type SendableAttachment,
 } from '@/utils/chat/attachments'
 import { localizedChatErrorMessage } from '@/utils/chat/errors'
@@ -415,8 +416,8 @@ function sameSendableAttachments(
     const prior = attempt.attachments[index]
     return (
       prior?.local_id === attachment.local_id &&
-      JSON.stringify(serializeSendableAttachment(prior)) ===
-        JSON.stringify(serializeSendableAttachment(attachment))
+      JSON.stringify(serializeChatFiles([prior])) ===
+        JSON.stringify(serializeChatFiles([attachment]))
     )
   })
 }
@@ -724,7 +725,7 @@ export function useChatSend(options: UseChatSendOptions) {
         options.promptAnnotationSnapshots?.(currentAnnotationDraftIds()) || [],
       ),
       attachmentRefs,
-      payloadAttachments: composerAttachments().map(attachment => ({ ...attachment })),
+      payloadAttachments: composerAttachments().map(snapshotAttachment),
       intent,
       forkBeforeMessageId: options.pendingForkBeforeMessageId.value,
       workspaceId: pendingWorkspaceForIntent(intent),
@@ -1227,7 +1228,7 @@ export function useChatSend(options: UseChatSendOptions) {
       clientMessageId: attempt.clientMessageId,
       params: structuredClone(attempt.params),
       composerText: attempt.composerText,
-      recoveryAttachments: attempt.attachments.map(attachment => ({ ...attachment })),
+      recoveryAttachments: attempt.attachments.map(snapshotAttachment),
       ...(attempt.restoreComposerOnHandoffFailure === false
         ? { restoreComposerOnFailure: false }
         : {}),
@@ -1649,7 +1650,7 @@ export function useChatSend(options: UseChatSendOptions) {
     ))
     if (missingAttachments.length > 0) {
       options.pendingAttachments.value = [
-        ...missingAttachments.map(attachment => ({ ...attachment })),
+        ...missingAttachments.map(snapshotAttachment),
         ...options.pendingAttachments.value,
       ]
     }
@@ -1746,7 +1747,7 @@ export function useChatSend(options: UseChatSendOptions) {
                   ...replayRecord,
                   params: {
                     ...replayRecord.params,
-                    attachments: sendable.map(serializeSendableAttachment),
+                    ...serializeChatFiles(sendable),
                   },
                   recoveryAttachments: refreshed,
                   updatedAt: Date.now(),
@@ -2912,7 +2913,7 @@ export function useChatSend(options: UseChatSendOptions) {
       if (forkBeforeMessageId) params.forkBeforeMessageId = forkBeforeMessageId
       if (attachmentsToSend.length > 0 || sendOpts.includeEmptyAttachments) {
         params.displayText = userText
-        params.attachments = attachmentsToSend.map(serializeSendableAttachment)
+        Object.assign(params, serializeChatFiles(attachmentsToSend))
       }
       const localSnapshots = options.promptAnnotationSnapshots?.(attemptAnnotationDraftIds) || []
       const sentSnapshots = pageAnnotationSnapshots(attemptPageContext).map((input, index) => ({
@@ -2933,7 +2934,7 @@ export function useChatSend(options: UseChatSendOptions) {
         pageContext: attemptPageContext,
         queueMode: sendOpts?.queueMode,
         text,
-        attachments: attachmentsToSend.map(attachment => ({ ...attachment })),
+        attachments: attachmentsToSend.map(snapshotAttachment),
         intent,
         initialCollaborationMode,
         initialRoutingMode,

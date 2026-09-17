@@ -3517,6 +3517,8 @@
     "aiGeneratedLabel": "Contenido generado por IA, solo como referencia.",
     "removeAttachment": "Quitar adjunto",
     "remove": "Quitar",
+    "projectFileTarget": "Archivo del proyecto: {path}",
+    "importedFileTarget": "Copia importada",
     "fileLabel": "Archivo",
     "add": "Añadir",
     "attachFiles": "Adjuntar archivos",

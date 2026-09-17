@@ -2955,6 +2955,28 @@ describe('useChatSend attachment payloads', () => {
     )
   })
 
+  it('sends live workspace references separately from imported files and preserves their displayed target', async () => {
+    const workspaceFile = { workspaceId: 'project-fixture', relativePath: 'docs/notes.md',
+      name: 'notes.md', mime: 'text/markdown', size: 14 }
+    const pendingAttachments = ref<Attachment[]>([
+      { kind: 'workspace', local_id: 1, name: workspaceFile.name,
+        mime: workspaceFile.mime, workspaceFile },
+      { kind: 'staged', local_id: 2, name: 'imported.pdf', mime: 'application/pdf',
+        file_uuid: 'fixture-upload-id' },
+    ])
+    const { api, options, rpc } = makeOptions({ pendingAttachments })
+    await api.onSend()
+    expect(rpc.call).toHaveBeenCalledWith('chat.send', expect.objectContaining({
+      workspaceFiles: [workspaceFile],
+      attachments: [{ type: 'application/pdf', mime: 'application/pdf',
+        name: 'imported.pdf', file_uuid: 'fixture-upload-id' }],
+    }))
+    expect(options.messages.value[0]?.attachments?.[0]).toMatchObject({
+      kind: 'file', name: workspaceFile.name, workspaceFile,
+    })
+    expect(pendingAttachments.value).toEqual([])
+  })
+
   it('serializes only sendable attachments and leaves failed attachments in the composer', async () => {
     const failed: Attachment = {
       kind: 'failed',

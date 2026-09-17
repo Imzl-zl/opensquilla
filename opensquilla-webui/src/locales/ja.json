@@ -3517,6 +3517,8 @@
     "aiGeneratedLabel": "AI により生成された内容です。参考情報としてご利用ください。",
     "removeAttachment": "添付を削除",
     "remove": "削除",
+    "projectFileTarget": "プロジェクトファイル: {path}",
+    "importedFileTarget": "読み込みコピー",
     "fileLabel": "ファイル",
     "add": "追加",
     "attachFiles": "ファイルを添付",

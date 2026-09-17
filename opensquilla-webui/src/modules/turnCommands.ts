@@ -1,3 +1,4 @@
+import type { WorkspaceFileReference } from '@/types/chat'
 import type { ChatPageContext } from '@/types/pageContext'
 import type { InjectionKey } from 'vue'
 import type { GatewayModelRoutingMode } from '@/types/modelRouting'
@@ -80,6 +81,7 @@ export interface TurnSendParams {
   forkBeforeMessageId?: string
   displayText?: string
   attachments?: TurnSendAttachment[]
+  workspaceFiles?: WorkspaceFileReference[]
   /** Explicit admission mode used by ordinary and queued sends. */
   queueMode?: string
   [key: string]: unknown

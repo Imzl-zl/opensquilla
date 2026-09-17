@@ -1,3 +1,4 @@
+import { normalizeWorkspaceFileReferences } from '@/utils/chat/attachments'
 import { normalizePageContext } from '@/types/pageContext'
 import {
   readTransportFailure,
@@ -120,6 +121,8 @@ function projectPendingInputItem(value: unknown): PendingInputServerItem | null 
     ...(message !== undefined ? { message } : {}),
     ...(displayText !== undefined ? { displayText } : {}),
     ...(attachments !== undefined ? { attachments } : {}),
+    ...(Array.isArray(value.workspaceFiles)
+      ? { workspaceFiles: normalizeWorkspaceFileReferences(value.workspaceFiles) } : {}),
     ...(position !== undefined ? { position } : {}),
     ...(revision !== undefined ? { revision } : {}),
     ...(requestFingerprint !== undefined ? { requestFingerprint } : {}),

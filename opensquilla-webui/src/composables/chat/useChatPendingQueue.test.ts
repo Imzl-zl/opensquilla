@@ -878,6 +878,63 @@ describe('useChatPendingQueue delivery state', () => {
     queue.cleanup()
   })
 
+  it('retains a native workspace reference through offline WAL reload and server staging', async () => {
+    const { wal, records } = memoryWal()
+    const workspaceFile = { workspaceId: 'project-fixture', relativePath: 'docs/notes.md',
+      name: 'notes.md', mime: 'text/markdown', size: 14 }
+    const original = makeQueue(undefined, () => true, undefined, undefined, {
+      pendingInputWal: wal, connectionState: ref('disconnected'),
+      deliveryIdentity: ref('fixture-gateway:owner'),
+    })
+    original.pendingAttachments.value = [{ kind: 'workspace', local_id: 1,
+      name: workspaceFile.name, mime: workspaceFile.mime, workspaceFile }]
+    await expect(original.queue.enqueuePendingInput('edit project notes', undefined, {
+      deliveryIdentity: 'fixture-gateway:owner',
+    })).resolves.toBe(true)
+    expect([...records.values()][0]?.attachments).toMatchObject([{ kind: 'workspace', workspaceFile }])
+    expect(original.pendingAttachments.value).toEqual([])
+    original.queue.cleanup()
+    const call = vi.fn(async (method: string) => method === 'sessions.pending_inputs.list'
+      ? { items: [] } : { requestFingerprint: 'fixture-fingerprint', revision: 1 })
+    const restored = makeQueue(undefined, () => true, undefined, undefined, {
+      pendingInputWal: wal, connectionState: ref('connected'),
+      deliveryIdentity: ref('fixture-gateway:owner'),
+      rpc: { call: call as LegacyQueueRpc['call'] }, hasRpcMethod: () => true,
+    })
+    try {
+      await vi.waitFor(() => expect(restored.queue.pendingQueue.value[0]?.pendingPersistenceState).toBe('staged'))
+      expect(call).toHaveBeenCalledWith('sessions.pending_inputs.enqueue', expect.objectContaining({
+        workspaceFiles: [workspaceFile], attachments: [],
+      }))
+      expect(restored.queue.pendingQueue.value[0]?.attachments).toMatchObject([{ kind: 'workspace', workspaceFile }])
+      expect([...records.values()][0]?.attachments).toMatchObject([{ kind: 'workspace', workspaceFile,
+        durable_material: true }])
+      expect(JSON.stringify([...records.values()])).not.toContain('file_uuid')
+      expect(JSON.stringify([...records.values()])).not.toContain('token')
+    } finally { restored.queue.cleanup() }
+  })
+
+  it('restores server workspace references without manufacturing upload tokens', async () => {
+    const workspaceFile = { workspaceId: 'project-fixture', relativePath: 'docs/notes.md',
+      name: 'notes.md', mime: 'text/markdown', size: 14 }
+    const call = vi.fn(async () => ({ items: [{
+      pendingInputId: 'fixture-pending', clientRequestId: 'fixture-request',
+      clientMessageId: 'fixture-message', message: 'edit project notes',
+      attachments: [], workspaceFiles: [workspaceFile], revision: 1,
+      requestFingerprint: 'fixture-fingerprint',
+    }] }))
+    const { queue } = makeQueue(undefined, () => true, undefined, undefined, {
+      rpc: { call: call as LegacyQueueRpc['call'] }, hasRpcMethod: () => true,
+    })
+    try {
+      await vi.waitFor(() => expect(queue.pendingQueue.value[0]?.attachments).toMatchObject([
+        { kind: 'workspace', workspaceFile, durable_material: true },
+      ]))
+      expect(queue.pendingQueue.value[0]?.attachments[0]).not.toHaveProperty('file_uuid')
+      expect(queue.pendingQueue.value[0]?.attachments[0]).not.toHaveProperty('file')
+    } finally { queue.cleanup() }
+  })
+
   it('writes attachment WAL before clearing and sends only durable upload tokens', async () => {
     const { wal, records } = memoryWal()
     const enqueueCalls: Record<string, unknown>[] = []

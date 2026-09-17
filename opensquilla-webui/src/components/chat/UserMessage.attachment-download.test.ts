@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick } from 'vue'
-import i18n from '@/i18n'
+import i18n, { loadLocaleMessages } from '@/i18n'
 import type { ChatRenderedMessage } from '@/types/chat'
 import type { WorkbenchResource } from '@/types/workbenchResources'
 import UserMessage from './UserMessage.vue'
@@ -30,6 +30,41 @@ beforeEach(() => {
 })
 
 describe('UserMessage attachment download', () => {
+  it('shows concise Office labels, sizes, and a localized unknown-file label', async () => {
+    await loadLocaleMessages('zh-Hans')
+    i18n.global.locale.value = 'zh-Hans'
+    const attachments = [
+      {
+        ...message.attachments[0],
+        name: 'sample.docx',
+        mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        size: 2048,
+      },
+      {
+        ...message.attachments[0],
+        displayId: 'attachment-2',
+        renderKey: 'attachment-2',
+        name: 'sample',
+        mime: 'application/octet-stream',
+      },
+    ]
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const app = createApp(UserMessage, {
+      message: { ...message, attachments },
+      stripTimePrefix: (value: string) => value,
+      copyMessage: async () => true,
+      downloadAttachment: async () => true,
+    })
+    app.use(i18n)
+    app.mount(host)
+    await nextTick()
+
+    expect(Array.from(host.querySelectorAll('.msg-file-chip__meta'), el => el.textContent))
+      .toEqual(['DOCX · 2 KB', '文件'])
+    app.unmount()
+  })
+
   it.each([true, false])('uses the general edit capability to open HTML: %s', async (edit) => {
     const attachment = {
       ...message.attachments[0],

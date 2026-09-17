@@ -117,7 +117,7 @@
               </button>
             </span>
           </span>
-          <span v-else class="msg-file-resource">
+          <span v-else class="msg-file-resource msg-file-resource--file">
             <button
               type="button"
               class="msg-file-chip"
@@ -231,6 +231,7 @@ import { promptAnnotationTargetLabel } from '@/utils/chat/promptAnnotationPresen
 import type { PromptAnnotationSnapshot } from '@/types/promptAnnotations'
 import type { WorkbenchResource } from '@/types/workbenchResources'
 import { isImageDisplayAttachment } from '@/utils/chat/attachments'
+import { fileTypeLabel } from '@/utils/fileType'
 import {
   isProcessRestartOutcome,
   turnOutcomePresentation,
@@ -392,9 +393,7 @@ async function downloadAttachment(attachment: DisplayAttachment) {
 }
 
 function attachmentMeta(attachment: DisplayAttachment): string {
-  const mime = attachment.mime || 'attachment'
-  const subtype = mime.includes('/') ? mime.split('/').pop() || mime : mime
-  const label = (subtype.includes('.') ? subtype.split('.').pop() || subtype : subtype).toUpperCase()
+  const label = fileTypeLabel(attachment, t('chat.fileLabel'))
   // Same meta idiom as artifact file cards: `TYPE · N KB` (utils/chat/artifacts.ts).
   const size = Number(attachment.size)
   if (!Number.isFinite(size) || size <= 0) return label
@@ -954,9 +953,15 @@ function activateAttachment(attachment: DisplayAttachment) {
 
 .msg-file-resource {
   display: inline-flex;
+  min-width: 0;
   max-width: 100%;
   align-items: center;
   gap: .25rem;
+}
+
+.msg-file-resource--file {
+  /* The minimum belongs to the whole resource, including its download action. */
+  min-width: min(15rem, 100%);
 }
 
 .msg-file-resource__actions {
@@ -1007,9 +1012,10 @@ function activateAttachment(attachment: DisplayAttachment) {
 .msg-file-chip {
   appearance: none;
   display: inline-flex;
+  flex: 1 1 auto;
   align-items: center;
   gap: 0.625rem;
-  min-width: min(15rem, 100%);
+  min-width: 0;
   max-width: min(100%, 24rem);
   padding: 0.4375rem 0.875rem 0.4375rem 0.4375rem;
   border: 1px solid var(--msg-obj-border);
