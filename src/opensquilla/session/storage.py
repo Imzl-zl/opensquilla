@@ -94,7 +94,6 @@ from opensquilla.session.plans import (
     PlanConflictError,
     PlanRunConflictError,
     PlanValidationError,
-    checkpoint_plan_progress,
     prepare_plan_revision,
     prepare_plan_run,
 )
@@ -7253,70 +7252,6 @@ class SessionStorage:
             assert updated is not None
             return updated
 
-    async def checkpoint_plan_run(
-        self,
-        run_id: str,
-        *,
-        expected_state_revision: int,
-        step_id: str,
-        step_status: str,
-        next_step_id: str | None = None,
-        expected_active_task_id: str | None = None,
-        reason: str | None = None,
-    ) -> PlanRunRecord:
-        """Translate a legacy checkpoint into descriptive task progress atomically.
-
-        The version and owner fences remain authoritative. A checkpoint cannot
-        advance execution, release task ownership, block work or finish a run.
-        """
-        async with self._write_transaction("checkpoint_plan_run") as conn:
-            run = await self._load_plan_run_for_cas(
-                conn, run_id=run_id, expected_state_revision=expected_state_revision,
-            )
-            if run.status != PlanRunStatus.RUNNING.value or not run.active_task_id:
-                raise PlanRunConflictError(f"cannot checkpoint a {run.status} plan run")
-            if (
-                expected_active_task_id is not None
-                and run.active_task_id != expected_active_task_id
-            ):
-                raise PlanRunConflictError("plan run is owned by another task")
-            async with conn.execute(
-                "SELECT * FROM agent_tasks WHERE task_id = ? AND session_key = ?",
-                (run.active_task_id, run.session_key),
-            ) as cur:
-                row = await cur.fetchone()
-            if row is None or row["status"] != AgentTaskStatus.RUNNING.value:
-                raise PlanRunConflictError("Checkpoint requires the current running task")
-            task = AgentTaskRecord(**_deserialize_row(dict(row)))
-            metadata = (task.details or {}).get("metadata") or {}
-            if metadata.get("plan_run_id") != run_id:
-                raise PlanRunConflictError("plan run is not attached to its owning task")
-            revision = await self._select_plan_revision_on_conn(conn, run.plan_revision_id)
-            if revision is None:
-                raise PlanRunConflictError("The proposed plan revision no longer exists")
-            previous = metadata.get("progress") or {}
-            prior_steps = previous.get("steps")
-            if prior_steps is None:
-                prior_steps = [
-                    {"step": state["title"], "status": (
-                        state["status"] if state["status"] in {"completed", "in_progress"}
-                        else "pending"
-                    )}
-                    for state in run.step_states
-                ]
-            steps = checkpoint_plan_progress(
-                revision.steps, prior_steps, step_id=step_id, step_status=step_status,
-                next_step_id=next_step_id, reason=reason,
-            )
-            await self._update_task_progress_on_conn(
-                conn, run.active_task_id, session_key=run.session_key,
-                session_id=run.session_id, session_epoch=run.session_epoch,
-                steps=steps, explanation=reason,
-            )
-            updated = await self._select_plan_run_on_conn(conn, run_id)
-            assert updated is not None
-            return updated
-
     async def complete_plan_run(
         self,
         run_id: str,
@@ -7362,73 +7297,6 @@ class SessionStorage:
                     run_id,
                     expected_state_revision,
                     expected_active_task_id,
-                ),
-            ) as cur:
-                changed = cur.rowcount or 0
-            if changed == 0:
-                raise PlanRunConflictError("plan run state changed before the update")
-            updated = await self._select_plan_run_on_conn(conn, run_id)
-            assert updated is not None
-            return updated
-
-    async def reopen_completed_plan_run(
-        self,
-        run_id: str,
-        *,
-        expected_state_revision: int,
-        reason: str,
-    ) -> PlanRunRecord:
-        """Reopen a completed run at its first step as paused.
-
-        Recovery-only transition for goal-driven runs whose generic settle
-        path completed the run before the goal continuation driver could
-        terminalize it: the goal ledger row is left stranded as "running"
-        while the driver refuses to operate on a terminal run. Reopening at
-        the first step restores the resumable ``goal_turn_finished`` anchor
-        so the driver/recovery can parse the last turn's marker and apply the
-        correct terminal outcome.
-        """
-
-        reason = reason.strip()
-        if not reason:
-            raise PlanValidationError("reopen reason is required")
-        async with self._write_transaction("reopen_completed_plan_run") as conn:
-            run = await self._load_plan_run_for_cas(
-                conn,
-                run_id=run_id,
-                expected_state_revision=expected_state_revision,
-            )
-            if run.status != PlanRunStatus.COMPLETED.value:
-                raise PlanRunConflictError(
-                    f"cannot reopen a {run.status} plan run"
-                )
-            if not run.step_states:
-                raise PlanRunConflictError("plan run has no steps to reopen")
-            states = [dict(state) for state in run.step_states]
-            states[0]["status"] = "in_progress"
-            states[0].pop("reason", None)
-            timestamp = _now_ms()
-            async with conn.execute(
-                """
-                UPDATE plan_runs
-                SET status = 'paused',
-                    step_states = ?,
-                    current_step_id = ?,
-                    state_revision = state_revision + 1,
-                    active_task_id = NULL,
-                    pause_reason = ?,
-                    terminal_reason = NULL,
-                    finished_at = NULL,
-                    updated_at = ?
-                WHERE run_id = ? AND state_revision = ?
-                """,
-                (
-                    _serialize(states),
-                    str(states[0].get("step_id") or ""),
-                    reason,
-                    timestamp,
-                    run_id,
-                    expected_state_revision,
                 ),
             ) as cur:
                 changed = cur.rowcount or 0

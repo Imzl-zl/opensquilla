@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -29,6 +31,8 @@ from opensquilla.session.storage import (
     PlanImplementationSessionBusyError,
     SessionStorage,
 )
+from opensquilla.tools.builtin.plan_control import plan_run_checkpoint, update_plan
+from opensquilla.tools.types import SafeToolError, ToolContext, current_tool_context
 
 SESSION_KEY = "agent:main:webchat:plans"
 SESSION_ID = "session-plans"
@@ -145,8 +149,28 @@ def _task(task_id: str) -> AgentTaskRecord:
     )
 
 
+@asynccontextmanager
+async def _plan_tool_context(storage: SessionStorage, run: PlanRunRecord):
+    async def update(steps, explanation):
+        return await storage.update_task_progress(
+            run.active_task_id, session_key=run.session_key,
+            session_id=run.session_id, session_epoch=run.session_epoch,
+            steps=steps, explanation=explanation,
+        )
+
+    revision = await storage.get_plan_revision(run.plan_revision_id)
+    token = current_tool_context.set(ToolContext(
+        task_id=run.active_task_id, plan_storage=storage, plan_revision=revision,
+        plan_run_id=run.run_id, update_progress=update,
+    ))
+    try:
+        yield
+    finally:
+        current_tool_context.reset(token)
+
+
 async def _checkpoint_progress(storage: SessionStorage, run_id: str, **kwargs):
-    """Seed the ordinary running task required by descriptive progress writes."""
+    """Seed historical fixture ownership, then invoke the actual legacy tool."""
     run = await storage.get_plan_run(run_id)
     assert run is not None and run.active_task_id is not None
     task = await storage.get_agent_task(run.active_task_id)
@@ -155,11 +179,11 @@ async def _checkpoint_progress(storage: SessionStorage, run_id: str, **kwargs):
     details = dict(task.details or {}) if task else {}
     details["metadata"] = {**details.get("metadata", {}), "plan_run_id": run_id}
     await storage.update_agent_task(
-        run.active_task_id,
-        status=AgentTaskStatus.RUNNING,
-        details=details,
+        run.active_task_id, status=AgentTaskStatus.RUNNING, details=details,
     )
-    return await storage.checkpoint_plan_run(run_id, **kwargs)
+    async with _plan_tool_context(storage, run):
+        await plan_run_checkpoint(**kwargs)
+    return await storage.get_plan_run(run_id)
 
 
 async def test_collaboration_mode_is_user_controlled_with_cas(
@@ -314,19 +338,13 @@ async def test_plan_run_progress_is_server_authoritative_and_cas_guarded(
     assert running.state_revision == 1
 
     with pytest.raises(PlanRunConflictError, match="state changed"):
-        await _checkpoint_progress(
-            storage,
-            running.run_id,
-            expected_state_revision=0,
-            step_id="step-1",
-            step_status="completed",
+        await storage.complete_plan_run(
+            running.run_id, expected_state_revision=0, expected_active_task_id="task-1",
         )
 
     advanced = await _checkpoint_progress(
         storage,
         running.run_id,
-        expected_state_revision=1,
-        expected_active_task_id="task-1",
         step_id="step-1",
         step_status="completed",
     )
@@ -340,8 +358,6 @@ async def test_plan_run_progress_is_server_authoritative_and_cas_guarded(
     final_checkpoint = await _checkpoint_progress(
         storage,
         running.run_id,
-        expected_state_revision=2,
-        expected_active_task_id="task-1",
         step_id="implement",
         step_status="completed",
         reason="all_steps_completed",
@@ -381,26 +397,23 @@ async def test_checkpoint_allows_out_of_order_and_reopening_without_advancing_ex
     later = await _checkpoint_progress(
         storage,
         running.run_id,
-        expected_state_revision=running.state_revision,
         step_id="implement",
         step_status="completed",
         next_step_id="not-an-execution-control",
     )
     assert [step["status"] for step in later.step_states] == ["pending", "completed"]
-    reopened = await _checkpoint_progress(
-        storage,
-        later.run_id,
-        expected_state_revision=later.state_revision,
-        step_id="implement",
-        step_status="in_progress",
-    )
+    async with _plan_tool_context(storage, later):
+        await update_plan([
+            {"step": "Inspect the current behavior", "status": "pending"},
+            {"step": "Implement the change", "status": "in_progress"},
+        ])
+    reopened = await storage.get_plan_run(later.run_id)
     assert [step["status"] for step in reopened.step_states] == ["pending", "in_progress"]
     assert reopened.status == PlanRunStatus.RUNNING
     assert reopened.active_task_id == "task-1"
     blocked = await _checkpoint_progress(
         storage,
         reopened.run_id,
-        expected_state_revision=reopened.state_revision,
         step_id="implement",
         step_status="blocked",
         reason="Waiting for a dependency",
@@ -455,136 +468,65 @@ async def test_checkpoint_requires_live_attached_task_and_preserves_dynamic_prog
     revision = await storage.create_plan_revision(_revision(), expected_parent_revision_id=None)
     queued = await storage.start_plan_run(_run("run-checkpoint-owner", revision.revision_id))
     run = await storage.mark_plan_run_running(
-        queued.run_id,
-        expected_state_revision=0,
-        active_task_id="checkpoint-owner",
+        queued.run_id, expected_state_revision=0, active_task_id="checkpoint-owner",
     )
-    kwargs = dict(
-        expected_state_revision=run.state_revision, step_id="implement", step_status="completed"
-    )
-    with pytest.raises(PlanRunConflictError, match="current running task"):
-        await storage.checkpoint_plan_run(run.run_id, **kwargs)
-    await storage.create_agent_task(
-        _task("checkpoint-owner").model_copy(
-            update={
-                "status": AgentTaskStatus.RUNNING,
-                "details": {"metadata": {}},
-            }
+    async with _plan_tool_context(storage, run):
+        with pytest.raises(SafeToolError, match="attached plan run"):
+            await plan_run_checkpoint("implement", "completed")
+        await storage.create_agent_task(_task("checkpoint-owner").model_copy(
+            update={"status": AgentTaskStatus.RUNNING, "details": {"metadata": {}}},
+        ))
+        with pytest.raises(SafeToolError, match="attached plan run"):
+            await plan_run_checkpoint("implement", "completed")
+        await storage.update_agent_task(
+            "checkpoint-owner", details={"metadata": {"plan_run_id": run.run_id}},
         )
-    )
-    with pytest.raises(PlanRunConflictError, match="not attached"):
-        await storage.checkpoint_plan_run(run.run_id, **kwargs)
-    await storage.update_agent_task(
-        "checkpoint-owner",
-        details={
-            "metadata": {
-                "plan_run_id": run.run_id,
-            }
-        },
-    )
-    await storage.update_task_progress(
-        "checkpoint-owner",
-        session_key=SESSION_KEY,
-        session_id=SESSION_ID,
-        session_epoch=0,
-        steps=[
+        await update_plan([
             {"step": "New verification discovered during execution", "status": "in_progress"},
             {"step": "Implement the change", "status": "pending"},
-        ],
-    )
-    current = await storage.get_plan_run(run.run_id)
-    updated = await storage.checkpoint_plan_run(
-        current.run_id,
-        **{**kwargs, "expected_state_revision": current.state_revision},
-    )
-    task = await storage.get_agent_task("checkpoint-owner")
-    progress = task.details["metadata"]["progress"]
-    assert progress["revision"] == 2
-    assert progress["steps"] == [
-        {"step": "New verification discovered during execution", "status": "in_progress"},
-        {"step": "Implement the change", "status": "completed"},
-    ]
-    assert updated.status == PlanRunStatus.RUNNING
-    assert task.status == AgentTaskStatus.RUNNING
-    await storage.update_agent_task(task.task_id, status=AgentTaskStatus.SUCCEEDED)
-    with pytest.raises(PlanRunConflictError, match="current running task"):
-        await storage.checkpoint_plan_run(
-            updated.run_id,
-            **{**kwargs, "expected_state_revision": updated.state_revision},
-        )
+        ])
+        result = json.loads(await plan_run_checkpoint("implement", "completed"))
+        task = await storage.get_agent_task("checkpoint-owner")
+        progress = task.details["metadata"]["progress"]
+        assert result["progress"] == progress
+        assert progress["revision"] == 2
+        assert progress["steps"] == [
+            {"step": "New verification discovered during execution", "status": "in_progress"},
+            {"step": "Implement the change", "status": "completed"},
+        ]
+        assert result["plan_run"]["status"] == "running"
+        assert task.status == AgentTaskStatus.RUNNING
+        await storage.update_agent_task(task.task_id, status=AgentTaskStatus.SUCCEEDED)
+        with pytest.raises(ValueError, match="current running task"):
+            await plan_run_checkpoint("implement", "completed")
 
 
 async def test_legacy_checkpoint_tool_uses_shared_progress_and_keeps_running(
     storage: SessionStorage,
 ) -> None:
-    import json
-
-    from opensquilla.tools.builtin.plan_control import plan_run_checkpoint
-    from opensquilla.tools.types import (
-        RetryableToolInputError,
-        ToolContext,
-        current_tool_context,
-    )
+    from opensquilla.tools.types import RetryableToolInputError
 
     revision = await storage.create_plan_revision(_revision(), expected_parent_revision_id=None)
     queued = await storage.start_plan_run(_run("run-tool", revision.revision_id))
     run = await storage.mark_plan_run_running(
-        queued.run_id,
-        expected_state_revision=0,
-        active_task_id="checkpoint-tool",
+        queued.run_id, expected_state_revision=0, active_task_id="checkpoint-tool",
     )
-    await storage.create_agent_task(
-        _task("checkpoint-tool").model_copy(
-            update={
-                "status": AgentTaskStatus.RUNNING,
-                "details": {"metadata": {"plan_run_id": run.run_id}},
-            }
-        )
-    )
-
-    async def update(steps, explanation):
-        return await storage.update_task_progress(
-            "checkpoint-tool",
-            session_key=SESSION_KEY,
-            session_id=SESSION_ID,
-            session_epoch=0,
-            steps=steps,
-            explanation=explanation,
-        )
-
-    await update(
-        [
+    await storage.create_agent_task(_task("checkpoint-tool").model_copy(update={
+        "status": AgentTaskStatus.RUNNING,
+        "details": {"metadata": {"plan_run_id": run.run_id}},
+    }))
+    async with _plan_tool_context(storage, run):
+        await update_plan([
             {"step": revision.steps[0]["title"], "status": "completed"},
             {"step": revision.steps[1]["title"], "status": "pending"},
-        ],
-        None,
-    )
-    # An old/resumed task can have only the durable PlanRun projection.
-    await storage.update_agent_task(
-        "checkpoint-tool",
-        details={
-            "metadata": {
-                "plan_run_id": run.run_id,
-            }
-        },
-    )
-    token = current_tool_context.set(
-        ToolContext(
-            task_id="checkpoint-tool",
-            plan_storage=storage,
-            plan_revision=revision,
-            plan_run_id=run.run_id,
-            update_progress=update,
+        ])
+        # An old/resumed task can have only the durable PlanRun projection.
+        await storage.update_agent_task(
+            "checkpoint-tool", details={"metadata": {"plan_run_id": run.run_id}},
         )
-    )
-    try:
-        result = json.loads(
-            await plan_run_checkpoint(
-                "implement",
-                "blocked",
-                reason="Waiting for a dependency",
-            )
-        )
+        result = json.loads(await plan_run_checkpoint(
+            "implement", "blocked", reason="Waiting for a dependency",
+        ))
         assert result["progress"]["explanation"] == "Waiting for a dependency"
         assert result["plan_run"]["status"] == "running"
         assert result["plan_run"]["activeTaskId"] == "checkpoint-tool"
@@ -592,8 +534,6 @@ async def test_legacy_checkpoint_tool_uses_shared_progress_and_keeps_running(
         assert result["progress"]["steps"][-1]["status"] == "pending"
         with pytest.raises(RetryableToolInputError, match="unknown proposed step"):
             await plan_run_checkpoint("missing", "completed")
-    finally:
-        current_tool_context.reset(token)
 
 
 async def test_resuming_paused_or_blocked_run_clears_stale_terminal_reason(
@@ -661,8 +601,6 @@ async def test_legacy_skipped_checkpoint_preserves_reason_in_shared_progress(
     advanced = await _checkpoint_progress(
         storage,
         running.run_id,
-        expected_state_revision=1,
-        expected_active_task_id="task-1",
         step_id="step-1",
         step_status="skipped",
         reason="The repository already satisfies this prerequisite.",
@@ -765,8 +703,6 @@ async def test_same_revision_resume_reuses_progress_and_rebinds_task(
     advanced = await _checkpoint_progress(
         storage,
         running.run_id,
-        expected_state_revision=running.state_revision,
-        expected_active_task_id="task-1",
         step_id="step-1",
         step_status="completed",
     )
@@ -811,16 +747,12 @@ async def test_delivery_ready_run_can_resume_without_reopening_completed_steps(
     advanced = await _checkpoint_progress(
         storage,
         running.run_id,
-        expected_state_revision=running.state_revision,
-        expected_active_task_id="goal-task-1",
         step_id="step-1",
         step_status="completed",
     )
     delivery_ready = await _checkpoint_progress(
         storage,
         advanced.run_id,
-        expected_state_revision=advanced.state_revision,
-        expected_active_task_id="goal-task-1",
         step_id="implement",
         step_status="completed",
     )
@@ -964,16 +896,12 @@ async def test_restart_reconciles_plan_run_with_terminal_owner(
             current = await _checkpoint_progress(
                 storage,
                 current.run_id,
-                expected_state_revision=current.state_revision,
-                expected_active_task_id=task_id,
                 step_id="step-1",
                 step_status="completed",
             )
             current = await _checkpoint_progress(
                 storage,
                 current.run_id,
-                expected_state_revision=current.state_revision,
-                expected_active_task_id=task_id,
                 step_id="implement",
                 step_status="completed",
             )
@@ -1080,8 +1008,6 @@ async def test_storage_reopen_reconciles_terminal_owner_plan_run(
         current = await _checkpoint_progress(
             first,
             current.run_id,
-            expected_state_revision=current.state_revision,
-            expected_active_task_id=task_id,
             step_id=step_id,
             step_status="completed",
         )

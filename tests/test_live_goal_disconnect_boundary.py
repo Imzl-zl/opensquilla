@@ -13,8 +13,9 @@ class ReachedDisconnectedObservationError(Exception):
     pass
 
 
-async def test_background_case_waits_for_delayed_server_unregister_after_client_close(
-    tmp_path, monkeypatch,
+@pytest.mark.parametrize("premature_auto", [False, True])
+async def test_background_case_checks_actual_server_disconnect_boundary(
+    tmp_path, monkeypatch, premature_auto,
 ):
     case = live.LiveCase(tmp_path, "deepseek", "deepseek-flash", {})
     case.process = SimpleNamespace(poll=lambda: None)
@@ -61,12 +62,21 @@ async def test_background_case_waits_for_delayed_server_unregister_after_client_
         assert not checking.done()
         assert reads == 1 and registry.get("synthetic-client") is not None
         assert server_gate.evidence()["roots_at_disconnect"] is None
+        if premature_auto:
+            case.guard.claim("root_turns", 4, turn_id="premature-auto")
         registry.unregister("synthetic-client")
         server_gate.after_unregister(registry)
-        with pytest.raises(ReachedDisconnectedObservationError):
-            await checking
-        assert case.assertions["background_disconnected_before_auto"]
-        assert case.evidence["background_disconnect_boundary"]["roots_at_disconnect"] == 1
+        if premature_auto:
+            with pytest.raises(live.CaseFailureError, match="background_disconnected_before_auto"):
+                await checking
+            assert reads == 1
+        else:
+            with pytest.raises(ReachedDisconnectedObservationError):
+                await checking
+            assert case.assertions["background_disconnected_before_auto"]
+        assert case.evidence["background_disconnect_boundary"]["roots_at_disconnect"] == (
+            2 if premature_auto else 1
+        )
     finally:
         if not checking.done():
             checking.cancel()
@@ -105,21 +115,3 @@ async def test_disconnect_boundary_wait_fails_closed_without_server_evidence(
         await waiting
     assert original()["roots_at_disconnect"] is None
     assert guard.snapshot()["counts"].get("physical_calls", 0) == 0
-
-
-async def test_disconnect_boundary_wait_does_not_turn_wrong_root_count_into_success(tmp_path):
-    guard = live.DispatchGuard(
-        tmp_path / "guard.sqlite", provider="deepseek", model="deepseek-flash",
-    )
-    gate = live.DisconnectDispatchGate(guard)
-    gate.arm("first")
-    guard.claim("root_turns", 4, turn_id="first")
-    guard.claim("root_turns", 4, turn_id="premature-auto")
-    gate.after_unregister(ConnectionRegistry())
-    boundary = await gate.wait_for_boundary(
-        deadline=asyncio.get_running_loop().time() + 2,
-        process=SimpleNamespace(poll=lambda: None),
-    )
-    assert boundary["roots_at_disconnect"] == 2
-    assert not (boundary["roots_at_disconnect"] == 1
-                and boundary["connections_at_disconnect"] == 0)

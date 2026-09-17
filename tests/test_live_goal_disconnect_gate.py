@@ -140,10 +140,7 @@ async def test_budget_case_rejects_terminal_goal_without_waiting_out_deadline(
 ):
     case = live.LiveCase(tmp_path, "deepseek", "deepseek-chat", {})
     goal = {"status": status, "tokenBudget": 1, "budgetTokensUsed": 10, "pauseReason": None}
-    seen = []
-
-    async def send(_key, message):
-        seen.append(message)
+    async def send(_key, _message):
         return "synthetic-task"
 
     async def done(_key, _task):
@@ -158,7 +155,6 @@ async def test_budget_case_rejects_terminal_goal_without_waiting_out_deadline(
     monkeypatch.setattr(case, "until", until)
     with pytest.raises(live.CaseFailureError, match="budget_stops_goal"):
         await live.budget_case(case)
-    assert "release.txt" in seen[0] and "Do not create" in seen[0]
     assert case.assertions["budget_external_release_not_fabricated"]
 
 

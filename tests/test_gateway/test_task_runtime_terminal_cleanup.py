@@ -439,20 +439,11 @@ async def test_plan_run_completes_only_after_owning_task_succeeds() -> None:
     async def _handler(_run: Any) -> None:
         current = await storage.get_plan_run(run.run_id)
         assert current is not None
-        advanced = await storage.checkpoint_plan_run(
-            run.run_id,
-            expected_state_revision=current.state_revision,
-            expected_active_task_id=task_id,
-            step_id="inspect",
-            step_status="completed",
-        )
-        final_checkpoint = await storage.checkpoint_plan_run(
-            run.run_id,
-            expected_state_revision=advanced.state_revision,
-            expected_active_task_id=task_id,
-            step_id="implement",
-            step_status="completed",
-        )
+        await _run.envelope.runtime_services["update_progress"]([
+            {"step": "Inspect", "status": "completed"},
+            {"step": "Implement", "status": "completed"},
+        ])
+        final_checkpoint = await storage.get_plan_run(run.run_id)
         observed_after_final_checkpoint.append(
             (
                 final_checkpoint.status,
@@ -484,7 +475,7 @@ async def test_plan_run_completes_only_after_owning_task_succeeds() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failed_delivery_after_final_checkpoint_remains_resumable() -> None:
+async def test_failed_delivery_after_completed_progress_remains_resumable() -> None:
     session_key = "agent-1::plan-runtime-delivery-failure"
     task_id = "task-plan-runtime-delivery-failure"
     storage, run = await _make_durable_plan_run(
@@ -496,20 +487,11 @@ async def test_failed_delivery_after_final_checkpoint_remains_resumable() -> Non
     async def _handler(_run: Any) -> None:
         current = await storage.get_plan_run(run.run_id)
         assert current is not None
-        advanced = await storage.checkpoint_plan_run(
-            run.run_id,
-            expected_state_revision=current.state_revision,
-            expected_active_task_id=task_id,
-            step_id="inspect",
-            step_status="completed",
-        )
-        final_checkpoint = await storage.checkpoint_plan_run(
-            run.run_id,
-            expected_state_revision=advanced.state_revision,
-            expected_active_task_id=task_id,
-            step_id="implement",
-            step_status="completed",
-        )
+        await _run.envelope.runtime_services["update_progress"]([
+            {"step": "Inspect", "status": "completed"},
+            {"step": "Implement", "status": "completed"},
+        ])
+        final_checkpoint = await storage.get_plan_run(run.run_id)
         assert final_checkpoint.status == "running"
         assert final_checkpoint.current_step_id is None
         raise RuntimeError("artifact delivery failed")
@@ -603,13 +585,15 @@ async def test_resumed_plan_run_progress_is_injected_into_provider_prompt() -> N
         expected_state_revision=run.state_revision,
         active_task_id=first_task_id,
     )
-    advanced = await storage.checkpoint_plan_run(
-        run.run_id,
-        expected_state_revision=running.state_revision,
-        expected_active_task_id=first_task_id,
-        step_id="inspect",
-        step_status="completed",
+    await storage.update_task_progress(
+        first_task_id, session_key=running.session_key, session_id=running.session_id,
+        session_epoch=running.session_epoch,
+        steps=[
+            {"step": "Inspect", "status": "completed"},
+            {"step": "Implement", "status": "pending"},
+        ],
     )
+    advanced = await storage.get_plan_run(run.run_id)
     paused = await storage.pause_plan_run(
         run.run_id,
         expected_state_revision=advanced.state_revision,

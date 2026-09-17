@@ -1168,6 +1168,27 @@ def _python_fixture_arguments(
 def _direct_verification_command(arguments: Any, workspace: Path) -> bool:
     return _python_fixture_arguments(arguments, workspace, "verify.py") == []
 
+
+def _tool_response(
+    records: Sequence[dict[str, Any]], request: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Require one later receipt owned by this task and tool call."""
+    call_id = (request.get("payload") or {}).get("tool_use_id")
+    sequence = request.get("seq")
+    if not isinstance(call_id, str) or not call_id or not isinstance(sequence, int):
+        return None
+    matches = [
+        row for row in records
+        if row.get("kind") == "tool_response"
+        and row.get("turn_id") == request.get("turn_id")
+        and (row.get("payload") or {}).get("tool_use_id") == call_id
+    ]
+    if len(matches) != 1:
+        return None
+    response = matches[0]
+    return response if isinstance(response.get("seq"), int) and response["seq"] > sequence else None
+
+
 def verification_evidence(
     records: Sequence[dict[str, Any]],
     turn_id: str,
@@ -1187,10 +1208,6 @@ def verification_evidence(
         }
     rows.sort(key=lambda r: r["seq"])
     requests = [r for r in rows if r.get("kind") == "tool_request"]
-    responses: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        if row.get("kind") == "tool_response":
-            responses.setdefault(row["payload"].get("tool_use_id"), []).append(row)
     writes = [
         r
         for r in requests
@@ -1203,9 +1220,8 @@ def verification_evidence(
     ]
     write_done = []
     for request in writes:
-        matches = responses.get(request["payload"].get("tool_use_id"), [])
-        if len(matches) == 1 and matches[0]["seq"] > request["seq"]:
-            write_done.append(matches[0]["seq"])
+        if response := _tool_response(rows, request):
+            write_done.append(response["seq"])
     first_write = min((r["seq"] for r in writes), default=None)
     last_write_done = max(write_done, default=None)
     samples = []
@@ -1226,10 +1242,9 @@ def verification_evidence(
         opaque_exec_before_write |= not direct and (
             first_write is None or request["seq"] < first_write
         )
-        matches = responses.get(payload.get("tool_use_id"), [])
-        if len(matches) != 1 or matches[0]["seq"] <= request["seq"]:
+        response = _tool_response(rows, request)
+        if response is None:
             continue
-        response = matches[0]
         result = response["payload"].get("result", "")
         if not isinstance(result, str):
             continue
@@ -1501,24 +1516,16 @@ def effect_evidence(
         if expected_turn is None or len(actions[action]) != 1:
             return False
         request = actions[action][0]
-        if request.get("turn_id") != expected_turn or not isinstance(request.get("seq"), int):
+        if request.get("turn_id") != expected_turn:
             return False
-        matches = [
-            r
-            for r in records
-            if r.get("kind") == "tool_response"
-            and r.get("turn_id") == expected_turn
-            and (r.get("payload") or {}).get("tool_use_id") == request["payload"].get("tool_use_id")
-        ]
-        if len(matches) != 1 or not isinstance(matches[0].get("seq"), int):
+        response = _tool_response(records, request)
+        if response is None:
             return False
-        response = matches[0]
         payload = response.get("payload") or {}
         result = payload.get("result")
         marker = "RECORDED" if action == "record" else "FINISHED"
         return bool(
-            response["seq"] > request["seq"]
-            and not payload.get("is_error")
+            not payload.get("is_error")
             and isinstance(result, str)
             and re.match(r"exit_code=0\r?\n", result)
             and marker in result.splitlines()
@@ -1747,39 +1754,15 @@ def _plan_stop_child_binding(records: Sequence[dict[str, Any]], parent: str) -> 
 
 
 def _plan_stop_child_exec(arguments: Any, workspace: Path) -> bool:
-    if not isinstance(arguments, dict) or not isinstance(arguments.get("command"), str):
+    rest = _python_fixture_arguments(arguments, workspace, "child_wait.py")
+    if rest is None or len(rest) > 1:
         return False
-    if any(marker in arguments["command"] for marker in ("$", "`", "\n", "\r")):
-        return False
+    if not rest:
+        return True
     try:
-        lexer = shlex.shlex(arguments["command"], posix=True, punctuation_chars=True)
-        lexer.whitespace_split, lexer.commenters = True, ""
-        parts = list(lexer)
-        cwd = Path(arguments.get("workdir") or workspace)
-        cwd = cwd if cwd.is_absolute() else workspace / cwd
-        if len(parts) >= 3 and parts[0] == "cd":
-            target = Path(parts[1])
-            target = target if target.is_absolute() else cwd / target
-            if parts[2] != "&&" or target.resolve() != workspace.resolve():
-                return False
-            cwd, parts = target, parts[3:]
-        if not parts or not re.fullmatch(
-            r"(?:python(?:3(?:\.\d+)?)?|py)(?:\.exe)?", Path(parts[0]).name, flags=re.I,
-        ):
-            return False
-        rest = parts[1:]
-        while rest and rest[0] in {"-3", "-u", "-B", "-E", "-s"}:
-            rest = rest[1:]
-        if len(rest) not in {1, 2}:
-            return False
-        if len(rest) == 2:
-            maximum = float(rest[1])
-            if not math.isfinite(maximum) or not 0 < maximum <= 180:
-                return False
-        path = Path(rest[0])
-        path = path if path.is_absolute() else cwd / path
-        return path.resolve() == (workspace / "child_wait.py").resolve()
-    except (TypeError, ValueError, OSError):
+        maximum = float(rest[0])
+        return math.isfinite(maximum) and 0 < maximum <= 180
+    except ValueError:
         return False
 
 
@@ -2034,21 +2017,17 @@ def wait_file_evidence(
         path = Path(raw_path)
         if (path if path.is_absolute() else workspace / path).resolve() != target:
             continue
-        call_id = payload.get("tool_use_id")
-        if not isinstance(call_id, str) or not call_id:
+        response = _tool_response(owned, row)
+        if response is None:
             continue
-        for response in owned:
-            result = response.get("payload") or {}
-            if (
-                response.get("kind") == "tool_response"
-                and result.get("name") == "read_file"
-                and result.get("tool_use_id") == call_id
-                and int(response.get("seq", 0)) > int(row.get("seq", 0))
-                and not result.get("is_error")
-                and isinstance(result.get("result"), str)
-                and expected in result["result"]
-            ):
-                observed_at.append(int(response["seq"]))
+        result = response.get("payload") or {}
+        if (
+            result.get("name") == "read_file"
+            and not result.get("is_error")
+            and isinstance(result.get("result"), str)
+            and expected in result["result"]
+        ):
+            observed_at.append(response["seq"])
     final = max(
         (row for row in owned if row.get("kind") == "llm_response"),
         key=lambda row: int(row.get("seq", 0)),
@@ -2319,7 +2298,8 @@ async def goal_case(case: LiveCase) -> None:
     case.check("paused_goal_did_not_execute", not (case.workspace / "result.txt").exists())
     third = await case.send(
         key,
-        "Resume the existing Goal now with update_goal status active. Complete the requested "
+        "Resume the existing Goal now with update_goal status active. Use update_plan to "
+        "record the remaining work before writing the file. Complete the requested "
         "GREEN file, verify it by reading it back, and mark this same Goal complete. "
         "Do not create a new Goal.",
     )
@@ -2333,6 +2313,17 @@ async def goal_case(case: LiveCase) -> None:
         "goal_complete_verified", (case.workspace / "result.txt").read_text().strip() == "GREEN"
     )
     case.check("goal_usage_accounted", snapshot["goal"]["budgetTokensUsed"] > 0)
+    records = case.records()
+    case.check("goal_used_shared_progress", any(
+        row.get("turn_id") == third and row.get("kind") == "tool_request"
+        and row.get("payload", {}).get("name") == "update_plan"
+        and (response := _tool_response(records, row)) is not None
+        and not response["payload"].get("is_error")
+        for row in records
+    ))
+    case.check("goal_shared_progress_persisted", bool(
+        (snapshot["goal"].get("progress") or {}).get("steps")
+    ))
 
 
 async def seed_historical_budget_goal(case: LiveCase, key: str, objective: str) -> str:

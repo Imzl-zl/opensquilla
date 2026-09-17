@@ -485,11 +485,11 @@ export function useChatGoals(options: UseChatGoalsOptions) {
     return capabilitiesRequest
   }
 
-  function executionOptionsForConnection(settings: GoalExecutionOptions, existingGoal?: GoalSnapshot) {
+  function executionOptionsForConnection(settings: GoalExecutionOptions) {
     return supportedGoalExecutionOptions(settings, {
       tokenBudgetSupported: tokenBudgetSupported.value,
       backgroundExecutionSupported: backgroundExecutionSupported.value,
-    }, existingGoal)
+    })
   }
 
   let acceptedSessionId = ''

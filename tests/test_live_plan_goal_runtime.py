@@ -399,7 +399,13 @@ def test_child_usage_proof_detects_omitted_and_double_counted_child(tmp_path: Pa
         assert proof["physical_budget_tokens"] != proof["goal_budget_tokens"]
 
 
-def test_goal_suite_requires_real_child_case() -> None:
+def test_acceptance_scenarios_keep_independent_entries_and_bounded_execution() -> None:
+    assert {"plan-stop", "plan-recovery"} <= set(live.SCENARIOS["plan"])
+    for scenario in ("plan-stop", "plan-recovery", "plan-stop-child"):
+        assert live.SCENARIOS[scenario] == (scenario,)
+    assert {key: live.LIMITS[key] for key in (
+        "physical_calls", "root_turns", "children", "case_seconds",
+    )} == {"physical_calls": 24, "root_turns": 4, "children": 2, "case_seconds": 600}
     assert "childbudget" in live.SCENARIOS["goal"]
     assert {"sessions_spawn", "sessions_yield"} <= set(live.ALLOWED_TOOLS)
     assert live.MODELS["tokenrhythm"] == "deepseek-v4-pro-0813"

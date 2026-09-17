@@ -114,11 +114,9 @@ export interface GoalCapabilities {
 export function supportedGoalExecutionOptions(
   options: GoalExecutionOptions,
   capabilities: Pick<GoalCapabilities, 'tokenBudgetSupported' | 'backgroundExecutionSupported'>,
-  existingGoal?: { usageCoverage?: GoalUsageCoverage },
 ): GoalExecutionOptions {
   return {
     ...(capabilities.tokenBudgetSupported && options.tokenBudget !== undefined
-      && (options.tokenBudget === null || !existingGoal || goalUsageSupportsBudget(existingGoal.usageCoverage))
       ? { tokenBudget: options.tokenBudget } : {}),
     ...(capabilities.backgroundExecutionSupported && options.executionPolicy !== undefined
       ? { executionPolicy: options.executionPolicy } : {}),

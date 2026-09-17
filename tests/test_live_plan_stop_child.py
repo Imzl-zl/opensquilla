@@ -179,15 +179,6 @@ def test_child_stop_oracle_rejects_false_cancellation_proof(tmp_path, fault, fai
     assert "parent-key" not in json.dumps(proof) and "child-key" not in json.dumps(proof)
 
 
-def test_child_stop_is_independent_and_uses_existing_limits():
-    assert live.SCENARIOS["plan-stop-child"] == ("plan-stop-child",)
-    assert live.SCENARIOS["plan-stop"] == ("plan-stop",)
-    assert live.SCENARIOS["plan-recovery"] == ("plan-recovery",)
-    assert live.LIMITS["physical_calls"] == 24
-    assert live.LIMITS["root_turns"] == 4 and live.LIMITS["children"] == 2
-    assert live.LIMITS["case_seconds"] == 600
-
-
 async def test_stop_child_control_releases_only_after_both_cancelled(tmp_path, monkeypatch):
     # Synthetic orchestration only: this never enters run_case or reports a
     # provider pass. Real process cancellation is covered separately above.

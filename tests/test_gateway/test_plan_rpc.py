@@ -325,13 +325,10 @@ async def test_interrupted_plan_can_deliver_existing_artifact_in_a_new_turn(
         if len(contexts) == 1:
             run = await stack.storage.get_plan_run(str(context.plan_run_id))
             assert run is not None
-            run = await stack.storage.checkpoint_plan_run(
-                run.run_id,
-                expected_state_revision=run.state_revision,
-                expected_active_task_id=task.task_id,
-                step_id="inspect",
-                step_status="completed",
-            )
+            await context.update_progress([
+                {"step": "Inspect", "status": "completed"},
+                {"step": "Implement", "status": "pending"},
+            ])
             entered.set()
             if interruption == "cancelled":
                 await wait_for_cancel.wait()
@@ -431,13 +428,15 @@ async def test_question_answer_submit_implement_and_first_checkpoint_chain(
         assert current is not None
         assert current.status == "running"
         assert current.current_step_id is None
-        advanced = await storage_ref.checkpoint_plan_run(
-            run_id,
-            expected_state_revision=current.state_revision,
-            expected_active_task_id=run.task_id,
-            step_id="inspect",
-            step_status="completed",
-        )
+        from opensquilla.tools.builtin.plan_control import plan_run_checkpoint
+        from opensquilla.tools.types import current_tool_context
+
+        token = current_tool_context.set(run.envelope.tool_context(is_owner=True))
+        try:
+            await plan_run_checkpoint("inspect", "completed")
+        finally:
+            current_tool_context.reset(token)
+        advanced = await storage_ref.get_plan_run(run_id)
         checkpointed.append(str(advanced.current_step_id))
 
     monkeypatch.setattr(

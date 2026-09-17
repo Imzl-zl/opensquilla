@@ -36,7 +36,6 @@ REGISTRY_FILENAME = "registry.json"
 class MigrationCompatibility:
     code: str | None
     conflicting_ids: tuple[str, ...] = ()
-    alias_ids: tuple[str, ...] = ()
 
 
 def classify_migration_ledger(
@@ -56,18 +55,16 @@ def classify_migration_ledger(
     if not known:
         return MigrationCompatibility("state_migration_set_unavailable")
     unknown: list[str] = []
-    alias_ids: list[str] = []
     for migration_id, recorded_hash in applied.items():
         alias = aliases.get(migration_id)
         if alias is not None and alias[0] in known:
             if recorded_hash != alias[1]:
                 return MigrationCompatibility("state_migration_alias_mismatch", (migration_id,))
-            alias_ids.append(migration_id)
         elif migration_id not in known:
             unknown.append(migration_id)
     if unknown:
         return MigrationCompatibility("state_schema_too_new", tuple(sorted(unknown)))
-    return MigrationCompatibility(None, alias_ids=tuple(sorted(alias_ids)))
+    return MigrationCompatibility(None)
 
 
 def read_migration_ledger(connection: sqlite3.Connection) -> dict[str, str | None]:

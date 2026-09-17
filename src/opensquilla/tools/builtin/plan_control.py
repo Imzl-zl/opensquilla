@@ -405,10 +405,15 @@ async def plan_run_checkpoint(
     proposed = list(getattr(ctx.plan_revision, "steps", []) or [])
     task = await ctx.plan_storage.get_agent_task(ctx.task_id)
     metadata = ((task.details or {}).get("metadata") or {}) if task else {}
+    run = await ctx.plan_storage.get_plan_run(ctx.plan_run_id)
+    if (
+        run is None or run.status != "running" or run.active_task_id != ctx.task_id
+        or metadata.get("plan_run_id") != ctx.plan_run_id
+    ):
+        raise SafeToolError("Checkpoint requires the current task's attached plan run")
     prior = metadata.get("progress") or {}
     steps = prior.get("steps")
     if steps is None:
-        run = await ctx.plan_storage.get_plan_run(ctx.plan_run_id)
         source = getattr(run, "step_states", None) or proposed
         steps = [
             {"step": item["title"], "status": (

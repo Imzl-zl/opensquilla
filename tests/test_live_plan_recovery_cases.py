@@ -161,14 +161,6 @@ def test_effect_response_proof_rejects_ambiguous_or_unsuccessful_results(tmp_pat
     assert not proof["record_succeeded_on_original_turn"]
 
 
-def test_plan_suite_requires_running_stop_and_restart_cases():
-    assert {"plan-stop", "plan-recovery"} <= set(live.SCENARIOS["plan"])
-    assert live.SCENARIOS["plan-stop"] == ("plan-stop",)
-    assert live.SCENARIOS["plan-recovery"] == ("plan-recovery",)
-    assert live.LIMITS["physical_calls"] == 24
-    assert live.LIMITS["root_turns"] == 4 and live.LIMITS["children"] == 2
-
-
 class _ProtocolCase:
     """Synthetic RPC responses check orchestration only, never run_case/report success."""
 
@@ -323,7 +315,6 @@ async def test_effect_barrier_distinguishes_observation_from_replay_or_early_fin
             proof = case.evidence["effect_before_interrupt"]
             assert proof["opaque_exec_requests"] == 0
             assert proof["opaque_exec_outside_implementation"] == 1
-    assert "read_file or list_dir" in case.calls[0][1]["message"]
 
 
 @pytest.mark.parametrize("scenario", ["stop", "recovery"])

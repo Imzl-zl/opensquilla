@@ -1030,7 +1030,7 @@ async def test_publish_artifact_uses_normal_validation_without_plan_mutations(
         async def get_plan_run(self, run_id: str):
             raise AssertionError("Publication must not read Plan execution policy")
 
-        async def checkpoint_plan_run(self, *args, **kwargs):
+        async def update_task_progress(self, *args, **kwargs):
             raise AssertionError("Publication must not change progress")
 
     ctx = ToolContext(
