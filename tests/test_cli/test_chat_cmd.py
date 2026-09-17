@@ -760,7 +760,8 @@ async def test_standalone_repl_forwards_timeout(monkeypatch) -> None:
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return _FakeServices()
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -800,7 +801,8 @@ async def test_standalone_chat_uses_workspace_in_tool_context(
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return _FakeServices()
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -841,7 +843,8 @@ async def test_standalone_path_command_runs_as_plain_message(
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return _FakeServices()
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -916,7 +919,8 @@ async def test_standalone_repl_wires_memory_services_into_turnrunner(monkeypatch
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return services
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -1272,7 +1276,8 @@ async def test_standalone_repl_uses_exact_slash_tokens(monkeypatch) -> None:
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return services
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -1311,7 +1316,8 @@ async def test_standalone_slash_compact_uses_selected_physical_deployment(monkey
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return services
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -1356,7 +1362,8 @@ async def test_standalone_reset_refuses_non_empty_transcript_without_checkpoint(
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return services
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -1395,7 +1402,8 @@ async def test_standalone_compact_runs_without_memory_extraction(
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return services
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -1430,7 +1438,8 @@ async def test_standalone_slash_compact_keeps_legacy_compact_manager_compatible(
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return services
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)

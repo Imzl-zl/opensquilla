@@ -63,6 +63,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Source clients now report TUI launches and active use through the default
+  local Gateway, and short commands attempt a bounded final V2 upload before
+  exiting. Standalone CLI/TUI V1 installation reporting is enabled and daily
+  counters survive temporary sessions in a dedicated counts-only database;
+  later clients or Gateways can upload completed days. Source Gateway startup
+  results are reported without duplicating Desktop-owned startup events.
+  Existing reporting preferences, queued event identities and historical daily
+  acknowledgements remain in effect.
 - Python code execution in packaged Gateways now uses the bundled Python runtime,
   allowing tools to create documents with bundled dependencies such as `python-pptx`.
   Linux Bubblewrap also retains read-only access to the selected Python runtime
