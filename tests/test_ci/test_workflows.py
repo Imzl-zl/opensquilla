@@ -2961,6 +2961,9 @@ def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_
             "tests/functional/test_gateway_silent_reply_process_e2e.py",
             "tests/test_engine/test_cancelled_turn_segments.py",
             "tests/test_tools/test_shell_workdir.py",
+            "tests/test_sandbox/test_shell_code_network_hints.py",
+            "tests/test_tools/test_shell_runtime_preflight.py",
+            "tests/test_sandbox/test_windows_shell_process_runtime.py",
         })
         assert '"${{ matrix.shard }}" == "desktop-installer-contracts"' in preflight["run"]
         assert '"${{ matrix.shard }}" == "gateway-sqlite"' in preflight["run"]

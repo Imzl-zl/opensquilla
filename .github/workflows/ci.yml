@@ -1193,10 +1193,14 @@ jobs:
               tests/test_gateway/test_goal_registry_cleanup.py
               tests/functional/test_gateway_silent_reply_process_e2e.py
             )
+          elif [[ "${{ matrix.shard }}" == "recovery-migration" ]]; then
+            regression_args+=(tests/test_sandbox/test_windows_shell_process_runtime.py)
           elif [[ "${{ matrix.shard }}" == "core" ]]; then
             regression_args+=(
               tests/test_engine/test_cancelled_turn_segments.py
               tests/test_tools/test_shell_workdir.py
+              tests/test_sandbox/test_shell_code_network_hints.py
+              tests/test_tools/test_shell_runtime_preflight.py
             )
           fi
           uv run pytest \
@@ -1453,6 +1457,8 @@ jobs:
               tests/test_gateway/test_goal_registry_cleanup.py
               tests/functional/test_gateway_silent_reply_process_e2e.py
             )
+          elif [[ "${{ matrix.shard }}" == "recovery-migration" ]]; then
+            regression_args+=(tests/test_sandbox/test_windows_shell_process_runtime.py)
           elif [[ "${{ matrix.shard }}" == "core" ]]; then
             regression_args+=(
               tests/test_live_plan_stop_child.py
@@ -1460,6 +1466,8 @@ jobs:
               tests/test_tools/test_shell_process_isolation.py
               tests/test_engine/test_cancelled_turn_segments.py
               tests/test_tools/test_shell_workdir.py
+              tests/test_sandbox/test_shell_code_network_hints.py
+              tests/test_tools/test_shell_runtime_preflight.py
             )
           fi
           uv run pytest \

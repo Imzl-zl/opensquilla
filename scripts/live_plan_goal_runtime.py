@@ -115,6 +115,14 @@ class CaseFailureError(RuntimeError):
     """A bounded assertion failure, never a provider transcript."""
 
 
+class GatewayRequestTimeoutError(TimeoutError):
+    """A harness-owned RPC name, without server or model exception text."""
+
+    def __init__(self, method: str) -> None:
+        super().__init__("Gateway request timed out")
+        self.method = method
+
+
 class DispatchLimitError(RuntimeError):
     """Raised before dispatch when the isolated run's reviewed bound is reached."""
 
@@ -947,7 +955,10 @@ class LiveCase:
 
     async def rpc(self, method: str, **params: Any) -> dict[str, Any]:
         assert self.client is not None
-        return await self.client.call(method, params)
+        try:
+            return await self.client.call(method, params)
+        except TimeoutError as exc:
+            raise GatewayRequestTimeoutError(method) from exc
 
     async def snapshot(self, key: str) -> dict[str, Any]:
         return await self.rpc("sessions.messages.hydrate", key=key)
@@ -2764,10 +2775,11 @@ async def run_case(
     root = Path(tempfile.mkdtemp(prefix="opensquilla-live-plan-goal-"))
     os.chmod(root, 0o700)
     case: LiveCase | None = None
+    deadline: asyncio.Timeout | None = None
     result: dict[str, Any] = {"case": name, "status": "failed"}
     try:
         case = LiveCase(root, provider, model, secrets, thinking=thinking)
-        async with asyncio.timeout_at(case.deadline):
+        async with asyncio.timeout_at(case.deadline) as deadline:
             await case.start()
             if name in {"wait", "cancel"}:
                 await wait_case(case, cancel=name == "cancel")
@@ -2805,7 +2817,13 @@ async def run_case(
             "timeout" if isinstance(exc, TimeoutError) else classify_failure(str(exc))
         )
         if isinstance(exc, TimeoutError):
-            result["timeout_scope"] = "case_deadline"
+            if deadline is not None and deadline.expired():
+                result["timeout_scope"] = "case_deadline"
+            elif isinstance(exc, GatewayRequestTimeoutError):
+                result["timeout_scope"] = "gateway_rpc"
+                result["timeout_method"] = exc.method
+            else:
+                result["timeout_scope"] = "operation"
         if isinstance(exc, CaseFailureError):
             result["failed_assertion"] = str(exc)
         # Exception messages can contain model text. Never return them.

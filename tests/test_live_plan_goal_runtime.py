@@ -854,6 +854,47 @@ async def test_final_usage_capture_survives_stop_failure(monkeypatch: pytest.Mon
     assert result["failed_assertion"] == "synthetic_failure"
 
 
+@pytest.mark.parametrize("scope", ["case_deadline", "gateway_rpc", "operation"])
+async def test_timeout_report_distinguishes_expired_case_from_internal_operation(
+    monkeypatch, scope,
+):
+    base = live.LiveCase
+
+    class Client:
+        async def call(self, method, params):
+            raise TimeoutError("synthetic private response must not appear in report")
+
+    class SyntheticCase(base):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            if scope == "case_deadline":
+                self.deadline = asyncio.get_running_loop().time() - 1
+
+        async def start(self):
+            self.client = Client()
+            await asyncio.sleep(0)
+
+        async def stop(self, **kwargs):
+            return {"process_exited": True, "forced": False}
+
+    async def failed_case(case):
+        if scope == "gateway_rpc":
+            await case.rpc("sessions.messages.hydrate", key="synthetic")
+        raise TimeoutError("synthetic private response must not appear in report")
+
+    monkeypatch.setattr(live, "LiveCase", SyntheticCase)
+    monkeypatch.setattr(live, "goal_case", failed_case)
+    monkeypatch.setattr(live, "ledger_projection", lambda *_: {"rows": []})
+    monkeypatch.setattr(live, "runtime_diagnostics", lambda *_: {})
+    result = await live.run_case("goal", "deepseek", "deepseek-chat", {})
+    assert result["status"] == "failed" and result["failure_class"] == "timeout"
+    assert result["timeout_scope"] == scope
+    assert result.get("timeout_method") == (
+        "sessions.messages.hydrate" if scope == "gateway_rpc" else None
+    )
+    assert "synthetic private response" not in json.dumps(result)
+
+
 async def test_stop_at_case_deadline_kills_without_extending_execution(tmp_path: Path) -> None:
     import time
 
