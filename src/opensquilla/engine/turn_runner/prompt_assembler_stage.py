@@ -603,6 +603,7 @@ class PromptAssemblerStage:
                 inp.model,
                 turn_metadata=turn.metadata,
                 realign_routed_model=True,
+                explicit_capacity_override=True,
             )
             if prior_route_model != turn.metadata.get("executed_model") or (
                 prior_route_provider

@@ -227,6 +227,11 @@ async def _accept_turn_in_scope(
 ) -> AdmitTurnResult:
     key = command.session_key
     message_text = command.message
+    workspace_files = list(command.workspace_files)
+    if workspace_files and (not ports.is_owner or not command.source.is_web):
+        raise AdmissionError(
+            "WORKSPACE_FILES_FORBIDDEN", "Workspace files require an owner Web session.",
+        )
     page_context = command.page_context
     if page_context is not None and (not ports.is_owner or not command.source.is_web):
         raise AdmissionError(
@@ -892,6 +897,8 @@ async def _accept_turn_in_scope(
     )
     agent_id = prepared_route.agent_id
     route_envelope = prepared_route.envelope
+    if workspace_files:
+        route_envelope.metadata["workspace_files"] = workspace_files
     turn_id = prepared_route.turn_id
     mode_resolution = prepared_route.mode_resolution
     guest_profile = prepared_route.guest_profile
@@ -1127,7 +1134,10 @@ async def _accept_turn_in_scope(
 
     if prepared_acceptance:
         persist_content = message_text
-        if raw_attachments or display_text is not None or page_context is not None:
+        if (
+            raw_attachments or workspace_files
+            or display_text is not None or page_context is not None
+        ):
             if raw_attachments and hasattr(ports.sessions, "stamp_user_text"):
                 stamped = session_manager.stamp_user_text(message_text)
                 if isinstance(stamped, str):
@@ -1141,6 +1151,7 @@ async def _accept_turn_in_scope(
                 persist_enabled=persist_enabled,
                 disk_budget_bytes=disk_budget if isinstance(disk_budget, int) else None,
                 page_context=page_context,
+                **({"workspace_files": workspace_files} if workspace_files else {}),
             )
 
         assert callable(prepare_message)
@@ -1153,6 +1164,7 @@ async def _accept_turn_in_scope(
         )
         if (
             not raw_attachments
+            and not workspace_files
             and display_text is None
             and page_context is None
             and isinstance(persisted_entry.content, str)
@@ -1946,7 +1958,10 @@ async def _accept_turn_in_scope(
         )
         if callable(get_transcript):
             fresh_user_session = not bool(await get_transcript(key))
-        if raw_attachments or display_text is not None or page_context is not None:
+        if (
+            raw_attachments or workspace_files
+            or display_text is not None or page_context is not None
+        ):
             # Stamp up-front so both the stored envelope and the LLM path agree.
             if raw_attachments and hasattr(ports.sessions, "stamp_user_text"):
                 _stamped = session_manager.stamp_user_text(message_text)
@@ -1962,6 +1977,7 @@ async def _accept_turn_in_scope(
                 persist_enabled=persist_enabled,
                 disk_budget_bytes=disk_budget if isinstance(disk_budget, int) else None,
                 page_context=page_context,
+                **({"workspace_files": workspace_files} if workspace_files else {}),
             )
             legacy_persisted_entry = await session_manager.append_message(
                 key,

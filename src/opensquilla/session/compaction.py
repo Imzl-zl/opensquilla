@@ -1416,6 +1416,19 @@ def _summarize_if_envelope(
         if not isinstance(atts, list) or not atts:
             return content
         text = ""
+    if parsed.get("workspace_files"):
+        from opensquilla.workspace_files import normalize_workspace_files
+
+        try:
+            refs = normalize_workspace_files(parsed["workspace_files"])
+        except ValueError:
+            refs = []
+        if refs:
+            text += (
+                "\n[live project file references: " + json.dumps(refs, ensure_ascii=False)
+                + "; preserve workspace identities and relative paths. These name current files; "
+                "historical contents are not retained and current access must be revalidated.]"
+            )
     if not isinstance(atts, list) or not atts:
         return text
     descs: list[str] = []
@@ -1465,7 +1478,12 @@ def _prepare_compaction_image_paths(
     session_id: str,
     resolver: Callable[[dict[str, Any], str], str | None],
 ) -> list[dict[str, Any]]:
-    """Resolve retained images once, without changing canonical transcript rows."""
+    """Resolve retained attachments once without changing canonical transcript rows.
+
+    The internal image-path key also carries ordinary file paths for compatibility
+    with existing compaction projections. The resolver alone establishes that
+    bytes are available; an envelope's arbitrary path is never adopted.
+    """
     prepared: list[dict[str, Any]] = []
     for entry in entries:
         image_paths: dict[int, str] = {}

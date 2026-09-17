@@ -1617,8 +1617,11 @@ class _TurnRunnerAttachmentMessageBuilderAdapter(AttachmentMessageBuilderPort):
         session_id: str | None = None,
         persist_image_material: bool | None = None,
         image_workspace_dir: str | Path | None = None,
+        working_files: dict[str, dict[str, Any]] | None = None,
     ) -> list[Any] | None:
         image_kwargs = self._image_material_kwargs(persist_image_material, image_workspace_dir)
+        if working_files is not None:
+            image_kwargs["working_files"] = working_files
         return self._runner._build_attachment_messages(
             message,
             attachments,
@@ -1662,8 +1665,11 @@ class _TurnRunnerAttachmentMessageBuilderAdapter(AttachmentMessageBuilderPort):
         file_parse_fact_sink: Callable[[Any], object] | None = None,
         persist_image_material: bool | None = None,
         image_workspace_dir: str | Path | None = None,
+        working_files: dict[str, dict[str, Any]] | None = None,
     ) -> list[Any] | None:
         image_kwargs = self._image_material_kwargs(persist_image_material, image_workspace_dir)
+        if working_files is not None:
+            image_kwargs["working_files"] = working_files
         return self._runner._build_attachment_messages(
             message,
             attachments,

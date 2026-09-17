@@ -163,6 +163,9 @@ def test_tool_context_appends_new_runtime_fields_after_legacy_fields() -> None:
         "execution_status_snapshot",
         "router_control_routing_revision",
         "skill_install_turn",
+        "workspace_files",
+        "attachment_working_files",
+        "persist_attachment_working_files",
     ]
 
     assert ToolContext().skill_install_turn is None
@@ -232,3 +235,21 @@ def test_tool_context_appends_install_receipts_after_published_routing_fields() 
 
     assert context.router_control_routing_revision == 7
     assert context.skill_install_turn is None
+
+
+def test_tool_context_preserves_install_receipt_positional_constructor() -> None:
+    defaults = ToolContext()
+    published_fields = fields(ToolContext)[:112]
+    assert published_fields[-1].name == "skill_install_turn"
+    published_values = [getattr(defaults, item.name) for item in published_fields]
+    install_receipts = object()
+    published_values[-1] = install_receipts
+
+    context = ToolContext(*published_values)
+
+    assert context.skill_install_turn is install_receipts
+    assert context.workspace_files == []
+    assert context.attachment_working_files == {}
+    assert context.persist_attachment_working_files is None
+    assert context.workspace_files is not defaults.workspace_files
+    assert context.attachment_working_files is not defaults.attachment_working_files
