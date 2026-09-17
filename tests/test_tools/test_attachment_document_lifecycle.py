@@ -93,6 +93,88 @@ async def test_working_file_survives_rematerialization_and_new_context(tmp_path:
         current_tool_context.reset(token)
 
 
+@pytest.mark.parametrize("tool_name", ["write_file", "edit_file", "edit_source"])
+@pytest.mark.parametrize("existing_workfile", [False, True])
+@pytest.mark.parametrize("missing_binding", ["epoch", "persistence"])
+async def test_managed_attachment_edit_requires_durable_owner_before_mutation(
+    tmp_path: Path, tool_name: str, existing_workfile: bool, missing_binding: str,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    materializer = AttachmentWorkspaceMaterializer(media_root=tmp_path, workspace_dir=tmp_path)
+    original = materializer.materialize_bytes(
+        b"alpha\n", name="notes.txt", mime="text/plain", session_id="session-a",
+    )
+    assert original.rel_path
+    source = tmp_path / original.rel_path
+    work = source.parent / "working" / source.name
+    context = ToolContext(
+        workspace_dir=str(tmp_path), artifact_session_id="session-a", run_mode="full",
+    )
+    token = current_tool_context.set(context)
+    try:
+        if existing_workfile:
+            # An embedded caller without a session manager keeps its existing
+            # context-local editing support; it establishes the editable target.
+            await filesystem.edit_file(original.rel_path, "alpha", "embedded")
+            assert work.read_text() == "embedded\n"
+        context.sandbox_session_manager = object()
+        context.session_epoch = None if missing_binding == "epoch" else 0
+        persist = AsyncMock()
+        context.persist_attachment_working_files = (
+            persist if missing_binding == "epoch" else None
+        )
+        before = {path.relative_to(tmp_path): path.read_bytes()
+                  for path in tmp_path.rglob("*") if path.is_file()}
+        with pytest.raises(SafeToolError, match="current durable session"):
+            if tool_name == "write_file":
+                await filesystem.write_file(original.rel_path, "replacement\n")
+            elif tool_name == "edit_file":
+                await filesystem.edit_file(original.rel_path, "alpha", "replacement")
+            else:
+                await filesystem.edit_source(original.rel_path, "synthetic-revision", [])
+        assert {path.relative_to(tmp_path): path.read_bytes()
+                for path in tmp_path.rglob("*") if path.is_file()} == before
+        persist.assert_not_awaited()
+    finally:
+        current_tool_context.reset(token)
+
+
+async def test_managed_lookup_failure_blocks_attachment_workfile_but_allows_ordinary_file(
+    tmp_path: Path,
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from opensquilla.engine.runtime import TurnRunner
+
+    source = tmp_path / ".opensquilla/attachments/session-a/original.txt"
+    work = source.parent / "working" / source.name
+    work.parent.mkdir(parents=True)
+    source.write_text("original\n")
+    work.write_text("previous edit\n")
+    manager = MagicMock()
+    manager.get_session = AsyncMock(side_effect=OSError("synthetic session lookup failure"))
+    manager.update = AsyncMock()
+    runner = TurnRunner(provider_selector=None, session_manager=manager)
+    context = await runner._with_artifact_context(
+        ToolContext(workspace_dir=str(tmp_path), run_mode="full"), "agent:main:session-a",
+    )
+    assert context.session_epoch is None
+    assert context.persist_attachment_working_files is None
+    token = current_tool_context.set(context)
+    try:
+        for path in (source, work):
+            with pytest.raises(SafeToolError, match="current durable session"):
+                await filesystem.write_file(str(path), "replacement\n")
+        await filesystem.write_file("ordinary.txt", "allowed\n")
+    finally:
+        current_tool_context.reset(token)
+    assert source.read_text() == "original\n"
+    assert work.read_text() == "previous edit\n"
+    assert (tmp_path / "ordinary.txt").read_text() == "allowed\n"
+    manager.update.assert_not_awaited()
+
+
 @pytest.mark.asyncio
 async def test_document_read_runs_inside_filesystem_executor(
     tmp_path: Path,

@@ -476,6 +476,14 @@ async def _prepare_attachment_edit_path(
     root = _workspace_root()
     ctx = current_tool_context.get()
     if ctx is not None and root is not None:
+        if (
+            ctx.sandbox_session_manager is not None
+            and source.is_relative_to(root / ".opensquilla" / "attachments")
+            and (ctx.session_epoch is None or ctx.persist_attachment_working_files is None)
+        ):
+            raise SafeToolError(
+                "Attachment edit requires a current durable session; retry after session recovery"
+            )
         relative = source.relative_to(root).as_posix() if source.is_relative_to(root) else ""
         if any(entry.get("path") == relative for entry in ctx.attachment_working_files.values()):
             if ctx.persist_attachment_working_files is not None:
