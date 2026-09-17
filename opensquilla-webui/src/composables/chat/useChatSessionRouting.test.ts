@@ -178,6 +178,7 @@ describe('useChatSessionRouting', () => {
     isStreaming.value = true
 
     expect(api.busy.value).toBe(true)
+    expect(api.mutationBusy.value).toBe(false)
     await expect(api.setMode('llm_ensemble')).resolves.toBe(false)
     expect(api.mode.value).toBe('squilla_router')
     expect(api.initialRoutingMode.value).toBe('router')
@@ -282,12 +283,14 @@ describe('useChatSessionRouting', () => {
     const selected = api.setMode('off')
     await vi.waitFor(() => expect(pendingGets).toHaveLength(1))
     expect(api.busy.value).toBe(true)
+    expect(api.mutationBusy.value).toBe(true)
     await expect(api.setMode('llm_ensemble')).resolves.toBe(false)
     expect(pendingGets).toHaveLength(1)
     pendingGets.forEach(resolve => resolve({ key: SESSION_ONE, mode: 'ensemble', revision: 0 }))
 
     await expect(selected).resolves.toBe(true)
     expect(api.busy.value).toBe(false)
+    expect(api.mutationBusy.value).toBe(false)
     expect(call).toHaveBeenCalledWith('sessions.routing.set', {
       sessionKey: SESSION_ONE,
       mode: 'direct',

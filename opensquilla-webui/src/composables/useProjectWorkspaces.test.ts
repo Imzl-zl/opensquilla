@@ -60,6 +60,7 @@ function accessFromRpc(rpc: ReturnType<typeof useRpcStore>): GatewayAccess {
     runModePolicy: null,
     streamIdleTimeoutMs: null,
     concurrentHistoryReads: false,
+    chatSendInitialModel: false,
     detachedSessionHydration: false,
     turnCommittedEvents: false,
     subscriptionEpoch: 0,

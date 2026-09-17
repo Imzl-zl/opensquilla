@@ -4456,9 +4456,29 @@
       "usageIncompleteUnknown": "不完整 · 无法获得准确用量总计",
       "unknownProviderCalls": "{count} 次服务商调用的用量未知"
     },
+    "newTaskModel": {
+      "title": "新任务模型",
+      "catalog": "网关模型目录",
+      "gatewayDefault": "网关默认",
+      "gatewayDefaultHint": "使用网关默认模型",
+      "search": "搜索模型或服务商…",
+      "loading": "正在加载模型…",
+      "empty": "未找到匹配的模型",
+      "retry": "重试",
+      "scope": "仅用于即将创建的任务，不修改全局设置。",
+      "partialFailure": "部分服务商加载失败：{providers}",
+      "routingConflict": "指定模型需要直连模式。请选回网关默认，或手动切换路由模式。",
+      "unavailable": "当前连接无法选择模型。请重新连接，或选回网关默认。"
+    },
     "modelRouting": {
       "updateFailed": "无法切换模型路由，已恢复原设置。当前操作暂时不可用。",
-      "sessionUpdateFailed": "无法更新当前会话的模型路由：{error}"
+      "sessionUpdateFailed": "无法更新当前会话的模型路由：{error}",
+      "manage": "模型与路由设置",
+      "back": "返回路由模式",
+      "title": "模型与路由",
+      "direct": "单模型",
+      "router": "智能路由",
+      "ensemble": "多模型协作"
     },
     "routeFeedback": {
       "up": "这次路由选对了",

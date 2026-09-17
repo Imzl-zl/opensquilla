@@ -4372,9 +4372,29 @@
       "usageIncompleteUnknown": "Unvollständig · exakte Nutzungssumme nicht verfügbar",
       "unknownProviderCalls": "{count} Provider-Aufruf mit unbekannter Nutzung | {count} Provider-Aufrufe mit unbekannter Nutzung"
     },
+    "newTaskModel": {
+      "title": "Modell für die neue Aufgabe",
+      "catalog": "Modellkatalog des Gateways",
+      "gatewayDefault": "Gateway-Standard",
+      "gatewayDefaultHint": "Standardmodell des Gateways verwenden",
+      "search": "Modelle oder Anbieter suchen…",
+      "loading": "Modelle werden geladen…",
+      "empty": "Keine passenden Modelle",
+      "retry": "Erneut versuchen",
+      "scope": "Gilt nur für diese neue Aufgabe. Globale Einstellungen bleiben unverändert.",
+      "partialFailure": "Einige Anbieter konnten nicht geladen werden: {providers}",
+      "routingConflict": "Ein bestimmtes Modell erfordert direktes Routing. Wählen Sie den Standard oder ändern Sie das Routing ausdrücklich.",
+      "unavailable": "Modellauswahl für diese Verbindung nicht verfügbar. Neu verbinden oder den Standard wählen."
+    },
     "modelRouting": {
       "updateFailed": "Modell-Routing konnte nicht umgeschaltet werden – zurückgesetzt. Die Änderung ist vorübergehend nicht verfügbar.",
-      "sessionUpdateFailed": "Das Modellrouting dieses Chats konnte nicht aktualisiert werden: {error}"
+      "sessionUpdateFailed": "Das Modellrouting dieses Chats konnte nicht aktualisiert werden: {error}",
+      "manage": "Modell- und Routing-Einstellungen",
+      "back": "Zurück zu Routing-Modi",
+      "title": "Modelle und Routing",
+      "direct": "Einzelmodell",
+      "router": "Intelligentes Routing",
+      "ensemble": "Mehrere Modelle"
     },
     "routeFeedback": {
       "up": "Richtige Modellwahl für diesen Zug",

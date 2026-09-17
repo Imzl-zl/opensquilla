@@ -958,7 +958,8 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
       ...(payload.pageContext ? { pageContext: normalizePageContext(payload.pageContext)! } : {}),
       ...(draftIds.length ? { draftIds } : {}),
       attachments: (payload.attachments || []).map(a => ({ ...a })),
-      intent: payload.intent ?? null,
+      // Creation belongs to the in-flight first turn, never to its follow-ups.
+      intent: payload.intent === 'new_chat' ? null : payload.intent ?? null,
       ...(payload.confirmedPlainText ? { confirmedPlainText: true } : {}),
       ...(payload.deliveryIdentity ? { pendingDeliveryIdentity: payload.deliveryIdentity } : {}),
       ownerSessionKey: options.sessionKey.value,
@@ -1037,7 +1038,8 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
       ) return
       options.inputText.value = ''
       options.pendingAttachments.value = []
-      options.pendingSessionIntent.value = null
+      // First-turn acceptance consumes new_chat after its durable receipt.
+      if (composerIntent !== 'new_chat') options.pendingSessionIntent.value = null
       options.autoResizeTextarea()
     }
     if (typeof queued === 'boolean') {

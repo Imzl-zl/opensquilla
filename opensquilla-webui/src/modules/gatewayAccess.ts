@@ -36,6 +36,8 @@ export interface GatewayAccess {
   readonly runModePolicy: GatewayRunModePolicy | null
   readonly streamIdleTimeoutMs: number | null
   readonly concurrentHistoryReads: boolean
+  /** Gateway understands model/provider pins on the first atomic chat.send. */
+  readonly chatSendInitialModel: boolean
   readonly detachedSessionHydration: boolean
   readonly turnCommittedEvents: boolean
   readonly subscriptionEpoch: number

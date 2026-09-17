@@ -4457,9 +4457,29 @@
       "usageIncompleteUnknown": "Incomplete · exact usage total unavailable",
       "unknownProviderCalls": "{count} provider call has unknown usage | {count} provider calls have unknown usage"
     },
+    "newTaskModel": {
+      "title": "New task model",
+      "catalog": "Gateway model catalog",
+      "gatewayDefault": "Gateway default",
+      "gatewayDefaultHint": "Use the gateway’s default model",
+      "search": "Search models or providers…",
+      "loading": "Loading models…",
+      "empty": "No matching models",
+      "retry": "Retry",
+      "scope": "Applies only to this new task. Global settings stay unchanged.",
+      "partialFailure": "Some providers could not load: {providers}",
+      "routingConflict": "A specific model requires direct routing. Choose the gateway default or switch routing explicitly.",
+      "unavailable": "Model selection is unavailable on this connection. Reconnect or choose the gateway default."
+    },
     "modelRouting": {
       "updateFailed": "Couldn't switch model routing — reverted. The change is temporarily unavailable.",
-      "sessionUpdateFailed": "Couldn't update this chat's model routing: {error}"
+      "sessionUpdateFailed": "Couldn't update this chat's model routing: {error}",
+      "manage": "Model & routing settings",
+      "back": "Back to routing modes",
+      "title": "Models & routing",
+      "direct": "Single model",
+      "router": "Smart routing",
+      "ensemble": "Multi-model"
     },
     "routeFeedback": {
       "up": "Right model choice for this turn",

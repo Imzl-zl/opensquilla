@@ -96,6 +96,7 @@ async function mountCatalog() {
     runModePolicy: null,
     streamIdleTimeoutMs: null,
     concurrentHistoryReads: false,
+    chatSendInitialModel: false,
     detachedSessionHydration: false,
     turnCommittedEvents: false,
     subscriptionEpoch: 0,

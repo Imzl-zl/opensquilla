@@ -365,3 +365,88 @@ async def test_agents_rpc_update_agent_dir_camelcase_persists() -> None:
 
     assert result.error is None, result.error
     assert cfg.agents[0].agent_dir == ".opensquilla/ops-dir"
+
+
+@pytest.mark.asyncio
+async def test_models_configured_scope_adds_ready_profile_defaults_without_discovery(monkeypatch):
+    from opensquilla.gateway.config import LlmProviderProfile
+    from opensquilla.provider.selector import ProviderConfig
+
+    monkeypatch.setattr("opensquilla.provider.deployment.environment_value", lambda _name: "")
+    cfg = GatewayConfig()
+    cfg.llm_profiles = {
+        "openai": LlmProviderProfile(model="same-model", api_key="synthetic-openai"),
+        "anthropic": LlmProviderProfile(model="same-model", api_key="synthetic-anthropic"),
+        "deepseek": LlmProviderProfile(model="unavailable"),
+        "openai:work": LlmProviderProfile(model="named-only", api_key="synthetic-named"),
+        "not-a-provider": LlmProviderProfile(model="unknown", api_key="synthetic-unknown"),
+    }
+    selector = _DetailedModelSelector()
+    selector.current_config = ProviderConfig(provider="ollama", model="test-model-good")
+    ctx = RpcContext(conn_id="test", config=cfg, provider_selector=selector)
+    active = await get_dispatcher().dispatch("active", "models.list", {}, ctx)
+    assert [(m["provider"], m["id"]) for m in active.payload["models"]] == [
+        ("ollama", "test-model-good"),
+    ]
+    configured = await get_dispatcher().dispatch(
+        "configured", "models.list", {"scope": "configured"}, ctx,
+    )
+    assert configured.error is None
+    assert [(m["provider"], m["id"]) for m in configured.payload["models"]] == [
+        ("ollama", "test-model-good"), ("openai", "same-model"),
+        ("anthropic", "same-model"),
+    ]
+    assert configured.payload["models"][1]["metadata"] == {
+        "catalogScope": "configured_default",
+    }
+    assert [e["provider"] for e in configured.payload["errors"]] == ["openrouter", "deepseek"]
+    assert "synthetic" not in str(configured.payload)
+
+
+@pytest.mark.asyncio
+async def test_models_configured_scope_deduplicates_and_preserves_active_deployment(monkeypatch):
+    from opensquilla.gateway.config import LlmProviderProfile
+    from opensquilla.provider.selector import ProviderConfig
+
+    monkeypatch.setattr("opensquilla.provider.deployment.environment_value", lambda _name: "")
+    cfg = GatewayConfig()
+    cfg.llm_profiles = {
+        "ollama": LlmProviderProfile(model="stale-inactive-model"),
+        "OPENAI": LlmProviderProfile(model="configured", api_key="synthetic-openai"),
+        "openai": LlmProviderProfile(model="configured", api_key="synthetic-openai"),
+    }
+    selector = _DetailedModelSelector()
+    selector.current_config = ProviderConfig(provider="ollama", model="test-model-good")
+    result = await get_dispatcher().dispatch(
+        "r", "models.list", {"scope": "configured", "provider": "openai"},
+        RpcContext(conn_id="test", config=cfg, provider_selector=selector),
+    )
+    assert result.error is None
+    assert [(m["provider"], m["id"]) for m in result.payload["models"]] == [
+        ("openai", "configured"),
+    ]
+    assert result.payload["errors"][0]["provider"] == "openrouter"
+
+
+@pytest.mark.asyncio
+async def test_models_configured_scope_can_use_ready_profiles_without_primary(monkeypatch):
+    from opensquilla.gateway.config import LlmProviderProfile
+
+    monkeypatch.setattr("opensquilla.provider.deployment.environment_value", lambda _name: "")
+    cfg = GatewayConfig()
+    cfg.llm_profiles = {"openai": LlmProviderProfile(model="configured", api_key="synthetic-key")}
+    result = await get_dispatcher().dispatch(
+        "r", "models.list", {"scope": "configured"}, RpcContext(conn_id="test", config=cfg),
+    )
+    assert result.error is None
+    assert [(m["provider"], m["id"]) for m in result.payload["models"]] == [
+        ("openai", "configured"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_models_catalog_rejects_unknown_scope():
+    result = await get_dispatcher().dispatch(
+        "r", "models.list", {"scope": "everything"}, RpcContext(conn_id="test"),
+    )
+    assert result.error is not None

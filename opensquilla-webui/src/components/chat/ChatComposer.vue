@@ -249,38 +249,6 @@
               <span>{{ t('chat.codingMode.activeLabel') }}</span>
               <Icon name="x" :size="12" aria-hidden="true" />
             </button>
-            <div
-              v-if="sessionRoutingAvailable"
-              ref="modelRoutingAnchorEl"
-              class="chat-settings-anchor"
-            >
-              <button
-                class="btn btn--icon btn--ghost chat-model-routing-btn"
-                :class="[
-                  `chat-model-routing-btn--${sessionRoutingMode}`,
-                  { 'is-active': modelRoutingOpen || sessionRoutingMode !== 'off' },
-                ]"
-                :title="t('chat.composer.sessionModelRouting')"
-                :aria-label="t('chat.composer.sessionModelRouting')"
-                :aria-expanded="modelRoutingOpen ? 'true' : 'false'"
-                :aria-disabled="sessionRoutingControlBlocked ? 'true' : 'false'"
-                @click="toggleModelRouting"
-              >
-                <Icon name="router" :size="17" />
-                <span
-                  v-if="showRouterNewBadge"
-                  class="chat-model-routing-btn__new"
-                  aria-hidden="true"
-                >{{ t('chat.composer.badgeNew') }}</span>
-              </button>
-              <ChatComposerModelRouting
-                v-if="modelRoutingOpen"
-                :model-routing-mode="sessionRoutingMode"
-                :busy="sessionRoutingBusy || sessionRoutingControlBlocked"
-                @close="modelRoutingOpen = false"
-                @set-session-routing-mode="emit('setSessionRoutingMode', $event)"
-              />
-            </div>
             <div ref="runModeAnchorEl" class="chat-settings-anchor chat-run-mode-anchor">
               <button
                 class="btn btn--icon btn--ghost chat-run-mode-btn"
@@ -396,6 +364,54 @@
             @set-mode="emit('setCollaborationMode', $event)"
           />
           <div class="chat-input-actions chat-input-actions--right">
+            <div
+              v-if="modelRoutingVisible"
+              ref="modelRoutingAnchorEl"
+              class="chat-settings-anchor"
+            >
+              <button
+                class="btn btn--ghost chat-model-routing-btn"
+                :class="[
+                  `chat-model-routing-btn--${sessionRoutingMode}`,
+                  { 'is-active': modelRoutingOpen || sessionRoutingMode !== 'off' },
+                ]"
+                :title="t('chat.modelRouting.title')"
+                :aria-label="t('chat.modelRouting.title')"
+                :aria-expanded="modelRoutingOpen ? 'true' : 'false'"
+                :aria-disabled="sessionRoutingControlBlocked ? 'true' : 'false'"
+                @click="toggleModelRouting"
+              >
+                <Icon name="router" :size="17" />
+                <span class="chat-model-routing-btn__label">{{ modelRoutingTriggerLabel }}</span>
+                <Icon name="chevronDown" :size="12" />
+                <span
+                  v-if="showRouterNewBadge"
+                  class="chat-model-routing-btn__new"
+                  aria-hidden="true"
+                >{{ t('chat.composer.badgeNew') }}</span>
+              </button>
+              <ChatComposerModelRouting
+                v-if="modelRoutingOpen"
+                ref="modelRoutingPanelRef"
+                :anchor="modelRoutingAnchorEl"
+                :model-routing-mode="sessionRoutingMode"
+                :busy="sessionRoutingBusy || sessionRoutingControlBlocked || newTaskModelDisabledReason === 'busy'"
+                :routing-available="sessionRoutingAvailable"
+                :new-task-model-available="newTaskModelAvailable"
+                :new-task-models="newTaskModels"
+                :new-task-model-selection="newTaskModelSelection"
+                :new-task-models-loading="newTaskModelsLoading"
+                :new-task-models-error="newTaskModelsError"
+                :new-task-models-provider-errors="newTaskModelsProviderErrors"
+                :new-task-model-disabled-reason="newTaskModelDisabledReason"
+                @close="closeModelRouting"
+                @select-new-task-model="emit('selectNewTaskModel', $event)"
+                @refresh-new-task-models="emit('refreshNewTaskModels')"
+                @open-model-settings="openModelSettings"
+                @set-session-routing-mode="emit('setSessionRoutingMode', $event)"
+              />
+            </div>
+
             <Transition name="composer-ctl" mode="out-in">
               <button
                 v-if="canStop"
@@ -471,6 +487,8 @@ import ChatComposerModelRouting from '@/components/chat/ChatComposerModelRouting
 import ChatComposerPlanMode from '@/components/chat/ChatComposerPlanMode.vue'
 import ChatComposerRunMode from '@/components/chat/ChatComposerRunMode.vue'
 import type { Attachment } from '@/types/chat'
+import type { ModelDescriptor, ProviderListError } from '@/modules/providerConfiguration'
+import { useDialogLayer } from '@/composables/useDialogA11y'
 import type { ModelRoutingMode } from '@/types/modelRouting'
 import type { SandboxRunMode } from '@/types/sandbox'
 import type { CollaborationMode } from '@/types/plans'
@@ -513,6 +531,13 @@ const props = withDefaults(defineProps<{
   sessionRoutingBusy: boolean
   sessionRoutingControlBlocked?: boolean
   sessionRoutingAvailable?: boolean
+  newTaskModelAvailable?: boolean
+  newTaskModels?: readonly ModelDescriptor[]
+  newTaskModelSelection?: { model: string; provider: string } | null
+  newTaskModelsLoading?: boolean
+  newTaskModelsError?: string | null
+  newTaskModelsProviderErrors?: readonly ProviderListError[]
+  newTaskModelDisabledReason?: 'routing' | 'busy' | 'unavailable' | null
   codingModeEnabled?: boolean
   codingModeSettingsBusy?: boolean
   addMenuAvoidElement?: HTMLElement | null
@@ -569,6 +594,9 @@ const emit = defineEmits<{
   setBusySendMode: [mode: 'queue' | 'steer']
   setRunMode: [mode: SandboxRunMode]
   setSessionRoutingMode: [mode: ModelRoutingMode]
+  selectNewTaskModel: [selection: { model: string; provider: string } | null]
+  refreshNewTaskModels: []
+  openModelSettings: []
   setCodingModeEnabled: [enabled: boolean]
   setCollaborationMode: [mode: CollaborationMode]
   armGoal: []
@@ -626,6 +654,25 @@ function onTextareaInput(event: Event) {
 const fileInputEl = ref<HTMLInputElement | null>(null)
 const addMenuOpen = ref(false)
 const modelRoutingOpen = ref(false)
+const modelRoutingPanelRef = ref<{ element: () => HTMLElement | null } | null>(null)
+const modelRoutingVisible = computed(() => Boolean(props.sessionRoutingAvailable || props.newTaskModelAvailable || props.newTaskModelSelection))
+const modelRoutingTriggerLabel = computed(() => {
+  if (props.sessionRoutingMode === 'squilla_router') return t('chat.modelRouting.router')
+  if (props.sessionRoutingMode === 'llm_ensemble') return t('chat.modelRouting.ensemble')
+  const pin = props.newTaskModelSelection
+  if (pin) return props.newTaskModels?.find(model => model.id === pin.model && model.provider === pin.provider)?.name || pin.model
+  return props.newTaskModelAvailable ? t('chat.newTaskModel.gatewayDefault') : t('chat.modelRouting.direct')
+})
+useDialogLayer(modelRoutingOpen)
+watch(modelRoutingVisible, visible => { if (!visible) modelRoutingOpen.value = false })
+function closeModelRouting(restoreFocus = true) {
+  modelRoutingOpen.value = false
+  if (restoreFocus) nextTick(() => modelRoutingAnchorEl.value?.querySelector<HTMLButtonElement>('button')?.focus())
+}
+function openModelSettings() {
+  closeModelRouting(false)
+  emit('openModelSettings')
+}
 const moreActionsOpen = ref(false)
 const editingAnnotationId = ref('')
 const annotationDraftBody = ref('')
@@ -717,7 +764,8 @@ function closeOpenPopoversFromOutside(event: PointerEvent) {
   ) {
     moreActionsOpen.value = false
   }
-  if (modelRoutingOpen.value && !eventInsideRoot(event, modelRoutingAnchorEl.value)) {
+  if (modelRoutingOpen.value && !eventInsideRoot(event, modelRoutingAnchorEl.value)
+    && !eventInsideRoot(event, modelRoutingPanelRef.value?.element() ?? null)) {
     modelRoutingOpen.value = false
   }
   if (runModeOpen.value && !eventInsideRoot(event, runModeAnchorEl.value)) {
@@ -741,6 +789,7 @@ function toggleModelRouting() {
   modelRoutingOpen.value = !modelRoutingOpen.value
   if (modelRoutingOpen.value) {
     dismissRouterNewBadge()
+    emit('refreshNewTaskModels')
     addMenuOpen.value = false
     runModeOpen.value = false
     moreActionsOpen.value = false
@@ -1723,10 +1772,21 @@ button.attachment-chip__primary:focus-visible {
 }
 
 .chat-model-routing-btn {
+  gap: 5px;
+  max-width: min(230px, 40vw);
+  padding-inline: 8px;
+  width: auto;
   position: relative;
   border-color: transparent;
   background: transparent;
   color: var(--text-muted);
+}
+
+.chat-model-routing-btn__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
 }
 
 .chat-model-routing-btn__new {

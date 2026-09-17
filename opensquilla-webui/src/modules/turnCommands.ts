@@ -77,6 +77,9 @@ export interface TurnSendParams {
   workspaceId?: string
   collaborationMode?: CollaborationMode
   initialRoutingMode?: GatewayModelRoutingMode
+  /** Explicit model/provider pin for atomic creation of a new task only. */
+  initialModel?: string
+  initialProvider?: string
   forkBeforeMessageId?: string
   displayText?: string
   attachments?: TurnSendAttachment[]

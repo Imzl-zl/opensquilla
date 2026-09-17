@@ -289,6 +289,8 @@ export function useChatSessionRouting(options: UseChatSessionRoutingOptions) {
     mode,
     revision,
     busy: controlBusy,
+    // Freezing a first-turn draft selection must not prevent durable follow-ups.
+    mutationBusy: computed(() => busy.value),
     modeAppliesNextTurn,
     hasAuthoritativeSnapshot,
     initialRoutingMode,

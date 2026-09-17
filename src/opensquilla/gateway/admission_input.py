@@ -26,6 +26,26 @@ def _optional_string(params: dict[str, Any], *names: str) -> str | None:
     return None
 
 
+def _initial_model_pin(params: dict[str, Any], camel: str, snake: str) -> str | None:
+    values: list[str | None] = []
+    for name in (camel, snake):
+        if name not in params:
+            continue
+        value = params[name]
+        if value is not None:
+            if not isinstance(value, str) or not value.strip() or len(value) > 512:
+                raise ValueError(
+                    f"params.{name} must be a non-empty string of at most 512 characters"
+                )
+            value = value.strip()
+            if camel == "initialProvider":
+                value = value.lower()
+        values.append(value)
+    if values and any(value != values[0] for value in values[1:]):
+        raise ValueError(f"{camel} and {snake} must match")
+    return values[0] if values else None
+
+
 def normalized_source_hint(params: dict[str, Any]) -> dict[str, Any]:
     hint = params.get("_source")
     source = dict(hint) if isinstance(hint, dict) else {}
@@ -214,6 +234,18 @@ def decode_admit_turn(
     # The durable receipt identifies original material, not the shared guarded
     # text shown for every large paste. Application normalization runs later.
     fingerprint = dict(fingerprint_params or params)
+    initial_model = _initial_model_pin(params, "initialModel", "initial_model")
+    initial_provider = _initial_model_pin(params, "initialProvider", "initial_provider")
+    if initial_provider is not None and initial_model is None:
+        raise ValueError("initialProvider requires initialModel")
+    for camel, snake, value in (
+        ("initialModel", "initial_model", initial_model),
+        ("initialProvider", "initial_provider", initial_provider),
+    ):
+        fingerprint.pop(camel, None)
+        fingerprint.pop(snake, None)
+        if value is not None:
+            fingerprint[camel] = value
     if page_context is not None:
         fingerprint["pageContext"] = page_context
     if retired_input:
@@ -276,5 +308,7 @@ def decode_admit_turn(
             "collaborationMode", params.get("collaboration_mode")
         ),
         initial_routing_mode=cast(InitialRoutingMode | None, routing),
+        initial_model=initial_model,
+        initial_provider=initial_provider,
         pending_input=pending_input,
     )

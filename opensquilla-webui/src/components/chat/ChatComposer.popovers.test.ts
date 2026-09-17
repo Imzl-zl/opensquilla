@@ -57,7 +57,7 @@ async function clickMoreAction(el: HTMLElement, label: string) {
 }
 
 function expectPopover(el: HTMLElement, selector: string, visible: boolean) {
-  expect(Boolean(el.querySelector(selector))).toBe(visible)
+  expect(Boolean((selector === '.composer-model-routing' ? document.body : el).querySelector(selector))).toBe(visible)
 }
 
 beforeEach(() => {
@@ -80,7 +80,7 @@ describe('ChatComposer popovers', () => {
     app.mount(el)
     await nextTick()
 
-    const selected = el.querySelector<HTMLButtonElement>('[role="radio"][aria-checked="true"]')
+    const selected = document.body.querySelector<HTMLButtonElement>('[role="menuitemradio"][aria-checked="true"]')
     expect(selected).toBeTruthy()
     selected?.focus()
     props.busy = true
@@ -216,7 +216,7 @@ describe('ChatComposer popovers', () => {
   })
 
   it.each([
-    ["This chat's model routing", '.composer-model-routing'],
+    ["Models & routing", '.composer-model-routing'],
     ['Execution mode', '.composer-run-mode'],
   ])('closes %s on outside pointerdown', async (label, selector) => {
     const { app, el } = await mountComposer()
@@ -248,7 +248,7 @@ describe('ChatComposer popovers', () => {
 
     await clickButton(el, 'More')
     expectPopover(el, '.chat-more-actions-menu', true)
-    await clickButton(el, "This chat's model routing")
+    await clickButton(el, "Models & routing")
     expectPopover(el, '.chat-more-actions-menu', false)
     expectPopover(el, '.composer-model-routing', true)
     await clickButton(el, 'Execution mode')
@@ -265,8 +265,8 @@ describe('ChatComposer popovers', () => {
       onSetSessionRoutingMode: setMode,
     })
 
-    await clickButton(el, "This chat's model routing")
-    const option = el.querySelector<HTMLButtonElement>('[role="radio"]')
+    await clickButton(el, "Models & routing")
+    const option = document.body.querySelector<HTMLButtonElement>('[role="menuitemradio"]')
     expect(option?.getAttribute('aria-disabled')).toBe('true')
     option?.click()
     await nextTick()
@@ -311,7 +311,7 @@ describe('ChatComposer popovers', () => {
     const popovers = [
       ['Add', '.composer-add-menu'],
       ['More', '.chat-more-actions-menu'],
-      ["This chat's model routing", '.composer-model-routing'],
+      ["Models & routing", '.composer-model-routing'],
       ['Execution mode', '.composer-run-mode'],
     ] as const
     for (const [label, selector] of popovers) {

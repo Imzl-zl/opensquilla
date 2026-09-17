@@ -175,6 +175,9 @@ export function createV4GatewayAccess(source: GatewayAccessSource): GatewayAcces
     get streamIdleTimeoutMs() {
       return streamIdleTimeoutMs(source.policy)
     },
+    get chatSendInitialModel() {
+      return source.policy?.chat_send_initial_model === true
+    },
     get concurrentHistoryReads() {
       return source.policy?.concurrent_history_reads === true
     },

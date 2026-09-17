@@ -156,6 +156,7 @@ type PendingFailureReason = Literal[
     "registered-control-command",
     "display-mismatch",
     "initial-routing",
+    "initial-model",
     "session-unavailable",
     "fingerprint-required",
     "missing",
@@ -404,6 +405,8 @@ class PendingInputQueue:
             client_request_id=self._client_identity(turn.client_request_id, "clientRequestId"),
             client_message_id=self._client_identity(turn.client_message_id, "clientMessageId"),
         )
+        if turn.initial_model is not None or turn.initial_provider is not None:
+            raise PendingQueueRejectedError("initial-model")
         if turn.initial_routing_mode is not None:
             raise PendingQueueRejectedError("initial-routing")
         position = command.position

@@ -8165,3 +8165,130 @@ describe('useChatSend slash-prefixed input fall-through', () => {
     expect(rpc.call).not.toHaveBeenCalled()
   })
 })
+
+
+describe('new-task model pin delivery', () => {
+  function pinned(overrides: SendHarnessOverrides = {}) {
+    return makeOptions({
+      pendingSessionIntent: ref('new_chat'),
+      initialRoutingMode: ref(null),
+      initialModel: ref('model-a'),
+      initialProvider: ref('provider-a'),
+      ...overrides,
+    })
+  }
+
+  it('sends the selected model and effective direct route atomically, then retires its WAL', async () => {
+    const h = pinned()
+    await h.api.onSend()
+    expect(h.rpc.call).toHaveBeenCalledWith('chat.send', expect.objectContaining({
+      intent: 'new_chat', initialRoutingMode: 'direct', initialModel: 'model-a', initialProvider: 'provider-a',
+    }))
+    expect(await h.options.pendingInputWal!.listHandoffs!()).toEqual([])
+    expect(h.options.pendingSessionIntent.value).toBeNull()
+  })
+
+  it('omits creation fields for gateway default and existing-session queued inputs', async () => {
+    const defaults = pinned({ initialModel: ref(null), initialProvider: ref(null) })
+    await defaults.api.onSend()
+    expect(defaults.rpc.call.mock.calls[0]?.[1]).not.toHaveProperty('initialModel')
+    expect(defaults.rpc.call.mock.calls[0]?.[1]).not.toHaveProperty('initialProvider')
+    const existing = pinned({ pendingSessionIntent: ref(null) })
+    await existing.api.sendQueuedFollowup({ pendingUiId: 'model-followup', text: 'follow up', attachments: [], intent: null })
+    expect(existing.rpc.call.mock.calls[0]?.[1]).not.toHaveProperty('initialModel')
+    expect(existing.rpc.call.mock.calls[0]?.[1]).not.toHaveProperty('initialProvider')
+  })
+
+  it('rejects a new model pin with Router or Ensemble without rewriting their state', async () => {
+    for (const mode of ['squilla_router', 'llm_ensemble'] as const) {
+      const h = pinned({ modelRoutingMode: ref(mode) })
+      await h.api.onSend()
+      expect(h.rpc.call).not.toHaveBeenCalled()
+      expect(h.options.inputText.value).toBe('hello')
+      expect(h.options.modelRoutingMode.value).toBe(mode)
+    }
+  })
+
+  it('freezes the selected model before asynchronous preparation while preserving a changed draft', async () => {
+    let prepared!: (ready: boolean) => void
+    const prepare = vi.fn(() => new Promise<boolean>(resolve => { prepared = resolve }))
+    const initialModel = ref<string | null>('model-a')
+    const h = pinned({ initialModel, prepareAttachmentsForSend: prepare })
+    const sending = h.api.onSend()
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce())
+    initialModel.value = 'model-b'
+    prepared(true)
+    await sending
+    expect(h.rpc.call.mock.calls[0]?.[1]).toMatchObject({ initialModel: 'model-a', initialProvider: 'provider-a' })
+    expect(h.options.inputText.value).toBe('hello')
+  })
+
+  it('uses a fresh request identity when a definitely rejected draft changes model', async () => {
+    const initialModel = ref<string | null>('model-a')
+    const rpc = { call: vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error('busy'), { accepted: false, retryable: true }))
+      .mockResolvedValueOnce({ sessionKey: 'agent:main:webchat:test', task_id: 'accepted' }) }
+    const h = pinned({ initialModel, rpc })
+    await h.api.onSend()
+    initialModel.value = 'model-b'
+    await h.api.onSend()
+    const first = rpc.call.mock.calls[0]?.[1]
+    const second = rpc.call.mock.calls[1]?.[1]
+    expect(second.initialModel).toBe('model-b')
+    expect(second.clientRequestId).not.toBe(first.clientRequestId)
+    expect(await h.options.pendingInputWal!.listHandoffs!()).toEqual([])
+  })
+
+  it('replays unknown acceptance with the original model even after the draft selection changes', async () => {
+    const initialModel = ref<string | null>('model-a')
+    const rpc = { call: vi.fn()
+      .mockRejectedValueOnce(new RpcTransportError('Connection closed', null))
+      .mockResolvedValueOnce({ sessionKey: 'agent:main:webchat:test', task_id: 'accepted' }) }
+    const h = pinned({ initialModel, rpc, idempotentReplayBlockedReason: ref(null) })
+    await h.api.onSend()
+    initialModel.value = 'model-b'
+    await h.api.onSend()
+    expect(rpc.call.mock.calls[1]?.[1]).toEqual(rpc.call.mock.calls[0]?.[1])
+  })
+
+  it('recovers the pre-ACK WAL with the frozen model after a remount', async () => {
+    let accept!: (result: unknown) => void
+    const wal = memoryHandoffWal()
+    const rpc = { call: vi.fn((_method: string, _params: unknown) => new Promise(resolve => { accept = resolve })) }
+    const first = pinned({ pendingInputWal: wal, rpc })
+    const sending = first.api.onSend()
+    await vi.waitFor(() => expect(rpc.call).toHaveBeenCalledOnce())
+    const records = await wal.listHandoffs!()
+    expect(records[0]?.params).toMatchObject({ initialModel: 'model-a', initialProvider: 'provider-a' })
+    const restored = pinned({ pendingInputWal: wal, initialModel: ref('model-b') })
+    await restored.api.recoverResponseHandoffs()
+    expect(restored.rpc.call.mock.calls[0]?.[1]).toEqual(rpc.call.mock.calls[0]?.[1])
+    expect(restored.options.pendingSessionIntent.value).toBeNull()
+    accept({ sessionKey: 'agent:main:webchat:test', task_id: 'accepted' })
+    await sending
+  })
+
+  it('recovers the first hidden control with its original model and routing', async () => {
+    const storage = memoryStorage()
+    const rpc = { call: vi.fn().mockRejectedValueOnce(new RpcTransportError('Connection closed', null)) }
+    const first = pinned({ rpc, hiddenControlStorage: storage })
+    await first.api.dispatchHiddenSend('/meta launch', 'Launch', 'stable-model-hidden')
+    const stored = listHiddenControls('agent:main:webchat:test', storage)
+    expect(stored[0]?.initialSettings).toEqual({
+      intent: 'new_chat', initialRoutingMode: 'direct', initialModel: 'model-a', initialProvider: 'provider-a',
+    })
+    const restored = pinned({ hiddenControlStorage: storage, initialModel: ref('model-b'), initialRoutingMode: ref('ensemble') })
+    await restored.api.restoreHiddenControls()
+    expect(restored.rpc.call.mock.calls[0]?.[1]).toEqual(rpc.call.mock.calls[0]?.[1])
+  })
+
+  it('materializes an accepted hidden first turn before retiring its draft model selection', async () => {
+    const materializeDraftSession = vi.fn()
+    const h = pinned({ materializeDraftSession, hiddenControlStorage: memoryStorage() })
+    const result = await h.api.dispatchHiddenSend('/meta launch', 'Launch', 'first-model-hidden')
+    expect(result.status).toBe('accepted')
+    expect(materializeDraftSession).toHaveBeenCalledExactlyOnceWith(h.options.sessionKey.value)
+    expect(h.options.pendingSessionIntent.value).toBeNull()
+    expect(h.options.inputText.value).toBe('hello')
+  })
+})

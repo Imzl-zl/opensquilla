@@ -344,3 +344,47 @@ def test_model_catalog_adapter_ignores_junk_context_window_values() -> None:
         )
         adapter = _TurnRunnerModelCatalogAdapter(_catalog_runner(llm=llm))
         assert adapter.lookup("some-model").context_window == 200_000
+
+async def test_production_resolver_keeps_append_only_session_adapter_compatible() -> None:
+    from types import SimpleNamespace
+
+    from opensquilla.engine.turn_runner.harness import _TurnRunnerProviderResolverAdapter
+
+    provider, selector = object(), object()
+
+    def unexpected_deployment(*_args):
+        raise AssertionError("append-only adapters have no session deployment to resolve")
+
+    runner = SimpleNamespace(
+        _session_manager=object(), _session_deployment_resolver=unexpected_deployment,
+        _resolve_provider=lambda: (provider, selector),
+    )
+    assert await _TurnRunnerProviderResolverAdapter(runner).resolve_session_provider("session") == (
+        provider, selector, {},
+    )
+
+
+async def test_production_session_resolver_carries_only_nonsecret_pool_provenance():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from opensquilla.engine.turn_runner.harness import _TurnRunnerProviderResolverAdapter
+    from opensquilla.provider.selector import ProviderConfig
+
+    deployment = ProviderConfig(provider="openai", model="chosen", api_key="synthetic-private")
+    def resolve(_session, _inherited, metadata):
+        metadata["credential_pool"] = {"provider": "openai", "session_key": "pool-session"}
+        return deployment
+    provider, selector = object(), object()
+    runner = SimpleNamespace(
+        _session_manager=SimpleNamespace(get_session=AsyncMock(return_value=object())),
+        _provider_selector=None, _session_deployment_resolver=resolve,
+        _resolve_provider=lambda **_kwargs: (provider, selector),
+    )
+    result = await _TurnRunnerProviderResolverAdapter(runner).resolve_session_provider("session")
+    assert result[:2] == (provider, selector)
+    assert result[2] == {
+        "session_provider_applied": "openai",
+        "session_credential_pool": {"provider": "openai", "session_key": "pool-session"},
+    }
+    assert "synthetic-private" not in str(result[2])

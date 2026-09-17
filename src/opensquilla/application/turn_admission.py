@@ -71,6 +71,7 @@ class AdmitTurnResult(TypedDict, total=False):
     surfaceId: str | None
     acceptedCollaboration: AcceptedCollaboration
     collaboration: AdmissionCollaborationSnapshot
+    acceptedModel: dict[str, str | None]
     acceptedRouting: AcceptedRouting
     routing: AdmissionRoutingSnapshot
 
@@ -157,6 +158,8 @@ class AdmitTurn:
     queue_mode: str | None = None
     initial_collaboration_mode: InitialCollaborationMode | None = None
     initial_routing_mode: InitialRoutingMode | None = None
+    initial_model: str | None = None
+    initial_provider: str | None = None
     pending_input: PendingInputGuard | None = None
 
     # Only internal Plan/background producers supply these controls. Gateway

@@ -173,6 +173,8 @@ class GuestRpcPolicy:
             params = dict(params)
             params.pop("initialRoutingMode", None)
             params.pop("initial_routing_mode", None)
+            for field in ("initialModel", "initial_model", "initialProvider", "initial_provider"):
+                params.pop(field, None)
 
         if method == SESSIONS_LIST_METHOD:
             return params

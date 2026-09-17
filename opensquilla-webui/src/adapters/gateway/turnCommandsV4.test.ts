@@ -249,3 +249,24 @@ describe('v4 TurnCommands Adapter', () => {
     expect(request).toHaveBeenNthCalledWith(2, SESSIONS_PENDING_INPUTS_STEER_METHOD, expect.any(Object))
   })
 })
+
+
+describe('initial model wire identity', () => {
+  it('preserves legacy first-send recovery model and provider fields', () => {
+    expect(toWireSendParams({
+      message: 'hello', sessionKey: 'new-task', intent: 'new_chat',
+      initial_model: 'model-a', initial_provider: 'openai',
+    })).toEqual({
+      message: 'hello', sessionKey: 'new-task', intent: 'new_chat',
+      initial_model: 'model-a', initial_provider: 'openai',
+    })
+  })
+  it('prefers explicit canonical selection over legacy recovery fields', () => {
+    expect(toWireSendParams({
+      message: 'hello', sessionKey: 'new-task', initialModel: 'model-b', initialProvider: 'anthropic',
+      initial_model: 'model-a', initial_provider: 'openai',
+    })).toEqual({
+      message: 'hello', sessionKey: 'new-task', initialModel: 'model-b', initialProvider: 'anthropic',
+    })
+  })
+})

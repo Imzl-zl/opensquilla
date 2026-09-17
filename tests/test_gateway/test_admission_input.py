@@ -221,3 +221,54 @@ async def test_retired_requests_only_read_matching_durable_receipts(surface, out
             "request_session_key": key,
             "client_request_id": "request-synthetic",
         }
+
+
+@pytest.mark.parametrize("surface", ["webchat", "session"])
+@pytest.mark.parametrize("snake", [False, True])
+async def test_initial_model_pin_is_normalized_at_admission_boundary(surface, snake):
+    application = SimpleNamespace(admit=AsyncMock(return_value={"accepted": True}))
+    params = {
+        "sessionKey" if surface == "webchat" else "key": "agent:main:pin",
+        "message": "hello",
+        "intent": "new_chat",
+        "initial_model" if snake else "initialModel": " synthetic/model ",
+        "initial_provider" if snake else "initialProvider": " OpenAI ",
+    }
+    await GatewayTurnAdmissionAdapter(application).admit(params, surface=surface)
+    command = application.admit.await_args.args[0]
+    assert command.initial_model == "synthetic/model"
+    assert command.initial_provider == "openai"
+
+
+@pytest.mark.parametrize("fields", [
+    {"initialModel": ""},
+    {"initialModel": "  "},
+    {"initialModel": 42},
+    {"initialModel": "x" * 513},
+    {"initialProvider": "openai"},
+    {"initialModel": "a", "initialProvider": 42},
+    {"initialModel": "a", "initialProvider": " "},
+    {"initialModel": "a", "initial_model": "b"},
+    {"initialModel": "a", "initialProvider": "openai", "initial_provider": "anthropic"},
+])
+async def test_invalid_initial_model_pin_never_reaches_application(fields):
+    application = SimpleNamespace(admit=AsyncMock())
+    with pytest.raises(ValueError):
+        await GatewayTurnAdmissionAdapter(application).admit({
+            "sessionKey": "agent:main:pin", "message": "hello", "intent": "new_chat", **fields,
+        }, surface="webchat")
+    application.admit.assert_not_awaited()
+
+
+def test_initial_model_identity_normalizes_aliases_but_preserves_provider_and_model():
+    base = {"key": "agent:main:pin", "message": "hello", "intent": "new_chat"}
+    original = decode_admit_turn({**base, "initialModel": "a", "initialProvider": "openai"})
+    alias = decode_admit_turn({**base, "initial_model": " a ", "initial_provider": " OpenAI "})
+    assert original.request_fingerprint == alias.request_fingerprint
+    for fields in ({"initialModel": "b", "initialProvider": "openai"},
+                   {"initialModel": "a", "initialProvider": "anthropic"}, {}):
+        changed = decode_admit_turn({**base, **fields})
+        assert changed.request_fingerprint != original.request_fingerprint
+    assert decode_admit_turn(base).request_fingerprint == decode_admit_turn({
+        **base, "initialModel": None, "initialProvider": None,
+    }).request_fingerprint

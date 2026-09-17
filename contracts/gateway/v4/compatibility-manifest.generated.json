@@ -353,7 +353,7 @@
       "lifecycle": "stable",
       "name": "chat.send",
       "schema": "conversation/chat-send.schema.json",
-      "schemaSha256": "a04623e2433138dc2f4d1f7337dbb36e7fb0cd1719df5241016911c6a2a41838"
+      "schemaSha256": "eb011cec061f8684f2540a8afc67cff0847911dd113390987e71247d7542d8bf"
     },
     {
       "lifecycle": "stable",
@@ -734,7 +734,7 @@
       "lifecycle": "stable",
       "name": "models.list",
       "schema": "platform/models-list.schema.json",
-      "schemaSha256": "0b6014c8008e8836f2c063735dbd760479ff6e28426f4229816c42b4e3bcb4a5"
+      "schemaSha256": "49f8523d0402f728f9ed85bb3473b828f7c5a1a32755c090cb832bf0abed23ff"
     },
     {
       "lifecycle": "stable",
@@ -1469,10 +1469,10 @@
   "protocol": "opensquilla-websocket-json",
   "source": {
     "eventFamilyCount": 10,
-    "generatorSha256": "d2ba9f83594c975b279a95386cd247d50b6704d4b6feabd516c8d870ad827013",
+    "generatorSha256": "21d14e9a61e9e6b068b66c2713e75f259de6e107514bd421da849999638e4e84",
     "methodCount": 216,
     "schemaCount": 226,
-    "schemaTreeSha256": "acfc84425d8709c6c39362c0cce19ae186462d430a1205ef43042778b6ff983b"
+    "schemaTreeSha256": "189715c060ead400afa465b9bc92278eee15d7b8a8aa7218c953ebc5c019e1d8"
   },
   "wireVersion": 4
 }

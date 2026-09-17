@@ -279,6 +279,42 @@
             "null"
           ]
         },
+        "initialModel": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "Optional direct-routing model deployment pin, accepted only with explicit new_chat intent."
+        },
+        "initial_model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "Optional direct-routing model deployment pin, accepted only with explicit new_chat intent."
+        },
+        "initialProvider": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "Optional direct-routing model deployment pin, accepted only with explicit new_chat intent."
+        },
+        "initial_provider": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "Optional direct-routing model deployment pin, accepted only with explicit new_chat intent."
+        },
         "forkBeforeMessageId": {
           "type": [
             "string",
@@ -522,6 +558,25 @@
           },
           "description": "Legacy accepted-receipt replay only. New turns do not create or consume annotation IDs.",
           "deprecated": true
+        },
+        "acceptedModel": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "type": "string"
+            },
+            "provider": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "model",
+            "provider"
+          ]
         }
       }
     },
@@ -631,7 +686,10 @@
       "additionalProperties": false,
       "properties": {
         "pagePath": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1,
           "maxLength": 4096,
           "pattern": "\\S",

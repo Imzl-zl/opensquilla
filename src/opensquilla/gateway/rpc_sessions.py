@@ -1630,6 +1630,24 @@ def _validate_rpc_session_deployment(
         )
 
 
+def _validate_initial_session_model(
+    ctx: RpcContext,
+    *,
+    session_key: str,
+    model: str,
+    provider: str | None,
+    routing_mode: str | None,
+) -> None:
+    from opensquilla.gateway.model_routing import model_routing_snapshot
+
+    effective_mode = routing_mode or str(model_routing_snapshot(ctx.config).get("mode") or "direct")
+    if effective_mode != "direct":
+        raise ValueError("initialModel requires direct routing")
+    _validate_rpc_session_deployment(
+        ctx, session_key=session_key, model=model, provider=provider, auth_profile=None,
+    )
+
+
 def _raise_explicit_session_deployment_model_required() -> NoReturn:
     raise RpcHandlerError(
         code="INVALID_PARAMS",
@@ -5491,6 +5509,7 @@ class _GatewayAdmissionPrimitives(GatewayAdmissionRuntime):
         self.positive_int = _coerce_positive_int
         self.workspace_error = partial(map_project_workspace_error, owner=self.is_owner)
         self.validate_initial_routing = partial(model_routing_patches, ctx.config)
+        self.validate_initial_model = partial(_validate_initial_session_model, ctx)
         self._emit_disposition = partial(
             _publish_admission_disposition,
             ctx,

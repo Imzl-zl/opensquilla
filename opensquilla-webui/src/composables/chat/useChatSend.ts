@@ -65,6 +65,7 @@ import {
 } from '@/utils/chat/messageIdentity'
 import {
   type HiddenControlStorage,
+  type HiddenControlInitialSettings,
   listHiddenControls,
   persistHiddenControlResult,
   removeHiddenControl,
@@ -176,6 +177,8 @@ interface SendAttempt {
   intent: string | null
   initialCollaborationMode: CollaborationMode | null
   initialRoutingMode: GatewayModelRoutingMode | null
+  initialModel: string | null
+  initialProvider: string | null
   forkBeforeMessageId: string | null
   workspaceId: string | null
   restoreComposerOnHandoffFailure?: boolean
@@ -210,6 +213,8 @@ interface ExplicitSendPayload {
   initialCollaborationMode?: CollaborationMode | null
   pageContext?: ChatPageContext | null
   initialRoutingMode?: GatewayModelRoutingMode | null
+  initialModel?: string | null
+  initialProvider?: string | null
 }
 
 interface ComposerSnapshot {
@@ -224,6 +229,8 @@ interface ComposerSnapshot {
   workspaceId: string | null
   initialCollaborationMode: CollaborationMode | null
   initialRoutingMode: GatewayModelRoutingMode | null
+  initialModel: string | null
+  initialProvider: string | null
   queueOwnerRequestId: string | null
 }
 
@@ -432,6 +439,8 @@ function matchesRecoveredDraft(
     intent: string | null
     initialCollaborationMode: CollaborationMode | null
     initialRoutingMode: GatewayModelRoutingMode | null
+    initialModel: string | null
+    initialProvider: string | null
     forkBeforeMessageId: string | null
     workspaceId: string | null
   },
@@ -444,6 +453,8 @@ function matchesRecoveredDraft(
     attempt.intent === input.intent &&
     attempt.initialCollaborationMode === input.initialCollaborationMode &&
     attempt.initialRoutingMode === input.initialRoutingMode &&
+    attempt.initialModel === input.initialModel &&
+    attempt.initialProvider === input.initialProvider &&
     attempt.forkBeforeMessageId === input.forkBeforeMessageId &&
     attempt.workspaceId === input.workspaceId &&
     sameSendableAttachments(input.attachments, attempt)
@@ -480,6 +491,9 @@ export interface UseChatSendOptions {
   pendingSessionIntent: Ref<string | null>
   initialCollaborationMode: Readonly<Ref<CollaborationMode>>
   initialRoutingMode: Readonly<Ref<GatewayModelRoutingMode | null>>
+  initialModel?: Readonly<Ref<string | null>>
+  initialProvider?: Readonly<Ref<string | null>>
+  restoreInitialModel?: (selection: { model: string; provider: string } | null) => void
   pendingForkBeforeMessageId: Ref<string | null>
   draftIds?: Readonly<Ref<readonly string[]>>
   promptAnnotationSnapshots?: (ids: readonly string[]) => PromptAnnotationSnapshot[]
@@ -730,6 +744,8 @@ export function useChatSend(options: UseChatSendOptions) {
       workspaceId: pendingWorkspaceForIntent(intent),
       initialCollaborationMode: initialModeForIntent(intent),
       initialRoutingMode: initialRoutingModeForIntent(intent),
+      initialModel: initialModelForIntent(intent),
+      initialProvider: initialProviderForIntent(intent),
       queueOwnerRequestId: queueOwnerContext?.sessionKey === options.sessionKey.value
         ? queueOwnerContext.ownerRequestId
         : null,
@@ -760,6 +776,8 @@ export function useChatSend(options: UseChatSendOptions) {
       options.inputText.value === snapshot.inputText
       && JSON.stringify(currentAnnotationDraftIds()) === JSON.stringify(snapshot.draftIds)
       && options.pendingSessionIntent.value === snapshot.intent
+      && initialModelForIntent(snapshot.intent) === snapshot.initialModel
+      && initialProviderForIntent(snapshot.intent) === snapshot.initialProvider
       && options.pendingForkBeforeMessageId.value === snapshot.forkBeforeMessageId
       && pendingWorkspaceForIntent(options.pendingSessionIntent.value) === snapshot.workspaceId
       && options.pendingAttachments.value.length === snapshot.attachmentRefs.length
@@ -778,6 +796,8 @@ export function useChatSend(options: UseChatSendOptions) {
       initialCollaborationMode: snapshot.initialCollaborationMode,
       pageContext: snapshot.pageContext,
       initialRoutingMode: snapshot.initialRoutingMode,
+      initialModel: snapshot.initialModel,
+      initialProvider: snapshot.initialProvider,
     }
   }
 
@@ -1163,10 +1183,22 @@ export function useChatSend(options: UseChatSendOptions) {
   }
 
   function initialRoutingModeForIntent(intent: string | null): GatewayModelRoutingMode | null {
-    return intent === 'new_chat' ? options.initialRoutingMode.value : null
+    if (intent !== 'new_chat') return null
+    // A pin selected while routing is Off also freezes that effective strategy.
+    // This does not mutate either the visible selector or the gateway default.
+    return options.initialRoutingMode.value
+      ?? (options.initialModel?.value && options.modelRoutingMode.value === 'off' ? 'direct' : null)
   }
 
-  function consumeAcceptedSessionIntent(attempt: SendAttempt): void {
+  function initialModelForIntent(intent: string | null): string | null {
+    return intent === 'new_chat' ? options.initialModel?.value ?? null : null
+  }
+
+  function initialProviderForIntent(intent: string | null): string | null {
+    return intent === 'new_chat' ? options.initialProvider?.value ?? null : null
+  }
+
+  function consumeAcceptedSessionIntent(attempt: Pick<SendAttempt, 'requestSessionKey' | 'intent' | 'workspaceId'>): void {
     if (options.sessionKey.value !== attempt.requestSessionKey) return
     if (attempt.intent === 'new_chat') {
       options.materializeDraftSession?.(attempt.requestSessionKey)
@@ -1589,6 +1621,11 @@ export function useChatSend(options: UseChatSendOptions) {
     targetSessionKey: string,
   ): Promise<void> {
     if (options.sessionKey.value === record.requestSessionKey) {
+      consumeAcceptedSessionIntent({
+        requestSessionKey: record.requestSessionKey,
+        intent: record.params.intent ?? null,
+        workspaceId: record.params.workspaceId ?? null,
+      })
       const gate = beginResponseHandoff(
         record.requestSessionKey,
         record.ownerRequestId,
@@ -1661,6 +1698,12 @@ export function useChatSend(options: UseChatSendOptions) {
     }
     if (!options.pendingSessionIntent.value && typeof record.params.intent === 'string') {
       options.pendingSessionIntent.value = record.params.intent
+    }
+    if (record.params.intent === 'new_chat' && record.params.initialModel && record.params.initialProvider) {
+      options.restoreInitialModel?.({
+        model: record.params.initialModel,
+        provider: record.params.initialProvider,
+      })
     }
     options.autoResizeTextarea()
     return true
@@ -2325,6 +2368,8 @@ export function useChatSend(options: UseChatSendOptions) {
         intent: composerSnapshot.intent,
         initialCollaborationMode: composerSnapshot.initialCollaborationMode,
         initialRoutingMode: composerSnapshot.initialRoutingMode,
+        initialModel: composerSnapshot.initialModel,
+        initialProvider: composerSnapshot.initialProvider,
         forkBeforeMessageId: composerSnapshot.forkBeforeMessageId,
         workspaceId: composerSnapshot.workspaceId,
       })
@@ -2724,6 +2769,20 @@ export function useChatSend(options: UseChatSendOptions) {
     )
       ? sendOpts.payload.initialRoutingMode ?? null
       : initialRoutingModeForIntent(intent)
+    const initialModel = intent === 'new_chat'
+      ? sendOpts.payload && 'initialModel' in sendOpts.payload
+        ? sendOpts.payload.initialModel ?? null : initialModelForIntent(intent)
+      : null
+    const initialProvider = initialModel
+      ? sendOpts.payload && 'initialProvider' in sendOpts.payload
+        ? sendOpts.payload.initialProvider ?? null : initialProviderForIntent(intent)
+      : null
+    // Exact receipt recovery must retain the original payload even if today's
+    // draft route differs. A fresh pin may never silently turn routing Off.
+    if (!sendOpts.idempotentReplay && initialModel && (
+      (initialRoutingMode !== null && initialRoutingMode !== 'direct')
+      || options.modelRoutingMode.value !== 'off'
+    )) return 'not_sent'
     const initialSendableAttachments = sourceAttachments.filter(isSendableAttachment)
     const requestedPageContext = normalizePageContext(sendOpts.payload?.pageContext)
       || pageContextForAnnotations(options.promptAnnotationSnapshots?.(
@@ -2757,6 +2816,8 @@ export function useChatSend(options: UseChatSendOptions) {
           intent,
           initialCollaborationMode,
           initialRoutingMode,
+          initialModel,
+          initialProvider,
           forkBeforeMessageId,
           workspaceId,
         })
@@ -2909,6 +2970,8 @@ export function useChatSend(options: UseChatSendOptions) {
         params.collaborationMode = initialCollaborationMode
       }
       if (initialRoutingMode) params.initialRoutingMode = initialRoutingMode
+      if (initialModel) params.initialModel = initialModel
+      if (initialProvider) params.initialProvider = initialProvider
       if (forkBeforeMessageId) params.forkBeforeMessageId = forkBeforeMessageId
       if (attachmentsToSend.length > 0 || sendOpts.includeEmptyAttachments) {
         params.displayText = userText
@@ -2937,6 +3000,8 @@ export function useChatSend(options: UseChatSendOptions) {
         intent,
         initialCollaborationMode,
         initialRoutingMode,
+        initialModel,
+        initialProvider,
         forkBeforeMessageId,
         workspaceId,
         ...(sendOpts.acceptedVisibleReplay
@@ -2947,7 +3012,7 @@ export function useChatSend(options: UseChatSendOptions) {
           : {}),
         params,
       }
-      if (attempt.forkBeforeMessageId) {
+      if (attempt.forkBeforeMessageId || attempt.initialModel) {
         durableHandoffRecord = await persistResponseHandoff(
           attempt,
           sendOpts.requirePreparedHandoff,
@@ -2974,7 +3039,7 @@ export function useChatSend(options: UseChatSendOptions) {
         options.scrollToBottom()
       }
     }
-    if (attempt.forkBeforeMessageId && !durableHandoffRecord) {
+    if ((attempt.forkBeforeMessageId || attempt.initialModel) && !durableHandoffRecord) {
       durableHandoffRecord = await persistResponseHandoff(
         attempt,
         sendOpts.requirePreparedHandoff,
@@ -3051,7 +3116,7 @@ export function useChatSend(options: UseChatSendOptions) {
     }
     options.aborted.value = false
     let responseHandoff = (
-      attempt.forkBeforeMessageId
+      (attempt.forkBeforeMessageId || attempt.initialModel)
         ? beginResponseHandoff(
             requestSessionKey,
             attempt.clientRequestId,
@@ -3247,6 +3312,14 @@ export function useChatSend(options: UseChatSendOptions) {
     } catch (err: unknown) {
       const commandError = turnCommandFailure(err)
       const acceptedError = acceptedErrorInfo(err)
+      if (attempt.initialModel && !attempt.forkBeforeMessageId && commandError?.accepted === false) {
+        // A known rejection is editable again. Do not leave a submitting WAL
+        // record that could later replay an abandoned model choice on reopen.
+        if (durableHandoffRecord && await deleteResponseHandoff(durableHandoffRecord)) {
+          durableHandoffRecord = null
+          if (responseHandoff) responseHandoff.durableRecord = null
+        }
+      }
       if (!acceptedError) setAttemptPromptAnnotations(attempt, [])
       if (acceptedError && !commitAcceptedVisibleReplay({
         messageId: acceptedError.messageId,
@@ -3395,6 +3468,8 @@ export function useChatSend(options: UseChatSendOptions) {
             intent: restoredSnapshot.intent,
             initialCollaborationMode: restoredSnapshot.initialCollaborationMode,
             initialRoutingMode: restoredSnapshot.initialRoutingMode,
+            initialModel: restoredSnapshot.initialModel,
+            initialProvider: restoredSnapshot.initialProvider,
             forkBeforeMessageId: restoredSnapshot.forkBeforeMessageId,
             workspaceId: restoredSnapshot.workspaceId,
           })
@@ -3506,6 +3581,8 @@ export function useChatSend(options: UseChatSendOptions) {
         intent: null,
         initialCollaborationMode: null,
         initialRoutingMode: null,
+        initialModel: null,
+        initialProvider: null,
         forkBeforeMessageId,
         workspaceId: null,
       },
@@ -3731,6 +3808,29 @@ export function useChatSend(options: UseChatSendOptions) {
     const existing = hiddenDispatchInFlight.get(hiddenDispatchKey)
     if (existing) return existing
 
+    const existingRecord = listHiddenControls(requestSessionKey, options.hiddenControlStorage)
+      .find(item => item.clientRequestId === stableClientRequestId)
+    const hiddenIntent = requestSessionKey === options.sessionKey.value
+      && !options.stream.isStreaming.value && !hasAuthoritativeWork()
+      ? options.pendingSessionIntent.value : null
+    const routingMode = initialRoutingModeForIntent(hiddenIntent)
+    const model = initialModelForIntent(hiddenIntent)
+    const provider = model ? initialProviderForIntent(hiddenIntent) : null
+    if (!existingRecord && model && (options.modelRoutingMode.value !== 'off'
+      || (routingMode && routingMode !== 'direct'))) {
+      return Promise.resolve(hiddenDispatchResult('rejected', 'invalid_request', stableClientRequestId, requestSessionKey))
+    }
+    // Reopening or retrying a stable control uses its persisted creation input,
+    // even when the currently visible draft has changed in the meantime.
+    const initialSettings: HiddenControlInitialSettings | null | undefined = existingRecord
+      ? existingRecord.initialSettings
+      : hiddenIntent === 'new_chat' ? {
+          intent: 'new_chat',
+          ...(routingMode ? { initialRoutingMode: routingMode } : {}),
+          ...(model ? { initialModel: model } : {}),
+          ...(provider ? { initialProvider: provider } : {}),
+        } : null
+
     // Persist before either local queueing or RPC. The payload contains only
     // the already-visible control turn (never provider credentials), while its
     // stable request id lets Gateway ingress collapse response-loss retries.
@@ -3739,6 +3839,7 @@ export function useChatSend(options: UseChatSendOptions) {
       clientRequestId: stableClientRequestId,
       providerText,
       displayText,
+      ...(initialSettings !== undefined ? { initialSettings } : {}),
     }, options.hiddenControlStorage)
     if (persistResult === 'conflict' || persistResult === 'failed' || persistResult === 'invalid') {
       return Promise.resolve(hiddenDispatchResult(
@@ -3774,6 +3875,7 @@ export function useChatSend(options: UseChatSendOptions) {
       displayText,
       stableClientRequestId,
       requestSessionKey,
+      initialSettings,
     )
     hiddenDispatchInFlight.set(hiddenDispatchKey, operation)
     void operation.then(() => {
@@ -3793,6 +3895,7 @@ export function useChatSend(options: UseChatSendOptions) {
     displayText: string,
     stableClientRequestId: string,
     requestSessionKey: string,
+    initialSettings: HiddenControlInitialSettings | null | undefined,
   ): Promise<HiddenControlDispatchResult> {
     const compactInFlight = options.isCompactInFlightForCurrentSession()
     const handoffInFlight = responseHandoffBlocksCurrentSession()
@@ -3852,12 +3955,17 @@ export function useChatSend(options: UseChatSendOptions) {
       message: providerText,
       sessionKey: requestSessionKey,
     }
-    const hiddenSessionIntent = requestSessionKey === options.sessionKey.value
-      ? options.pendingSessionIntent.value
-      : null
-    const hiddenInitialRoutingMode = initialRoutingModeForIntent(hiddenSessionIntent)
+    const hiddenSessionIntent = initialSettings !== undefined
+      ? initialSettings?.intent ?? null
+      : requestSessionKey === options.sessionKey.value ? options.pendingSessionIntent.value : null
+    const hiddenInitialRoutingMode = initialSettings !== undefined
+      ? initialSettings?.initialRoutingMode ?? null : initialRoutingModeForIntent(hiddenSessionIntent)
+    const hiddenInitialModel = initialSettings?.initialModel ?? null
+    const hiddenInitialProvider = initialSettings?.initialProvider ?? null
     if (hiddenSessionIntent) params.intent = hiddenSessionIntent
     if (hiddenInitialRoutingMode) params.initialRoutingMode = hiddenInitialRoutingMode
+    if (hiddenInitialModel) params.initialModel = hiddenInitialModel
+    if (hiddenInitialProvider) params.initialProvider = hiddenInitialProvider
     if (displayText && displayText !== providerText) params.displayText = displayText
     params.source = chatSourceMetadata(options)
 
@@ -3878,6 +3986,8 @@ export function useChatSend(options: UseChatSendOptions) {
       intent: hiddenSessionIntent,
       initialCollaborationMode: null,
       initialRoutingMode: hiddenInitialRoutingMode,
+      initialModel: hiddenInitialModel,
+      initialProvider: hiddenInitialProvider,
       forkBeforeMessageId: null,
       workspaceId: null,
       params,
@@ -3910,13 +4020,7 @@ export function useChatSend(options: UseChatSendOptions) {
       attempt.acceptanceResolved = true
       attempt.acceptedTaskId = acceptedTaskId(res)
       attempt.acceptedSessionKey = res?.sessionKey || requestSessionKey
-      if (
-        hiddenSessionIntent
-        && requestSessionKey === options.sessionKey.value
-        && options.pendingSessionIntent.value === hiddenSessionIntent
-      ) {
-        options.pendingSessionIntent.value = null
-      }
+      consumeAcceptedSessionIntent(attempt)
       // A resolved chat.send response proves durable ingress acceptance. Clear
       // the browser outbox before any local session handoff work, which can
       // fail independently without making an exact-id resend necessary.
@@ -4050,13 +4154,7 @@ export function useChatSend(options: UseChatSendOptions) {
       const acceptedError = acceptedErrorInfo(err)
       const accepted = commandError?.accepted
       if (accepted === true) {
-        if (
-          hiddenSessionIntent
-          && requestSessionKey === options.sessionKey.value
-          && options.pendingSessionIntent.value === hiddenSessionIntent
-        ) {
-          options.pendingSessionIntent.value = null
-        }
+        consumeAcceptedSessionIntent(attempt)
         removeHiddenControl(
           requestSessionKey,
           stableClientRequestId,

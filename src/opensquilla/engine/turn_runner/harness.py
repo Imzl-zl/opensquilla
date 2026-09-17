@@ -170,6 +170,30 @@ class _TurnRunnerProviderResolverAdapter(ProviderResolverPort):
     def resolve_provider(self) -> tuple[Any | None, Any | None]:
         return self._runner._resolve_provider()
 
+    async def resolve_session_provider(
+        self, session_key: str,
+    ) -> tuple[Any | None, Any | None, dict[str, Any]]:
+        resolver = self._runner._session_deployment_resolver
+        manager = self._runner._session_manager
+        get_session = getattr(manager, "get_session", None)
+        if resolver is None or not callable(get_session):
+            return (*self.resolve_provider(), {})
+        session = await get_session(session_key)
+        if session is None:
+            return (*self.resolve_provider(), {})
+        selector = self._runner._provider_selector
+        inherited = getattr(selector, "current_config", None)
+        metadata: dict[str, Any] = {}
+        deployment = resolver(session, inherited, metadata)
+        if deployment is None:
+            return (*self.resolve_provider(), {})
+        # Keep pool provenance separate from router metadata: a subsequent
+        # routed leg must never park the session deployment's credential.
+        provider_metadata = {"session_provider_applied": deployment.provider}
+        if isinstance(metadata.get("credential_pool"), dict):
+            provider_metadata["session_credential_pool"] = metadata["credential_pool"]
+        return (*self._runner._resolve_provider(deployment=deployment), provider_metadata)
+
 
 class _TurnRunnerSkillCatalogResolverAdapter(SkillCatalogResolverPort):
     """Refresh and pin one immutable skill catalog for the turn."""

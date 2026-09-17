@@ -1701,12 +1701,24 @@ def _report_credential_pool_failure(
     if not turn_metadata:
         return
     pool_info = turn_metadata.get("credential_pool")
+    active_provider = str(turn_metadata.get("executed_provider") or "")
+    applied_provider = str(turn_metadata.get("routed_provider_applied") or "")
+    session_realign = (
+        turn_metadata.get("routed_provider_fallback_reason") == "explicit_model_override"
+        and isinstance(turn_metadata.get("session_credential_pool"), dict)
+    )
+    if (
+        session_realign or not isinstance(pool_info, dict)
+        or pool_info.get("provider") != applied_provider
+    ):
+        pool_info = turn_metadata.get("session_credential_pool")
+        applied_provider = str(turn_metadata.get("session_provider_applied") or "")
     if not isinstance(pool_info, dict):
         return
     pool_provider = str(pool_info.get("provider") or "")
-    if not pool_provider:
+    if not pool_provider or pool_provider != applied_provider:
         return
-    if str(turn_metadata.get("routed_provider_applied") or "") != pool_provider:
+    if active_provider and active_provider != pool_provider:
         return
     try:
         kind = classify_provider_error(
@@ -5191,8 +5203,12 @@ class TurnRunner:
         turn_growth_started_sink: GrowthMilestoneSink | None = None,
         turn_growth_succeeded_sink: GrowthMilestoneSink | None = None,
         growth_event_sink: Any | None = None,
+        session_deployment_resolver: (
+            Callable[[object, object | None, dict[str, Any]], Any | None] | None
+        ) = None,
     ) -> None:
         self._provider_selector = provider_selector
+        self._session_deployment_resolver = session_deployment_resolver
         self._tool_registry = tool_registry
         self._session_manager = session_manager
         self._skill_loader = skill_loader
@@ -6621,6 +6637,7 @@ class TurnRunner:
                         tool_defs=tool_defs,
                         effective_tool_context=tool_context,
                         tool_metadata=tool_metadata,
+                        provider_metadata=pt_out.provider_metadata,
                         session_key=session_key,
                         agent_id=agent_id,
                         turn_id=turn_id,
@@ -8368,7 +8385,9 @@ class TurnRunner:
         )
         return session_id
 
-    def _resolve_provider(self) -> tuple[Any | None, Any | None]:
+    def _resolve_provider(
+        self, *, deployment: Any | None = None,
+    ) -> tuple[Any | None, Any | None]:
         """Clone the selector and resolve provider (no shared state mutation)."""
         if self._provider_selector is None:
             return None, None
@@ -8376,9 +8395,13 @@ class TurnRunner:
         # (no API key configured); treat it like "no provider" so the turn
         # fails with the same clean no_provider error instead of raising.
         # getattr default True keeps duck-typed test selectors working.
-        if not getattr(self._provider_selector, "is_configured", True):
+        if deployment is None and not getattr(self._provider_selector, "is_configured", True):
             return None, None
         cloned = self._provider_selector.clone()
+        if deployment is not None:
+            # An explicit session deployment must never inherit another
+            # provider's fallback credentials or silently use the default.
+            cloned.pin_provider_config(deployment)
         return cloned.resolve(), cloned
 
     def _handle_runtime_warning(self, event: WarningEvent) -> WarningEvent:

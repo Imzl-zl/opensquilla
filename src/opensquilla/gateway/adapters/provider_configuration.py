@@ -164,11 +164,74 @@ def model_list_error_to_projection(error: Any) -> dict[str, Any]:
 
 
 class GatewayModelCatalogPort:
-    def __init__(self, provider_selector: Any, config: Any) -> None:
+    def __init__(
+        self, provider_selector: Any, config: Any, *, include_configured_defaults: bool = False,
+    ) -> None:
         self._provider_selector = provider_selector
         self._config = config
+        self._include_configured_defaults = include_configured_defaults
 
     async def load_model_catalog(self) -> ModelCatalogResult:
+        result = await self._load_active_catalog()
+        if not self._include_configured_defaults:
+            return result
+        # A new-task picker adds configured defaults without discovering every
+        # service or acquiring a credential-pool lease. Named auth profiles have
+        # a distinct identity and cannot be selected using just provider/model.
+        from opensquilla.provider.deployment import resolve_provider_deployment
+        from opensquilla.provider.model_catalog import shared_catalog
+        from opensquilla.provider.preset_registry import get_preset
+        from opensquilla.provider.registry import UnknownProviderError, get_provider_spec
+
+        models = list(result["models"])
+        errors = list(result["errors"])
+        seen = {(row["provider"], row["id"]) for row in models}
+        inherited = getattr(self._provider_selector, "current_config", None)
+        for key, profile in (getattr(self._config, "llm_profiles", None) or {}).items():
+            provider = str(key).strip().lower()
+            try:
+                get_provider_spec(provider)
+            except UnknownProviderError:
+                continue
+            # The active deployment remains authoritative when a stored
+            # inactive profile exists for that same provider.
+            if provider == str(getattr(inherited, "provider", "")).strip().lower():
+                continue
+            preset = get_preset(provider)
+            model = str(getattr(profile, "model", "") or "").strip()
+            model = model or (preset.default_model if preset else "")
+            resolution = resolve_provider_deployment(
+                self._config, provider, model, inherited_provider_config=inherited,
+            )
+            if not resolution.ready:
+                errors.append({
+                    "provider": provider, "kind": "deployment_unavailable",
+                    "detail": resolution.reason,
+                })
+                continue
+            if (provider, model) in seen:
+                continue
+            entry = shared_catalog().resolve_entry(model, provider=provider)
+            capabilities = ["chat"]
+            for name in ("tools", "vision", "reasoning"):
+                if getattr(entry, "supports_" + name):
+                    capabilities.append(name)
+            models.append({
+                "id": model, "name": entry.display_name or model, "provider": provider,
+                "contextWindow": entry.context_window,
+                "maxOutputTokens": entry.max_output_tokens,
+                "capabilities": capabilities,
+                "pricing": {
+                    "inputPer1k": (entry.input_cost_per_mtok or 0) / 1000,
+                    "outputPer1k": (entry.output_cost_per_mtok or 0) / 1000,
+                },
+                "source": entry.source, "reasoningFormat": entry.reasoning_format,
+                "metadata": {"catalogScope": "configured_default"},
+            })
+            seen.add((provider, model))
+        return cast(ModelCatalogResult, {"models": models, "errors": errors})
+
+    async def _load_active_catalog(self) -> ModelCatalogResult:
         from opensquilla.provider.model_capacity import (
             custom_capacity_identity,
             install_custom_capacity,

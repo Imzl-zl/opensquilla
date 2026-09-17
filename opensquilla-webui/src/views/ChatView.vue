@@ -636,9 +636,16 @@
       :run-mode-locked="runModeLocked"
       :run-mode-lock-message="t('chat.composer.runModeLocked')"
       :session-routing-mode="modelRoutingMode"
-      :session-routing-busy="modelRoutingSettingsBusy"
-      :session-routing-control-blocked="goalBusy"
+      :session-routing-busy="modelRoutingMutationBusy"
+      :session-routing-control-blocked="goalBusy || modelRoutingSettingsBusy"
       :session-routing-available="sessionRoutingAvailable"
+      :new-task-model-available="newTaskModelAvailable"
+      :new-task-models="newTaskModels"
+      :new-task-model-selection="newTaskModelSelection"
+      :new-task-models-loading="newTaskModelsLoading"
+      :new-task-models-error="newTaskModelsError"
+      :new-task-models-provider-errors="newTaskModelsProviderErrors"
+      :new-task-model-disabled-reason="newTaskModelDisabledReason"
       :coding-mode-enabled="codingModeEnabled"
       :coding-mode-settings-busy="codingModeSettingsBusy"
       :goal-draft-armed="goalDraftArmed"
@@ -678,6 +685,9 @@
       @set-busy-send-mode="busySendMode = $event"
       @set-run-mode="setComposerRunMode"
       @set-session-routing-mode="setComposerSessionRoutingMode"
+      @select-new-task-model="setComposerNewTaskModel"
+      @refresh-new-task-models="void newTaskModel.refresh()"
+      @open-model-settings="openComposerModelSettings"
       @set-coding-mode-enabled="setComposerCodingModeEnabled"
       @set-collaboration-mode="setCollaborationMode"
       @arm-goal="void activateGoalComposerMode()"
@@ -844,6 +854,7 @@ import { useChatDraftPersistence } from '@/composables/chat/useChatDraftPersiste
 import { useChatElevatedMode } from '@/composables/chat/useChatElevatedMode'
 import { useChatFeatureToggles } from '@/composables/chat/useChatFeatureToggles'
 import { useChatSessionRouting } from '@/composables/chat/useChatSessionRouting'
+import { useNewTaskModelSelection, type NewTaskModelSelection } from '@/composables/chat/useNewTaskModelSelection'
 import { SESSION_ROUTING_KEY, type SessionRouting } from '@/modules/sessionRouting'
 import { USAGE_REPORTING_KEY, type UsageReporting } from '@/modules/usageReporting'
 import { COMMAND_CATALOG_KEY, type CommandCatalog } from '@/modules/commandCatalog'
@@ -2156,22 +2167,70 @@ const chatSessionRouting = useChatSessionRouting({
 const {
   mode: modelRoutingMode,
   busy: modelRoutingSettingsBusy,
+  mutationBusy: modelRoutingMutationBusy,
   initialRoutingMode,
-  imageInputAdmission,
+  imageInputAdmission: sessionImageInputAdmission,
   imageInputAdmissionReason,
 } = chatSessionRouting
+const newTaskModel = useNewTaskModelSelection({
+  catalog: injectedProviderConfiguration,
+  sessionKey,
+  isDraft: isProvisionalDraftSession,
+  capable: computed(() => gatewayAccess.chatSendInitialModel
+    && gatewayAccess.isAvailable && gatewayAccess.isAuthenticated),
+  connectionEpoch: computed(() => gatewayAccess.subscriptionEpoch),
+  routingMode: modelRoutingMode,
+  busy: computed(() => isStreaming.value || modelRoutingSettingsBusy.value
+    || acceptanceStopPending.value || acceptanceRecoveryPending.value),
+})
+const {
+  available: newTaskModelAvailable,
+  selection: newTaskModelSelection,
+  models: newTaskModels,
+  loading: newTaskModelsLoading,
+  error: newTaskModelsError,
+  providerErrors: newTaskModelsProviderErrors,
+  disabledReason: newTaskModelDisabledReason,
+} = newTaskModel
+watch(
+  [newTaskModelSelection, sessionRoutingAvailable],
+  ([selection, available]) => {
+    // A recovered draft pin was an explicit single-model choice. Reapply its
+    // local strategy before sending, without changing the gateway default.
+    if (selection && available && isProvisionalDraftSession() && initialRoutingMode.value === null) {
+      void chatSessionRouting.setMode('off')
+    }
+  },
+  { immediate: true },
+)
+// The routing capability snapshot describes the default model. An explicit
+// draft pin must not inherit that model's image restriction. Unknown model
+// capabilities remain a gateway admission decision.
+const imageInputAdmission = computed(() => {
+  const selected = newTaskModelSelection.value
+  if (!selected || modelRoutingMode.value !== 'off') return sessionImageInputAdmission.value
+  const descriptor = newTaskModels.value.find(model => (
+    model.id === selected.model && model.provider === selected.provider
+  ))
+  return descriptor?.capabilities.includes('vision') ? 'allowed' as const : 'unknown' as const
+})
+const newTaskModelSendBlockedReason = computed(() => {
+  const conflict = newTaskModel.conflict.value
+  return conflict === 'routing' ? t('chat.newTaskModel.routingConflict')
+    : conflict === 'unavailable' ? t('chat.newTaskModel.unavailable') : null
+})
 const sessionRoutingSendBlockedReason = computed(() => (
-  modelRoutingSettingsBusy.value ? t('chat.composer.routingUpdateBlocked') : ''
+  modelRoutingMutationBusy.value ? t('chat.composer.routingUpdateBlocked') : ''
 ))
 isQueuedDeliveryBlocked = () => (
-  modelRoutingSettingsBusy.value
+  modelRoutingMutationBusy.value
   || (
     hasModelInputImageAttachment(pendingQueue.value[0]?.attachments || [])
     && imageInputAdmission.value === 'blocked'
   )
 )
 watch(
-  [imageInputAdmission, modelRoutingSettingsBusy],
+  [imageInputAdmission, modelRoutingMutationBusy],
   ([admission, busy], [previousAdmission, wasBusy]) => {
     const routingUnblocked = (
       (previousAdmission === 'blocked' && admission !== 'blocked')
@@ -2866,6 +2925,7 @@ const deliveryBlockedReason = computed<string | null>(() => (
 ))
 const effectiveSendBlockedReason = computed<string | null>(() => (
   deliveryBlockedReason.value || promptAnnotationSendBlockedReason.value
+  || newTaskModelSendBlockedReason.value
 ))
 const provenSessionDelivery = ref<{
   key: string; identity: string; withoutProject: boolean
@@ -3162,11 +3222,13 @@ const chatGoals = useChatGoals({
     const sourceKey = sessionKey.value
     const sourceIntent = pendingSessionIntent.value
     const workspaceId = pendingWorkspaceId.value
-    const draftInitialRoutingMode = initialRoutingMode.value
+    const draftInitialModel = newTaskModelSelection.value
+    const draftInitialRoutingMode = initialRoutingMode.value ?? (draftInitialModel ? 'direct' : null)
     const created = await sessionLifecycle.create({
       agentId: agentIdFromSessionKey(sourceKey),
       kind: 'webchat',
       ...(workspaceId ? { workspaceId } : {}),
+      ...(draftInitialModel ? { model: draftInitialModel.model, provider: draftInitialModel.provider } : {}),
     })
     const key = created.key.trim()
     if (!key) throw new Error('failed to create a session for the goal')
@@ -3176,6 +3238,7 @@ const chatGoals = useChatGoals({
       sessionKey.value !== sourceKey
       || pendingSessionIntent.value !== sourceIntent
       || pendingWorkspaceId.value !== workspaceId
+      || newTaskModelSelection.value !== draftInitialModel
     ) return ''
     if (draftInitialRoutingMode) {
       await sessionRouting.set({
@@ -3187,6 +3250,7 @@ const chatGoals = useChatGoals({
         sessionKey.value !== sourceKey
         || pendingSessionIntent.value !== sourceIntent
         || pendingWorkspaceId.value !== workspaceId
+        || newTaskModelSelection.value !== draftInitialModel
       ) return ''
     }
     if (workspaceId) freshTaskDraft.bindMaterializedProjectTask(key, workspaceId)
@@ -3419,9 +3483,12 @@ const chatSend = useChatSend({
   pendingInputWal,
   busySendMode,
   modelRoutingMode,
-  modelRoutingSettingsBusy,
+  modelRoutingSettingsBusy: modelRoutingMutationBusy,
   imageInputAdmission,
   initialRoutingMode,
+  initialModel: newTaskModel.initialModel,
+  initialProvider: newTaskModel.initialProvider,
+  restoreInitialModel: newTaskModel.restore,
   elevatedMode,
   runMode,
   pendingAttachments,
@@ -3745,7 +3812,7 @@ async function onComposerSend() {
   if (composerSendBlockedMessage.value) return
   // Serialize session-routing and plan mutations before accepting another
   // composer turn, so the send cannot race either CAS update.
-  if (modelRoutingSettingsBusy.value || planModeBusy.value) return
+  if (modelRoutingMutationBusy.value || planModeBusy.value) return
   // Goal draft mode: the composer text is the durable objective and the set
   // mutation atomically accepts its first ordinary user turn.
   if (goalDraftArmed.value) {
@@ -4612,7 +4679,7 @@ const landingSuggestionsDisabled = computed(() => shouldDisableLandingSuggestion
 }))
 
 const queuedImageSendBlockedMessage = computed(() => {
-  if (modelRoutingSettingsBusy.value) {
+  if (modelRoutingMutationBusy.value) {
     return t('chat.composer.routingUpdateImageBlocked')
   }
   if (imageInputAdmission.value !== 'blocked') return ''
@@ -4835,7 +4902,16 @@ function runComposerSandboxSetupInBackground(): void {
 
 async function setComposerSessionRoutingMode(mode: ModelRoutingMode) {
   if (goalBusy.value) return
-  await chatSessionRouting.setMode(mode)
+  await newTaskModel.selectRoutingMode(mode, chatSessionRouting.setMode)
+}
+
+async function setComposerNewTaskModel(selection: NewTaskModelSelection | null) {
+  if (goalBusy.value) return
+  await newTaskModel.selectWithRouting(selection, chatSessionRouting.setMode)
+}
+
+function openComposerModelSettings() {
+  void router.push('/settings/modelStrategy').catch(() => {})
 }
 
 async function setComposerCodingModeEnabled(enabled: boolean) {

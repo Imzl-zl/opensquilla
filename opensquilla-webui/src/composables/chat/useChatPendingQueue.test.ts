@@ -214,6 +214,27 @@ class TestBroadcastChannel {
 }
 
 describe('useChatPendingQueue delivery state', () => {
+  it('keeps first-turn creation intent out of durable follow-ups until acceptance consumes it', async () => {
+    const { wal, records } = memoryWal()
+    const { inputText, pendingSessionIntent, queue } = makeQueue(
+      undefined, () => false, undefined, undefined,
+      { pendingInputWal: wal, isStreaming: ref(true) },
+    )
+    pendingSessionIntent.value = 'new_chat'
+    inputText.value = 'follow-up while the first acknowledgement is pending'
+
+    await expect(queue.enqueuePendingInput(inputText.value)).resolves.toBe(true)
+
+    expect(inputText.value).toBe('')
+    expect(pendingSessionIntent.value).toBe('new_chat')
+    expect(queue.pendingQueue.value).toHaveLength(1)
+    expect(queue.pendingQueue.value[0]?.intent).toBeNull()
+    expect([...records.values()]).toHaveLength(1)
+    expect([...records.values()][0]?.intent).toBeNull()
+    queue.cleanup()
+  })
+
+
   it('publishes an offline draft as locally saved only after the initial WAL commit', async () => {
     const { wal, records } = memoryWal()
     const persist = vi.mocked(wal.put).getMockImplementation()!
