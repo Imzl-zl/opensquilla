@@ -113,7 +113,11 @@ async def test_failed_startup_closes_its_connection(tmp_path, monkeypatch, cance
         assert storage._conn is None
         assert storage._transcript_reader is None
         assert storage._meta_launch_draft_gc_task is None
-        with pytest.raises(ValueError, match="no active connection"):
+        # Native aiosqlite and the sqlite3 fallback report closure differently.
+        with pytest.raises(
+            (ValueError, sqlite3.ProgrammingError),
+            match=r"^(?:no active connection|Cannot operate on a closed database\.)$",
+        ):
             await connections[0].execute("SELECT 1")
     finally:
         await storage.close()
