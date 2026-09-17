@@ -5931,6 +5931,83 @@ async def test_owned_background_turn_dispatch_can_pause_after_disconnect(tmp_pat
         assert await _table_count(stack.storage, "agent_tasks") == 1
 
 
+@pytest.mark.parametrize("receipt", ["finalized", "unknown"])
+async def test_historical_goal_budget_edit_and_resume_account_only_new_receipts(
+    tmp_path: Path, receipt: str,
+) -> None:
+    from opensquilla.session.goals import goal_snapshot, new_goal
+    from opensquilla.session.usage_ledger import UsageEventCompletion, UsageEventStart
+
+    calls: list[UsageEventStart] = []
+
+    async def handler(run: TaskRun) -> None:
+        assert run.goal_context is not None
+        call = UsageEventStart(
+            event_id="synthetic-request", execution_id=run.task_id, call_index=0,
+            turn_id=run.task_id, root_turn_id=run.task_id,
+            session_id=run.envelope.session_id, session_epoch=run.envelope.session_epoch,
+            started_at_ms=int(time.time() * 1000),
+        )
+        calls.append(call)
+        await stack.storage.start_usage_event(call)
+        if receipt == "unknown":
+            await stack.storage.mark_usage_event_unknown(
+                call.event_id, completed_at_ms=call.started_at_ms + 1,
+            )
+        else:
+            await stack.storage.finalize_usage_event(call.event_id, UsageEventCompletion(
+                completed_at_ms=call.started_at_ms + 1,
+                input_tokens=10, output_tokens=5, total_tokens=15, cache_read_tokens=4,
+            ))
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "historical-budget.sqlite", handler=handler, wire_lifecycle=True,
+    ) as stack:
+        session = await stack.storage.get_session(SOURCE_KEY)
+        assert session is not None
+        # Current-schema history has aggregate usage but no pre-upgrade receipts.
+        historical = new_goal(
+            goal_id=_uuid(900), session_key=SOURCE_KEY, session_id=session.session_id,
+            session_epoch=session.epoch, objective="Check the synthetic release.",
+        ).model_copy(update={
+            "status": "paused", "pause_reason": "process_restart",
+            "usage_accounting_version": 0, "usage_coverage": "partial_history",
+            "usage_accounting_started_at_ms": None,
+            "input_tokens": 100, "output_tokens": 50, "total_tokens": 150,
+        })
+        await SessionStorage._insert_goal_on_conn(stack.storage.conn, historical)
+        await stack.storage.conn.commit()
+        edited = await _handle_goals_edit({
+            **_mutation_params(goal_snapshot(historical), request_index=1),
+            "objective": historical.objective, "tokenBudget": 1,
+        }, stack.context)
+        assert edited["goal"]["status"] == "paused"
+        assert edited["goal"]["budgetTokensUsed"] == 0
+        assert edited["goal"]["usageAccountingStartedAtMs"] is None
+        assert await _table_count(stack.storage, "agent_tasks") == 0
+
+        await _handle_goals_resume(
+            _mutation_params(edited["goal"], request_index=2), stack.context,
+        )
+        settled = await _wait_for_goal(stack.storage, lambda goal: (
+            goal.status == "paused" and goal.active_task_id is None and goal.turns_settled == 1
+        ))
+        assert len(calls) == 1
+        assert await _table_count(stack.storage, "agent_tasks") == 1
+        assert settled.usage_accounting_version == 0
+        assert settled.usage_accounting_started_at_ms == calls[0].started_at_ms
+        known = receipt == "finalized"
+        assert settled.pause_reason == ("token_budget" if known else "usage_unknown")
+        assert settled.usage_coverage == ("partial_history" if known else "partial_usage")
+        assert settled.budget_tokens_used == (11 if known else 0)
+        assert (settled.input_tokens, settled.output_tokens, settled.total_tokens) == (
+            (110, 55, 165) if known else (100, 50, 150)
+        )
+        status = await _handle_goals_status({"sessionKey": SOURCE_KEY}, stack.context)
+        assert status["goal"]["budgetTokensUsed"] == settled.budget_tokens_used
+        assert status["goal"]["usageCoverage"] == settled.usage_coverage
+
+
 async def test_queued_gateway_child_and_grandchild_usage_stays_with_root_goal(
     tmp_path: Path,
 ) -> None:

@@ -648,54 +648,6 @@ def scan_and_remove_temporary_tree(
         raise RuntimeError("credential detected in temporary live artifacts")
 
 
-def retain_failed_temporary_tree(
-    path: Path | str,
-    secrets: Mapping[str, str] | Iterable[str],
-) -> bool:
-    """Retain only a stopped, private, credential-free failed harness tree.
-
-    Never follow links, preserve key-bearing files, or retain on an unreadable
-    scan. This is a diagnostic opt-in, not a report/transcript export operation.
-    Windows chmod cannot establish a private DACL, so retain is fail-closed there.
-    """
-    target = Path(path)
-    mode = target.lstat().st_mode
-    if _is_link_or_junction(target, mode) or not stat.S_ISDIR(mode):
-        raise ValueError("refusing to retain a linked or non-directory tree")
-    resolved = target.resolve(strict=True)
-    if not resolved.name.startswith(_OWNED_TEMP_TREE_PREFIX) or not _is_strict_temporary_child(
-        resolved
-    ):
-        raise ValueError("refusing to retain a non-owned temporary tree")
-    try:
-        if os.name == "nt":
-            raise OSError("private retention needs a verified Windows DACL")
-        os.chmod(resolved, 0o700)
-        for current, directories, files in os.walk(
-            resolved, onerror=_raise_walk_error, followlinks=False
-        ):
-            parent = Path(current)
-            for name in directories + files:
-                entry = parent / name
-                entry_mode = entry.lstat().st_mode
-                if _is_link_or_junction(entry, entry_mode):
-                    raise OSError("linked entry cannot be retained")
-                if stat.S_ISDIR(entry_mode):
-                    os.chmod(entry, 0o700)
-                elif stat.S_ISREG(entry_mode) and entry.stat().st_nlink == 1:
-                    os.chmod(entry, 0o600)
-                else:
-                    raise OSError("nonordinary entry cannot be retained")
-        if _temporary_tree_contains_secret(resolved, _secret_needles(secrets)):
-            raise ValueError("credential detected")
-        return True
-    except Exception:
-        # Delete the entire unsafe tree, including SQLite WAL companions, rather
-        # than retain a partial database after removing only a key-bearing file.
-        _remove_owned_temporary_tree(resolved)
-        return False
-
-
 def is_temporary_report_path(path: Path | str) -> bool:
     """Return whether a report resolves below an OS temporary root."""
 

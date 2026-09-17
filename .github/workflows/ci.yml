@@ -1211,7 +1211,6 @@ jobs:
             tests/test_tools/test_approval_unification.py \
             tests/test_live_multi_provider_matrix.py \
             tests/test_live_provider_profile_smoke.py \
-            tests/test_live_plan_goal_runtime.py \
             "${regression_args[@]}" \
             -vv --tb=short -o faulthandler_timeout=60 --maxfail=3 \
             2>&1 | tee "${CI_REPORT_DIR}/preflight.log"
@@ -1467,7 +1466,6 @@ jobs:
             regression_args+=(tests/test_sandbox/test_windows_shell_process_runtime.py)
           elif [[ "${{ matrix.shard }}" == "core" ]]; then
             regression_args+=(
-              tests/test_live_plan_stop_child.py
               tests/test_ci/test_windows_signatures.py
               tests/test_tools/test_shell_process_isolation.py
               tests/test_engine/test_cancelled_turn_segments.py
@@ -1481,7 +1479,6 @@ jobs:
             tests/test_tools/test_approval_unification.py \
             tests/test_live_multi_provider_matrix.py \
             tests/test_live_provider_profile_smoke.py \
-            tests/test_live_plan_goal_runtime.py \
             "${regression_args[@]}" \
             -vv --tb=short -o faulthandler_timeout=60 --maxfail=3 \
             2>&1 | tee "${CI_REPORT_DIR}/preflight.log"
@@ -1624,7 +1621,6 @@ jobs:
             tests/test_tools/test_approval_unification.py \
             tests/test_live_multi_provider_matrix.py \
             tests/test_live_provider_profile_smoke.py \
-            tests/test_live_plan_goal_runtime.py \
             -vv --tb=short --maxfail=3 \
             2>&1 | tee "${CI_REPORT_DIR}/preflight.log"
 

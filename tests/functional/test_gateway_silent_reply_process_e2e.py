@@ -369,6 +369,22 @@ async def test_real_gateway_suppresses_goal_sentinel_everywhere(
             model=_MODEL,
             display_name="Silent Goal process E2E",
         )
+        changed = await client.call("plans.setMode", {
+            "sessionKey": session_key, "mode": "plan", "expectedRevision": 0,
+        })
+        assert changed["collaboration"]["mode"] == "plan"
+        await client.close()
+        client = GatewayClient()
+        await client.connect(f"ws://127.0.0.1:{port}/ws")
+        snapshot = await client.call("sessions.messages.hydrate", {"key": session_key})
+        assert snapshot["collaboration"]["mode"] == "plan"
+        assert snapshot["collaboration"]["revision"] == changed["collaboration"]["revision"]
+        assert snapshot["pendingUserInputs"] == []
+        assert not provider_log.exists()
+        await client.call("plans.setMode", {
+            "sessionKey": session_key, "mode": "default",
+            "expectedRevision": changed["collaboration"]["revision"],
+        })
         # Goal ownership requires a live session-message subscription. Opening
         # it before goals.set also proves the exact pushed wire events.
         subscription = await client.subscribe_session_events(session_key)

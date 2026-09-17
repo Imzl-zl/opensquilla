@@ -2944,7 +2944,6 @@ def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_
         "tests/test_tools/test_approval_unification.py",
         "tests/test_live_multi_provider_matrix.py",
         "tests/test_live_provider_profile_smoke.py",
-        "tests/test_live_plan_goal_runtime.py",
     }
     if job_name in {"ubuntu-full", "windows-full"}:
         expected_preflight_files.update({
@@ -2974,7 +2973,6 @@ def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_
         assert "-o faulthandler_timeout=60" in preflight["run"]
     if job_name == "windows-full":
         expected_preflight_files.update({
-            "tests/test_live_plan_stop_child.py",
             "tests/test_ci/test_windows_signatures.py",
             "tests/test_tools/test_shell_process_isolation.py",
         })

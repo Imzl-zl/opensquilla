@@ -31,8 +31,7 @@
     "tests/test_sandbox/test_trusted_sandbox_execution.py",
     "tests/test_tools/test_approval_unification.py",
     "tests/test_live_multi_provider_matrix.py",
-    "tests/test_live_provider_profile_smoke.py",
-    "tests/test_live_plan_goal_runtime.py"
+    "tests/test_live_provider_profile_smoke.py"
   ],
   "baseline_suites": [
     "dependency-audit",
@@ -368,8 +367,7 @@
         "tests/test_sandbox/test_trusted_sandbox_execution.py",
         "tests/test_tools/test_approval_unification.py",
         "tests/test_live_multi_provider_matrix.py",
-        "tests/test_live_provider_profile_smoke.py",
-        "tests/test_live_plan_goal_runtime.py"
+        "tests/test_live_provider_profile_smoke.py"
       ]
     },
     "release-packaging": {
