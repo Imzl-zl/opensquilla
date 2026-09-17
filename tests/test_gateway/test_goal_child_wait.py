@@ -1,0 +1,281 @@
+"""Goal/child-completion integration with event-controlled ordinary runtime turns."""
+
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+
+import pytest
+
+from opensquilla.gateway import background_completion, subagent_announce
+from opensquilla.gateway.background_completion import BackgroundCompletionManager
+from opensquilla.gateway.rpc_goals import _handle_goals_clear, _handle_goals_set
+from opensquilla.gateway.task_runtime import TaskRun
+from opensquilla.session.goals import GoalTurnContext
+from tests.test_gateway.test_goal_rpc import SOURCE_KEY, _open_goal_rpc_stack, _set_params
+
+
+@asynccontextmanager
+async def _child_group_stack(tmp_path, monkeypatch):
+    parent_started = asyncio.Event()
+    release_parent = asyncio.Event()
+    synthesis_started = asyncio.Event()
+    release_synthesis = asyncio.Event()
+    continuation_started = asyncio.Event()
+    release_continuation = asyncio.Event()
+    group_released = asyncio.Event()
+    runs: list[TaskRun] = []
+    group_events: list[str] = []
+    manager = None
+
+    async def handler(run):
+        runs.append(run)
+        if len(runs) == 1:
+            assert manager is not None
+            await manager.emit_waiting(
+                parent_session_key=SOURCE_KEY,
+                parent_task_id=run.task_id,
+                pending_count=1,
+                parent_envelope=run.envelope,
+            )
+            parent_started.set()
+            await release_parent.wait()
+        elif run.run_kind == "runtime_send":
+            synthesis_started.set()
+            await release_synthesis.wait()
+        else:
+            continuation_started.set()
+            await release_continuation.wait()
+
+    async def group_event(_session_key, name, _payload):
+        group_events.append(name)
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "goal-child-wait.sqlite",
+        handler=handler,
+        wire_lifecycle=True,
+        max_turns=3,
+    ) as stack:
+        manager = BackgroundCompletionManager(
+            session_manager=stack.manager, event_emitter=group_event
+        )
+
+        def released(session_key):
+            # Re-entrant consumers must never be invoked under the manager lock.
+            assert not manager._state_lock.locked()
+            stack.service.schedule_idle_evaluation(session_key)
+            group_released.set()
+
+        manager.set_idle_listener(released)
+        manager.set_cancel_listener(stack.service.on_completion_group_cancelled)
+        monkeypatch.setattr(subagent_announce, "_background_completion_manager", manager)
+
+        async def wake():
+            await manager.send_parent_wake(
+                parent_session_key=SOURCE_KEY,
+                parent_task_id=runs[0].task_id,
+                payloads=[{"task_id": "synthetic-child", "status": "succeeded"}],
+                task_runtime=stack.runtime,
+                message="Summarize the completed synthetic child result.",
+                provenance={
+                    "kind": "internal_system",
+                    "source_tool": "subagent_completion",
+                    "parent_task_id": runs[0].task_id,
+                },
+                parent_envelope=runs[0].envelope,
+            )
+
+        try:
+            created = await _handle_goals_set(_set_params(), stack.context)
+            await asyncio.wait_for(parent_started.wait(), timeout=3)
+            yield SimpleNamespace(
+                stack=stack,
+                manager=manager,
+                created=created,
+                runs=runs,
+                group_events=group_events,
+                group_released=group_released,
+                release_parent=release_parent,
+                synthesis_started=synthesis_started,
+                release_synthesis=release_synthesis,
+                continuation_started=continuation_started,
+                wake=wake,
+            )
+        finally:
+            release_parent.set()
+            release_synthesis.set()
+            release_continuation.set()
+            await manager.close(timeout=3)
+
+
+async def test_child_synthesis_group_releases_before_goal_continuation(tmp_path, monkeypatch):
+    async with _child_group_stack(tmp_path, monkeypatch) as state:
+        await state.wake()
+        state.release_parent.set()
+        await asyncio.wait_for(state.synthesis_started.wait(), timeout=3)
+        assert [run.run_kind for run in state.runs] == ["session_turn", "runtime_send"]
+        assert await state.manager.active_group_ids(SOURCE_KEY)
+        await state.stack.service._kick_if_idle(SOURCE_KEY)
+        assert len(state.runs) == 2
+        assert not state.continuation_started.is_set()
+
+        state.release_synthesis.set()
+        await asyncio.wait_for(state.group_released.wait(), timeout=3)
+        await asyncio.wait_for(state.continuation_started.wait(), timeout=3)
+        await state.manager.drain(timeout=3)
+        assert not await state.manager.active_group_ids(SOURCE_KEY)
+        assert state.group_events == [
+            "session.event.task_group.waiting",
+            "session.event.task_group.synthesizing",
+            "session.event.task_group.done",
+        ]
+        assert len(state.runs) == 3
+        context = GoalTurnContext.from_task_detail(state.runs[-1].goal_context)
+        assert context is not None and context.automatic
+        assert context.goal_id == state.created["goal"]["goalId"]
+
+
+
+
+
+
+async def test_duplicate_wake_admission_cannot_leave_finished_group_blocking_goal(
+    tmp_path, monkeypatch
+):
+    duplicate_lookup_started = asyncio.Event()
+    release_duplicate_lookup = asyncio.Event()
+    original_capture = background_completion._capture_delivery_target
+    lookups = 0
+
+    async def capture(**kwargs):
+        nonlocal lookups
+        lookups += 1
+        if lookups == 2:
+            duplicate_lookup_started.set()
+            await release_duplicate_lookup.wait()
+        return await original_capture(**kwargs)
+
+    monkeypatch.setattr(background_completion, "_capture_delivery_target", capture)
+    async with _child_group_stack(tmp_path, monkeypatch) as state:
+        await state.wake()
+        state.release_parent.set()
+        await asyncio.wait_for(state.synthesis_started.wait(), timeout=3)
+        duplicate = asyncio.create_task(state.wake())
+        try:
+            await asyncio.wait_for(duplicate_lookup_started.wait(), timeout=3)
+            state.release_synthesis.set()
+            await state.manager.drain(timeout=3)
+            assert "session.event.task_group.done" in state.group_events
+            assert not state.continuation_started.is_set()
+            release_duplicate_lookup.set()
+            await asyncio.wait_for(duplicate, timeout=3)
+
+            assert not await state.manager.active_group_ids(SOURCE_KEY)
+            await asyncio.wait_for(state.continuation_started.wait(), timeout=3)
+            assert len(state.runs) == 3
+        finally:
+            release_duplicate_lookup.set()
+            await asyncio.wait_for(duplicate, timeout=3)
+
+
+
+
+@pytest.mark.parametrize("parent_goal", ["none", "current", "replaced"])
+async def test_public_stop_releases_old_group_without_reviving_its_goal(
+    parent_goal, tmp_path, monkeypatch,
+):
+    from opensquilla.gateway.routing import RouteEnvelope, SourceKind
+    from opensquilla.gateway.rpc_sessions import _handle_sessions_abort_contract
+    from tests.test_gateway.test_goal_rpc import _mutation_params
+
+    calls = []
+    continuation_started, finish = asyncio.Event(), asyncio.Event()
+    cancellation_started, finish_cancellation = asyncio.Event(), asyncio.Event()
+    released = []
+    manager = None
+
+    async def handler(run):
+        calls.append(run)
+        if len(calls) == 1:
+            await manager.emit_waiting(
+                parent_session_key=SOURCE_KEY, parent_task_id=run.task_id,
+                parent_envelope=run.envelope, pending_count=1,
+            )
+        elif run.run_kind == "goal":
+            continuation_started.set()
+            await finish.wait()
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "cancel-group.sqlite", handler=handler, wire_lifecycle=True,
+    ) as stack:
+        manager = BackgroundCompletionManager(session_manager=stack.manager)
+        monkeypatch.setattr(subagent_announce, "_background_completion_manager", manager)
+
+        def idle(key):
+            assert not manager._state_lock.locked()
+            released.append(key)
+            stack.service.schedule_idle_evaluation(key)
+
+        async def cancel_authority(key, task_id):
+            assert not manager._state_lock.locked()
+            assert await manager.active_group_ids(key)
+            cancellation_started.set()
+            await finish_cancellation.wait()
+            await stack.service.on_completion_group_cancelled(key, task_id)
+
+        manager.set_idle_listener(idle)
+        manager.set_cancel_listener(cancel_authority)
+        try:
+            if parent_goal == "none":
+                session = await stack.storage.get_session(SOURCE_KEY)
+                parent = await stack.runtime.enqueue(RouteEnvelope(
+                    source_kind=SourceKind.WEB, source_name="synthetic-parent", agent_id="main",
+                    session_key=SOURCE_KEY, session_id=session.session_id,
+                    session_epoch=session.epoch,
+                ), "Start ordinary child investigation")
+                await stack.runtime.wait(parent.task_id, timeout=2)
+            created = await _handle_goals_set(_set_params(), stack.context)
+            await stack.runtime.wait(created["taskId"], timeout=2)
+            if parent_goal == "replaced":
+                goal = await stack.service.snapshot(await stack.storage.get_goal(SOURCE_KEY))
+                await _handle_goals_clear(_mutation_params(goal, request_index=2), stack.context)
+                created = await _handle_goals_set(
+                    _set_params(request_index=3, message_index=103), stack.context,
+                )
+                await stack.runtime.wait(created["taskId"], timeout=2)
+            await asyncio.gather(*list(stack.service._kick_tasks.values()))
+            assert not continuation_started.is_set()
+            parent_task_id = calls[0].task_id
+            params = {"key": SOURCE_KEY, "taskId": parent_task_id, "scope": "task"}
+            cancellation = asyncio.create_task(
+                _handle_sessions_abort_contract(params, stack.context)
+            )
+            await asyncio.wait_for(cancellation_started.wait(), 2)
+            await stack.service._kick_if_idle(SOURCE_KEY)
+            assert not continuation_started.is_set()
+            finish_cancellation.set()
+            response = await asyncio.wait_for(cancellation, 3)
+            assert response["aborted"]
+            assert not await manager.active_group_ids(SOURCE_KEY)
+            assert released == [SOURCE_KEY]
+            if parent_goal == "current":
+                await asyncio.gather(*list(stack.service._kick_tasks.values()))
+                goal = await stack.storage.get_goal(SOURCE_KEY)
+                assert goal.status == "paused"
+                assert goal.pause_reason == "user_cancelled"
+                assert not continuation_started.is_set()
+            else:
+                await asyncio.wait_for(continuation_started.wait(), 2)
+                goal = await stack.storage.get_goal(SOURCE_KEY)
+                assert goal.status == "active"
+                assert goal.goal_id == created["goal"]["goalId"]
+            before_replay = len(calls)
+            await _handle_sessions_abort_contract(params, stack.context)
+            await stack.service._kick_if_idle(SOURCE_KEY)
+            assert len(calls) == before_replay
+            assert released == [SOURCE_KEY]
+        finally:
+            finish_cancellation.set()
+            finish.set()
+            await manager.close(timeout=2)

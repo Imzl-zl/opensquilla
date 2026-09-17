@@ -11922,49 +11922,54 @@ class Agent:
                         and self._session_key
                         and task_id
                     ):
-                        public_request = user_input_provider.open_request(
-                            session_key=self._session_key,
-                            task_id=task_id,
-                            tool_use_id=tc.tool_use_id,
-                            payload=pending_user_input,
-                        )
-                        request_id = str(public_request["request_id"])
+                        suspend = getattr(self._tool_context, "suspend_compute_slot", None)
                         user_input_wait_started = _loop.time()
                         try:
-                            pending_result = ToolResult(
-                                tool_use_id=tc.tool_use_id,
-                                tool_name=tc.tool_name,
-                                content=json.dumps(public_request, ensure_ascii=False),
-                                is_error=False,
-                            )
-                            projected_pending = await self._project_tool_result_for_delivery(
-                                pending_result,
-                                tool_call=tc,
-                            )
-                            yield ToolResultEvent(
-                                tool_use_id=projected_pending.tool_use_id,
-                                tool_name=projected_pending.tool_name,
-                                result=projected_pending.content,
-                                execution_log_handle=projected_pending.execution_log_handle,
-                                is_error=projected_pending.is_error,
-                                arguments=tc.arguments,
-                                execution_status=projected_pending.execution_status,
-                                effect_outcome=projected_pending.effect_outcome,
-                                generation_epoch=generation_epoch,
-                            )
-                            answers = await user_input_provider.wait_for_response(request_id)
+                            async with suspend() if callable(suspend) else contextlib.nullcontext():
+                                public_request = user_input_provider.open_request(
+                                    session_key=self._session_key,
+                                    task_id=task_id,
+                                    tool_use_id=tc.tool_use_id,
+                                    payload=pending_user_input,
+                                )
+                                request_id = str(public_request["request_id"])
+                                try:
+                                    pending_result = ToolResult(
+                                        tool_use_id=tc.tool_use_id,
+                                        tool_name=tc.tool_name,
+                                        content=json.dumps(public_request, ensure_ascii=False),
+                                        is_error=False,
+                                    )
+                                    projected_pending = (
+                                        await self._project_tool_result_for_delivery(
+                                            pending_result, tool_call=tc,
+                                        )
+                                    )
+                                    yield ToolResultEvent(
+                                        tool_use_id=projected_pending.tool_use_id,
+                                        tool_name=projected_pending.tool_name,
+                                        result=projected_pending.content,
+                                        execution_log_handle=projected_pending.execution_log_handle,
+                                        is_error=projected_pending.is_error,
+                                        arguments=tc.arguments,
+                                        execution_status=projected_pending.execution_status,
+                                        effect_outcome=projected_pending.effect_outcome,
+                                        generation_epoch=generation_epoch,
+                                    )
+                                    answers = await user_input_provider.wait_for_response(
+                                        request_id,
+                                    )
+                                finally:
+                                    # Also close requests when projection, waiting, or
+                                    # the event consumer fails or cancels the turn.
+                                    user_input_provider.cancel_request(request_id)
                         finally:
-                            # Human input suspends execution, including time the
-                            # consumer spends showing the yielded questionnaire.
-                            user_input_wait_duration = max(
-                                0.0,
-                                _loop.time() - user_input_wait_started,
-                            )
+                            # Both human input and fair capacity reacquisition suspend
+                            # the active-turn deadline, while retaining this task.
                             if _total_deadline is not None:
-                                _total_deadline += user_input_wait_duration
-                            # Also close requests when projection, waiting, or
-                            # the event consumer fails or cancels the turn.
-                            user_input_provider.cancel_request(request_id)
+                                _total_deadline += max(
+                                    0.0, _loop.time() - user_input_wait_started,
+                                )
                         result = ToolResult(
                             tool_use_id=tc.tool_use_id,
                             tool_name=tc.tool_name,
@@ -12036,25 +12041,52 @@ class Agent:
                                     generation_epoch=generation_epoch,
                                 )
                             approval_wait_started = _loop.time()
-                            await _wait_for_pending_approval_resolution(pending_approval)
-                            approval_wait_duration = max(
-                                0.0,
-                                _loop.time() - approval_wait_started,
-                            )
-                            # Human review is suspended state, not execution time.
-                            if _total_deadline is not None:
-                                _total_deadline += approval_wait_duration
+                            suspend = getattr(self._tool_context, "suspend_compute_slot", None)
                             approval_entry = None
-                            from opensquilla.gateway.approval_queue import (
-                                get_approval_queue,
-                            )
-
+                            explicit_human_denial = False
                             try:
-                                approval_entry = get_approval_queue().get(
-                                    str(pending_approval["approval_id"])
-                                )
-                            except KeyError:
-                                approval_entry = None
+                                async with (
+                                    suspend() if callable(suspend) else contextlib.nullcontext()
+                                ) as finish_without_compute:
+                                    await _wait_for_pending_approval_resolution(pending_approval)
+                                    from opensquilla.gateway.approval_queue import (
+                                        get_approval_queue,
+                                    )
+
+                                    try:
+                                        approval_entry = get_approval_queue().get(
+                                            str(pending_approval["approval_id"])
+                                        )
+                                    except KeyError:
+                                        pass
+                                    if approval_entry is not None:
+                                        explicit_human_denial = (
+                                            approval_entry.resolved
+                                            and not approval_entry.approved
+                                            and approval_entry.resolution == "denied"
+                                            and str(approval_entry.params.get("reviewer") or "user")
+                                            == "user"
+                                            and str(
+                                                approval_entry.params.get("resolutionSource") or ""
+                                            ) in {"", "user", "user_web", "user_channel"}
+                                            and approval_entry.params.get("humanActionable")
+                                            is not False
+                                        )
+                                    if callable(finish_without_compute) and (
+                                        approval_entry is None
+                                        or not approval_entry.resolved
+                                        or explicit_human_denial
+                                    ):
+                                        # These branches end below without executing a tool
+                                        # or calling the provider. Do not queue terminal
+                                        # reporting behind unrelated computation. Expiry
+                                        # and automatic rule refusals still resume normally.
+                                        finish_without_compute()
+                            finally:
+                                if _total_deadline is not None:
+                                    _total_deadline += max(
+                                        0.0, _loop.time() - approval_wait_started,
+                                    )
                             if approval_entry is None or not approval_entry.resolved:
                                 self._set_tool_reliability_terminal(
                                     tool_use_id=tc.tool_use_id,
@@ -12065,22 +12097,16 @@ class Agent:
                                     tool_use_id=tc.tool_use_id,
                                     result=result,
                                 )
+                                terminal_error = ErrorEvent(
+                                    code="approval_required",
+                                    message="The action is waiting for user approval.",
+                                )
+                                yield terminal_error
                                 turn_yielded = True
                                 break
                             if not approval_entry.approved:
                                 suspended.deny(str(pending_approval["approval_id"]))
                                 resolution = str(approval_entry.resolution or "")
-                                reviewer = str(approval_entry.params.get("reviewer") or "user")
-                                resolution_source = str(
-                                    approval_entry.params.get("resolutionSource") or ""
-                                )
-                                explicit_human_denial = (
-                                    resolution == "denied"
-                                    and reviewer == "user"
-                                    and resolution_source
-                                    in {"", "user", "user_web", "user_channel"}
-                                    and approval_entry.params.get("humanActionable") is not False
-                                )
                                 rationale = str(
                                     approval_entry.params.get("reviewRationale") or ""
                                 ).strip()
@@ -12146,6 +12172,11 @@ class Agent:
                                 # expired record or an internal rule decision must
                                 # still reach the model as a non-terminal tool result.
                                 if explicit_human_denial:
+                                    terminal_error = ErrorEvent(
+                                        code="approval_required",
+                                        message="The user declined the action; execution stopped.",
+                                    )
+                                    yield terminal_error
                                     turn_yielded = True
                                 break
 

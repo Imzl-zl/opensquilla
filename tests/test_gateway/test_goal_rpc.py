@@ -3449,6 +3449,51 @@ async def test_continuation_post_accept_read_failure_compensates_before_provider
 
 
 @pytest.mark.asyncio
+async def test_goal_waits_for_existing_child_completion_group_then_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensquilla.gateway import subagent_announce
+    from opensquilla.gateway.background_completion import BackgroundCompletionManager
+
+    runs: list[TaskRun] = []
+    resumed = asyncio.Event()
+
+    async def handler(run: TaskRun) -> None:
+        runs.append(run)
+        if len(runs) > 1:
+            resumed.set()
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "goal-child-wait.sqlite", handler=handler,
+    ) as stack:
+        manager = BackgroundCompletionManager(session_manager=stack.manager)
+        manager.set_idle_listener(stack.service.schedule_idle_evaluation)
+        monkeypatch.setattr(subagent_announce, "_background_completion_manager", manager)
+        try:
+            created = await _handle_goals_set(_set_params(), stack.context)
+            await _settle_set_task(stack, created)
+            await manager.emit_waiting(
+                parent_session_key=SOURCE_KEY, parent_task_id=created["taskId"], pending_count=1,
+            )
+            await stack.service._kick_if_idle(SOURCE_KEY)
+            assert len(runs) == 1
+            waiting = await stack.storage.get_goal(SOURCE_KEY)
+            assert waiting is not None and waiting.status == "active"
+            assert waiting.continuation_seq == 0
+            assert not await stack.runtime.has_session_work(SOURCE_KEY)
+
+            # The existing group releases the parent only after its result wake.
+            # This event, rather than a polling loop, re-evaluates ordinary work.
+            await manager._evict_group(manager.group_id(SOURCE_KEY, created["taskId"]))
+            await asyncio.wait_for(resumed.wait(), timeout=3)
+            assert len(runs) == 2
+            assert not await manager.active_group_ids(SOURCE_KEY)
+        finally:
+            await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_coalesced_dirty_kick_runs_a_second_idle_evaluation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

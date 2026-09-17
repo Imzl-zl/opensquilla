@@ -539,6 +539,7 @@ def _reusable_route_envelope(envelope: RouteEnvelope) -> RouteEnvelope:
         ):
             metadata.pop(key, None)
     runtime_services = dict(envelope.runtime_services)
+    runtime_services.pop("suspend_compute_slot", None)
     runtime_services.pop("update_progress", None)
     return replace(
         envelope,
@@ -4719,6 +4720,7 @@ class TaskRuntime:
 
         runtime_services = {
             **task.envelope.runtime_services,
+            "suspend_compute_slot": lambda: self._suspend_compute_slot(task),
             "update_progress": update_progress,
             "plan_storage": self._storage,
             "plan_event_emitter": self._emit,
@@ -5923,7 +5925,45 @@ class TaskRuntime:
             self._fair_cond = asyncio.Condition()
         return self._fair_cond
 
-    async def _acquire_fair_slot(self, task: _RuntimeTask) -> None:
+    @contextlib.asynccontextmanager
+    async def _suspend_compute_slot(
+        self, task: _RuntimeTask,
+    ) -> AsyncIterator[Callable[[], None]]:
+        """Lend capacity during an external wait while retaining the session lane.
+
+        The task, frozen context and execution lock remain owned by the same
+        turn. Only a successful wait rejoins the ordinary capacity queue; an
+        error or cancellation goes directly to the existing terminal cleanup.
+        A wait that decides the turn must end can call the yielded function;
+        that path may only report the terminal outcome, never resume execution.
+        """
+
+        if task.cancel_requested or task.terminal_closing:
+            raise asyncio.CancelledError
+        if task.status is not AgentTaskStatus.RUNNING or not task.acquired_slot:
+            raise RuntimeError("Only a running task holding capacity can suspend it")
+        resume_compute = True
+
+        def finish_without_compute() -> None:
+            nonlocal resume_compute
+            resume_compute = False
+
+        await self._release_slot(task)
+        yield finish_without_compute
+        if task.cancel_requested or task.terminal_closing:
+            raise asyncio.CancelledError
+        if not resume_compute:
+            return
+        await self._wait_for_subagent_slot(task)
+        await self._acquire_fair_slot(task, mark_running=False)
+
+
+    async def _acquire_fair_slot(
+        self,
+        task: _RuntimeTask,
+        *,
+        mark_running: bool = True,
+    ) -> None:
         """Acquire one global slot with round-robin among genuine slot waiters.
 
         A task must satisfy one predicate before it is granted a slot:
@@ -5952,6 +5992,8 @@ class TaskRuntime:
             waiters.add(session_key)
             try:
                 while True:
+                    if task.cancel_requested or task.terminal_closing:
+                        raise asyncio.CancelledError
                     # Predicate 1: global slot available.
                     if self._global_in_flight >= self._max_concurrency:
                         await cond.wait()
@@ -5988,6 +6030,11 @@ class TaskRuntime:
                 # Cancellation or a successful grant changes the genuine RR
                 # head. Wake peers even when no global slot count changed.
                 cond.notify_all()
+
+        if not mark_running:
+            # Resuming a suspended turn must not repeat task activation, Goal
+            # claims, context freezing, started_at writes or running events.
+            return
 
         # Update storage and emit running metric outside the condition lock. A
         # collect claim can keep this await open; if cancellation or persistence

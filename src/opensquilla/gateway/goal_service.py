@@ -1788,6 +1788,43 @@ class GoalService:
     async def on_runtime_idle(self, session_key: str) -> None:
         self.schedule_idle_evaluation(session_key)
 
+    async def on_completion_group_cancelled(
+        self, session_key: str, parent_task_id: str,
+    ) -> None:
+        """Stop only the Goal that authorized the cancelled parent group."""
+        key = canonicalize_session_key(session_key)
+        parent = await self._storage.get_agent_task(parent_task_id)
+        if parent is None or parent.session_key != key:
+            return
+        context = effective_goal_turn_context(parent.details or {})
+        if context is None or context.task_id != parent_task_id:
+            return
+        async with self._lock(key):
+            current = await self._storage.get_goal(key)
+            if (
+                current is None
+                or current.session_id != context.session_id
+                or current.session_epoch != context.epoch
+                or current.goal_id != context.goal_id
+                or current.status != GoalStatus.ACTIVE.value
+            ):
+                return
+            paused = await self._storage.pause_goal_for_system(
+                session_key=key, goal_id=current.goal_id,
+                expected_state_revision=current.state_revision, reason="user_cancelled",
+            )
+            if paused is None:
+                # A concurrent storage writer may have changed the revision.
+                # Keep the completion fence until a retry can settle authority.
+                raise GoalConflictError("STALE_GOAL", "Goal changed during group cancellation")
+            self._revoke_authority(key)
+            await self._emit_goal(
+                paused, event_type="updated", session_key=key,
+                session_id=paused.session_id, epoch=paused.session_epoch,
+                state_revision=paused.state_revision, progress_revision=paused.progress_revision,
+            )
+
+
     def schedule_idle_evaluation(self, session_key: str) -> None:
         if self._closed:
             return
@@ -1832,6 +1869,13 @@ class GoalService:
                     "goal_continuation_deferred_total",
                     reason="busy",
                 )
+            return
+        from opensquilla.gateway.subagent_announce import active_background_completion_group_ids
+
+        # sessions_yield releases the parent task while its existing completion
+        # group owns the next wake. An ordinary Goal turn must not race that wake.
+        if await active_background_completion_group_ids(session_key):
+            _emit_goal_metric("goal_continuation_deferred_total", reason="busy")
             return
         session = await self._storage.get_session(session_key)
         if (
@@ -1991,6 +2035,9 @@ class GoalService:
                     session_key
                 ) as allowed:
                     if not allowed:
+                        await self._task_runtime.abort_reservation(reservation)
+                        return
+                    if await active_background_completion_group_ids(session_key):
                         await self._task_runtime.abort_reservation(reservation)
                         return
                     async with self._lock(session_key):
