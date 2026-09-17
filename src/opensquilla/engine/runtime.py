@@ -188,6 +188,7 @@ from opensquilla.engine.turn_runner.prompt_assembler_stage import (
     RouterHistoryReplayRequest,
 )
 from opensquilla.engine.turn_runner.stream_consumer_stage import (
+    _cancel_pending_user_input_results,
     _could_be_human_silent_reply_prefix,
     _flush_current_text_segment,
     _StreamState,
@@ -7892,6 +7893,12 @@ class TurnRunner:
                         turn_id=turn_id,
                     )
             cancelled_turn_usage: dict[str, Any] | None = None
+            if stream_state is not None:
+                assistant_replay = _cancel_pending_user_input_results(
+                    stream_state,
+                    task_id=str(getattr(tool_context, "task_id", "") or ""),
+                    assistant_replay=assistant_replay,
+                )
             if self._session_manager is not None and pipeline_usage_context is not None:
                 storage = getattr(self._session_manager, "storage", None)
                 project_usage = getattr(storage, "get_turn_usage_projection", None)

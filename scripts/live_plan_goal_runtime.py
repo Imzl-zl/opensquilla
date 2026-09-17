@@ -73,6 +73,7 @@ MODELS = {
 }
 SCENARIOS = {
     "plan": ("plan", "cancel", "plan-stop", "plan-recovery"),
+    "cancel": ("cancel",),
     "plan-stop": ("plan-stop",),
     "plan-stop-child": ("plan-stop-child",),
     "plan-recovery": ("plan-recovery",),

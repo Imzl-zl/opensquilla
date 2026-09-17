@@ -21,7 +21,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   Upgraded Goals can budget newly recorded usage. Clients check Gateway support
   before offering budget and background settings.
 - Human input and approval waits release compute capacity while preserving task
-  identity and session exclusion. Unsupported legacy database lineages are
+  identity and session exclusion. Cancelled questionnaires are closed in the
+  history used by subsequent turns, while their original questions are preserved.
+  Unsupported legacy database lineages are
   preserved and rejected consistently, and preview/nightly Desktop profiles
   are isolated from stable data.
 

@@ -27,6 +27,7 @@ No ``TurnHook`` is fired from inside the stream loop today.
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field, replace
@@ -678,6 +679,83 @@ class _ToolResultHandler:
         else:
             state.turn_segments.append(result_segment)
         return event
+
+def _cancel_pending_user_input_results(
+    state: _StreamState,
+    *,
+    task_id: str,
+    assistant_replay: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Close this cancelled turn's questions in both durable history views.
+
+    This synchronous projection runs before cancellation persistence. It never
+    yields from a closing Agent generator, and preserves the original question
+    through the ordinary terminal tool-result handler.
+    """
+    from opensquilla.engine.types import ToolResultEvent
+
+    if not task_id:
+        return assistant_replay
+    question_ids = {
+        segment.get("tool_use_id") for segment in state.turn_segments
+        if segment.get("type") == "tool_use" and segment.get("name") == "request_user_input"
+    }
+    cancelled: dict[str, str] = {}
+    handler = _ToolResultHandler()
+    for segment in tuple(state.turn_segments):
+        tool_use_id = segment.get("tool_use_id")
+        if (
+            segment.get("type") != "tool_result"
+            or segment.get("name") != "request_user_input"
+            or not isinstance(tool_use_id, str) or not tool_use_id
+            or tool_use_id not in question_ids
+        ):
+            continue
+        pending = _pending_user_input_request(segment.get("result"))
+        if pending is None or pending.get("run_id") != task_id:
+            continue
+        request_id = pending.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            continue
+        content = json.dumps(
+            {
+                "status": "cancelled", "kind": "user_input", "paused": False,
+                "request_id": request_id, "reason": "turn_cancelled",
+            },
+            ensure_ascii=False,
+        )
+        handler.handle(
+            ToolResultEvent(
+                tool_use_id=tool_use_id, tool_name="request_user_input", result=content,
+            ),
+            state,
+        )
+        cancelled[tool_use_id] = content
+    if not cancelled or assistant_replay is None:
+        return assistant_replay
+    replay = copy.deepcopy(assistant_replay)
+    messages = replay.get("messages")
+    if not isinstance(messages, list):
+        return replay
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        replay_content = message.get("content")
+        if not isinstance(replay_content, list):
+            continue
+        for block in replay_content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            tool_use_id = block.get("tool_use_id")
+            if not isinstance(tool_use_id, str):
+                continue
+            replacement = cancelled.get(tool_use_id)
+            pending = _pending_user_input_request(block.get("content"))
+            if replacement is not None and pending is not None and pending.get("run_id") == task_id:
+                block["content"] = replacement
+                block["is_error"] = False
+    return replay
+
 
 class _ArtifactHandler:
     """Append an artifact payload to the per-turn artifact list."""
