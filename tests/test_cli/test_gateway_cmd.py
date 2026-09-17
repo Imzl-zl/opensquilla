@@ -212,6 +212,30 @@ def test_gateway_run_reports_invalid_config_without_traceback(
     assert "Traceback" not in output
 
 
+@pytest.fixture
+def gateway_start_timeouts(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.Timeout]:
+    from opensquilla.telemetry import runtime as telemetry_runtime
+
+    timeouts: list[asyncio.Timeout] = []
+
+    def timeout_at_checkpoint(delay: float | None) -> asyncio.Timeout:
+        assert delay == telemetry_runtime.SHUTDOWN_UPLOAD_TIMEOUT_SECONDS
+        timeout = asyncio.timeout(None)
+        timeouts.append(timeout)
+        return timeout
+
+    # Functional delivery tests must not race cold SQLite initialization.
+    # Expire the real helper timeout at an observed request boundary instead;
+    # the runtime's separate cleanup budget is only a deadlock backstop here.
+    monkeypatch.setattr(telemetry_runtime, "SHUTDOWN_UPLOAD_TIMEOUT_SECONDS", 30.0)
+    monkeypatch.setattr(
+        gateway_cmd,
+        "asyncio",
+        SimpleNamespace(**(vars(asyncio) | {"timeout": timeout_at_checkpoint})),
+    )
+    return timeouts
+
+
 @pytest.mark.parametrize(
     ("failure_kind", "disabled", "desktop", "expected_outcome", "expected_code"),
     [
@@ -226,7 +250,8 @@ def test_gateway_run_reports_invalid_config_without_traceback(
     ],
 )
 def test_gateway_start_failure_reaches_collector_without_exception_content(
-    tmp_path, monkeypatch, failure_kind, disabled, desktop, expected_outcome, expected_code
+    tmp_path, monkeypatch, gateway_start_timeouts,
+    failure_kind, disabled, desktop, expected_outcome, expected_code,
 ) -> None:
     from opensquilla.gateway.config import GatewayConfig
     from opensquilla.telemetry import runtime as telemetry_runtime
@@ -404,7 +429,7 @@ async def test_gateway_start_failure_does_not_wait_on_another_runtime_send_lock(
 
 
 async def test_gateway_early_failure_timeout_closes_owned_upload_without_retry(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, gateway_start_timeouts
 ) -> None:
     from opensquilla.gateway.config import GatewayConfig
     from opensquilla.telemetry import runtime as telemetry_runtime
@@ -422,6 +447,8 @@ async def test_gateway_early_failure_timeout_closes_owned_upload_without_retry(
 
     async def stalled(request):
         requests.append(request)
+        assert len(gateway_start_timeouts) == 1
+        gateway_start_timeouts[0].reschedule(asyncio.get_running_loop().time())
         try:
             await asyncio.Event().wait()
         finally:
@@ -444,7 +471,6 @@ async def test_gateway_early_failure_timeout_closes_owned_upload_without_retry(
 
         monkeypatch.setattr(telemetry_runtime, "ScopedTelemetryRuntime", runtime_factory)
         monkeypatch.setattr(telemetry_runtime, "TelemetryUploader", uploader_factory)
-        monkeypatch.setattr(telemetry_runtime, "SHUTDOWN_UPLOAD_TIMEOUT_SECONDS", 0.05)
         monkeypatch.setattr(gateway_cmd, "desktop_profile_lifecycle_active", lambda: False)
         await asyncio.wait_for(
             gateway_cmd._record_gateway_start_failure(
@@ -452,10 +478,11 @@ async def test_gateway_early_failure_timeout_closes_owned_upload_without_retry(
                 started_at=gateway_cmd.time.monotonic(),
                 failure=OSError("synthetic-private-path"),
             ),
-            timeout=1,
+            timeout=10,
         )
 
     assert len(requests) == 1
+    assert gateway_start_timeouts[0].expired()
     assert cancelled.is_set()
     assert len(runtimes) == len(uploaders) == 1
     assert runtimes[0]._closed and not runtimes[0].opened_scopes
