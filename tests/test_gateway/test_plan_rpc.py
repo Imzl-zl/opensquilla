@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -21,6 +22,7 @@ from opensquilla.gateway.rpc_sessions import (
     _handle_plans_cancel_run,
     _handle_plans_implement,
     _handle_plans_revise,
+    _handle_plans_set_presentation,
     _handle_sessions_send_contract,
 )
 from opensquilla.gateway.task_runtime import TaskRun, TaskRuntime
@@ -116,6 +118,51 @@ async def _open_plan_rpc_stack(
 
 async def _ignore_subscriber_event(*_args: Any, **_kwargs: Any) -> None:
     return None
+
+
+@pytest.mark.asyncio
+async def test_hide_plan_during_execution_keeps_task_and_mode_and_replays_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    events: list[tuple[str, dict]] = []
+
+    async def handler(_run: TaskRun) -> None:
+        entered.set()
+        await release.wait()
+
+    async def capture(_ctx, _key, event, payload):
+        events.append((event, payload))
+
+    monkeypatch.setattr("opensquilla.gateway.rpc_sessions._emit_to_subscribers", capture)
+    async with _open_plan_rpc_stack(tmp_path / "presentation-rpc.sqlite", handler=handler) as stack:
+        accepted = await _handle_plans_implement({
+            "sessionKey": SOURCE_KEY, "planRevisionId": stack.source_revision.revision_id,
+            "clientRequestId": "presentation-running-implementation",
+        }, stack.context)
+        await asyncio.wait_for(entered.wait(), timeout=2.0)
+        before = await stack.storage.get_session(SOURCE_KEY)
+        params = {
+            "sessionKey": SOURCE_KEY, "revisionId": stack.source_revision.revision_id,
+            "dismissed": True, "expectedEpoch": 0, "expectedPresentationRevision": 0,
+            "clientRequestId": "presentation-running-hide",
+        }
+        hidden = await _handle_plans_set_presentation(params, stack.context)
+        replayed = await _handle_plans_set_presentation(params, stack.context)
+        assert hidden["accepted"] and not hidden["replayed"]
+        assert replayed["replayed"]
+        assert replayed["planPresentations"] == hidden["planPresentations"]
+        assert await stack.storage.get_session(SOURCE_KEY) == before
+        assert await stack.runtime.active_task_id(SOURCE_KEY) == accepted["task_id"]
+        assert len([name for name, _ in events if name == "session.event.plan_presentation"]) == 1
+        with pytest.raises(RpcHandlerError) as conflict:
+            await _handle_plans_set_presentation({
+                **params, "clientRequestId": "presentation-conflict", "dismissed": False,
+            }, stack.context)
+        assert conflict.value.code == "PLAN_PRESENTATION_CHANGED"
+        assert conflict.value.details["planPresentations"] == hidden["planPresentations"]
+        release.set()
 
 
 def _envelope(session_key: str, *, source_name: str) -> RouteEnvelope:
@@ -1113,3 +1160,51 @@ async def test_cancel_stops_a_queued_implementation_before_handler_entry(
 
         release_blocker.set()
         await stack.runtime.wait(blocker.task_id, timeout=2.0)
+
+
+@pytest.mark.parametrize("wait_failure", ["timeout", "still_running"])
+@pytest.mark.asyncio
+async def test_cancel_does_not_claim_success_without_terminal_ack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wait_failure: str,
+) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(_run: TaskRun) -> None:
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(
+        "opensquilla.gateway.rpc_sessions._emit_to_subscribers", _ignore_subscriber_event,
+    )
+    async with _open_plan_rpc_stack(tmp_path / "cancel-ack.sqlite", handler=handler) as stack:
+        response = await _handle_plans_implement({
+            "sessionKey": SOURCE_KEY,
+            "planRevisionId": stack.source_revision.revision_id,
+            "clientRequestId": "cancel-ack-implementation",
+        }, stack.context)
+        await asyncio.wait_for(entered.wait(), timeout=2.0)
+        run = await stack.storage.get_plan_run(response["planRun"]["runId"])
+        assert run is not None and run.status == "running"
+        current_task = await stack.storage.get_agent_task(response["turn_id"])
+        assert current_task is not None
+        assert current_task.status == AgentTaskStatus.RUNNING
+        with monkeypatch.context() as pending:
+            cancel = AsyncMock(return_value=1)
+            wait = AsyncMock(
+                side_effect=TimeoutError if wait_failure == "timeout" else None,
+                return_value=current_task,
+            )
+            pending.setattr(stack.runtime, "cancel", cancel)
+            pending.setattr(stack.runtime, "wait", wait)
+            with pytest.raises(RpcHandlerError) as error:
+                await _handle_plans_cancel_run({
+                    "sessionKey": SOURCE_KEY, "runId": run.run_id,
+                    "expectedStateRevision": run.state_revision,
+                }, stack.context)
+            assert error.value.code == "PLAN_RUN_CANCEL_PENDING"
+            assert error.value.accepted is False
+            cancel.assert_awaited_once()
+            assert await stack.storage.get_plan_run(run.run_id) == run
+        release.set()
+        await stack.runtime.wait(response["turn_id"], timeout=2.0)

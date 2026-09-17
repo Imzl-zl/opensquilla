@@ -14,6 +14,17 @@ function transport(response: unknown, supported = true) {
 }
 
 describe('createV4GoalCenter', () => {
+  it('preserves explicit no-budget and background options and projects total budget accounting', async () => {
+    const source = transport({ accepted: true, goal: { status: 'active', tokenBudget: null, budgetTokensUsed: 321, usageCoverage: 'complete', executionPolicy: 'background' } })
+    const center = createV4GoalCenter(source)
+    const result = await center.edit({ sessionKey: 'agent:demo', expectedGoalId: 'g1', expectedStateRevision: 2, clientRequestId: 'budget-edit', objective: 'ship', tokenBudget: null, executionPolicy: 'background' })
+    expect(source.requests[0]?.params).toMatchObject({ tokenBudget: null, executionPolicy: 'background' })
+    expect(result.goal).toMatchObject({ tokenBudget: null, budgetTokensUsed: 321, usageCoverage: 'complete', executionPolicy: 'background' })
+    await center.edit({ sessionKey: 'agent:demo', expectedGoalId: 'g1', expectedStateRevision: 3, clientRequestId: 'objective-only', objective: 'ship again' })
+    expect(source.requests[1]?.params).not.toHaveProperty('tokenBudget')
+    expect(source.requests[1]?.params).not.toHaveProperty('executionPolicy')
+  })
+
   it('keeps goal-mode availability behind the semantic module boundary', () => {
     const source = {
       supports: (method: string) => method === 'goals.set' || method === 'goals.capabilities',

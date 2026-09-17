@@ -203,6 +203,9 @@
           :fork-busy="forkInFlight"
           :plan-action-pending="planCardPendingAction"
           :plan-actions-disabled="planActionsDisabled"
+          :plan-presentations="planPresentations"
+          :plan-presentation-available="planPresentationAvailable"
+          :plan-presentation-pending="planPresentationPending"
           :is-streaming="isStreaming"
           :follow-live-edge="autoScroll"
           :scroll-epoch="scrollEpoch"
@@ -234,6 +237,7 @@
           @plan-implement-current="implementCurrentPlan"
           @plan-implement-new="implementPlanInNewTask"
           @plan-replan="beginPlanRevision"
+          @plan-presentation-change="chatPlans.setPresentation"
           @goal-clear="clearGoal"
         >
           <template #router-strip="{ message: msg }">
@@ -285,9 +289,13 @@
           :plan="currentPlan"
           :disabled="planActionsDisabled"
           :pending-action="planCardPendingAction"
+          :dismissed="planPresentations[currentPlan.revisionId]?.dismissed"
+          :presentation-available="planPresentationAvailable"
+          :presentation-busy="Boolean(planPresentationPending)"
           @implement-current="implementCurrentPlan"
           @implement-new="implementPlanInNewTask"
           @replan="beginPlanRevision"
+          @presentation-change="chatPlans.setPresentation"
         />
 
         <!-- MetaSkill run cards: preflight checkpoint + progress ribbon,
@@ -2270,6 +2278,8 @@ const {
   initialCollaborationMode,
   currentPlan,
   currentPlanRevisionId,
+  planPresentations,
+  presentationPending: planPresentationPending,
   activePlanRun,
   modeBusy: planModeBusy,
   modeAppliesNextTurn: planModeAppliesNextTurn,
@@ -4528,6 +4538,9 @@ const composerHasSendContent = computed(() =>
 // contract. Hide Plan rather than claim a read-only turn that would run Default.
 const planUiAvailable = computed(() =>
   planCenter.available('mode'),
+)
+const planPresentationAvailable = computed(() =>
+  !shareMode.value && !forkTransition.value && planCenter.available('presentation'),
 )
 const goalUiAvailable = computed(() => goalCenter.available('goal-mode'))
 const goalComposerExisting = computed(() => (

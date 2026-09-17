@@ -3976,6 +3976,8 @@
       }
     },
     "plan": {
+      "hidePlan": "隐藏计划",
+      "showPlan": "显示计划",
       "label": "实施方案",
       "process": "规划过程",
       "revision": "版本 {id}",

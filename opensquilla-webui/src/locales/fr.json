@@ -3892,6 +3892,8 @@
       }
     },
     "plan": {
+      "hidePlan": "Masquer le plan",
+      "showPlan": "Afficher le plan",
       "label": "Plan",
       "process": "Processus de planification",
       "revision": "Révision {id}",

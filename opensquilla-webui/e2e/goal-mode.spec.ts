@@ -42,12 +42,13 @@ type GoalProgress = {
 type GoalFixture = ReturnType<typeof goalSnapshot>
 
 type MockGoalGateway = {
-  acceptGoal: () => void
+  acceptGoal: (options?: { reply?: boolean }) => void
   acceptClear: () => void
   emitGoal: (goal: GoalFixture) => void
   methods: string[]
   setParams: Array<Record<string, unknown>>
   clearParams: Array<Record<string, unknown>>
+  editParams: Array<Record<string, unknown>>
 }
 
 function response(id: string | number | undefined, payload: unknown) {
@@ -129,6 +130,7 @@ async function installFakeGoalGateway(
   const methods: string[] = []
   const setParams: Array<Record<string, unknown>> = []
   const clearParams: Array<Record<string, unknown>> = []
+  const editParams: Array<Record<string, unknown>> = []
   let sendFrame: ((frame: string) => void) | null = null
   let pendingGoalRequest: {
     id: string | number | undefined
@@ -167,6 +169,7 @@ async function installFakeGoalGateway(
             methods: [
               'goals.capabilities',
               'goals.set',
+              'goals.edit',
               ...(options.goalRemoval ? ['goals.clear'] : []),
               ...(options.sessionRouting
                 ? ['sessions.routing.get', 'sessions.routing.set']
@@ -197,6 +200,12 @@ async function installFakeGoalGateway(
           id: frame.id as string | number | undefined,
           params,
         }
+        return
+      }
+      if (method === 'goals.edit' && currentGoal) {
+        editParams.push(frame.params as Record<string, unknown>)
+        currentGoal = { ...currentGoal, ...frame.params, stateRevision: currentGoal.stateRevision + 1 }
+        ws.send(response(frame.id, { accepted: true, sessionKey: SESSION_KEY, sessionId: SESSION_ID, epoch: 1, goal: currentGoal }))
         return
       }
       if (method === 'goals.clear' && options.goalRemoval) {
@@ -269,13 +278,15 @@ async function installFakeGoalGateway(
     methods,
     setParams,
     clearParams,
-    acceptGoal() {
+    editParams,
+    acceptGoal(options = {}) {
       if (!sendFrame || !pendingGoalRequest) {
         throw new Error('fake Goal gateway has no pending goals.set request')
       }
       const { id, params } = pendingGoalRequest
       pendingGoalRequest = null
       currentGoal = goalSnapshot()
+      if (options.reply === false) return
       sendFrame(response(id, {
         accepted: true,
         clientRequestId: params.clientRequestId,
@@ -344,6 +355,23 @@ async function installFakeGoalGateway(
     },
   }
 }
+
+test('Refresh after an unknown Goal acceptance restores its subscription without another set', { tag: '@plan-goal-runtime' }, async ({ page }) => {
+  const gateway = await installFakeGoalGateway(page, { goalRemoval: true })
+  await page.goto(CONTROL_URL + 'chat?session=' + encodeURIComponent(SESSION_KEY))
+  const composer = page.locator('.chat-textarea')
+  await expect(composer).toBeEditable()
+  await composer.fill('/goal')
+  await expect(page.locator('.chat-slash-item').filter({ hasText: '/goal' })).toBeVisible()
+  await composer.fill(`/goal ${OBJECTIVE}`)
+  await page.locator('.chat-send-btn[aria-label="Send"]').click()
+  await expect.poll(() => gateway.setParams.length).toBe(1)
+  gateway.acceptGoal({ reply: false })
+  await page.reload()
+  await expect(page.locator('.goal-ribbon')).toContainText(OBJECTIVE)
+  expect(gateway.setParams).toHaveLength(1)
+  expect(gateway.methods.filter(method => method === 'sessions.messages.subscribe').length).toBeGreaterThanOrEqual(2)
+})
 
 test('Goal mode renders mocked continuation snapshots without correctness polling', async ({ page }) => {
   const gateway = await installFakeGoalGateway(page)
@@ -507,7 +535,7 @@ test('Goal mode renders mocked continuation snapshots without correctness pollin
 })
 
 for (const placement of ['tail fallback', 'inline assistant outcome'] as const) {
-  test(`Completed Goal removal works from the ${placement}`, async ({ page }) => {
+  test(`Completed Goal removal works from the ${placement}`, { tag: '@plan-goal-runtime' }, async ({ page }) => {
     const inline = placement === 'inline assistant outcome'
     const history = inline ? [
       {
@@ -630,7 +658,7 @@ for (const placement of ['tail fallback', 'inline assistant outcome'] as const) 
   })
 }
 
-test('Completed Goal removal confirmation cannot clear a replacement Goal', async ({ page }) => {
+test('Completed Goal removal confirmation cannot clear a replacement Goal', { tag: '@plan-goal-runtime' }, async ({ page }) => {
   const gateway = await installFakeGoalGateway(page, { goalRemoval: true })
   await page.goto(CONTROL_URL + 'chat?session=' + encodeURIComponent(SESSION_KEY))
   await expect(page.locator('.conn-pill.connected')).toBeVisible({ timeout: 10_000 })

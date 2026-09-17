@@ -34,6 +34,11 @@ from opensquilla.persistence.memory_flush_retirement import (
     RETIRED_MEMORY_COLUMNS,
     memory_flush_retirement_statements,
 )
+from opensquilla.persistence.plan_presentation import (
+    PLAN_PRESENTATION_SCHEMA,
+    PlanPresentationConflictError,
+    PlanPresentationRequestConflictError,
+)
 from opensquilla.session.attachment_manifest import preserve_attachment_occurrence_ids
 from opensquilla.session.cost_rollup import rollup_cost_source
 from opensquilla.session.goals import (
@@ -2266,6 +2271,8 @@ class SessionStorage:
         await self._conn.execute(_CREATE_IDX_PROJECT_WORKSPACES_ORDER)
         await self._conn.execute(_CREATE_RUNTIME_PREFERENCES)
         await self._conn.execute(_CREATE_PLAN_REVISIONS)
+        for statement in PLAN_PRESENTATION_SCHEMA:
+            await self._conn.execute(statement)
         await self._conn.execute(_CREATE_IDX_PLAN_REVISIONS_PLAN_GENERATION)
         await self._conn.execute(_CREATE_IDX_PLAN_REVISIONS_SOURCE_SESSION)
         await self._conn.execute(_CREATE_IDX_PLAN_REVISIONS_SOURCE_MESSAGE)
@@ -5643,6 +5650,11 @@ class SessionStorage:
             "DELETE FROM pending_chat_input_dispatch_receipts WHERE session_key = ?",
             (session.session_key,),
         )
+        for table in ("plan_presentations", "plan_presentation_receipts"):
+            await conn.execute(
+                f"DELETE FROM {table} WHERE session_key = ?",
+                (session.session_key,),
+            )
         await conn.execute(
             "DELETE FROM plan_runs WHERE session_key = ?",
             (session.session_key,),
@@ -6091,6 +6103,122 @@ class SessionStorage:
             }
 
     # ── Collaboration plans ────────────────────────────────────────────────
+
+    @_serialized_read
+    async def get_plan_presentations(self, session_key: str) -> list[dict[str, Any]]:
+        """Read visibility for this generation, including superseded revisions."""
+        session_key = canonicalize_session_key(session_key)
+        async with self.conn.execute(
+            """
+            SELECT p.revision_id, p.dismissed, p.state_revision
+            FROM plan_presentations p JOIN sessions s
+              ON s.session_key = p.session_key AND s.session_id = p.session_id
+             AND s.epoch = p.session_epoch
+            WHERE s.session_key = ? ORDER BY p.revision_id
+            """,
+            (session_key,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [
+            {"revisionId": row["revision_id"], "dismissed": bool(row["dismissed"]),
+             "stateRevision": row["state_revision"]}
+            for row in rows
+        ]
+
+    async def set_plan_presentation(
+        self, session_key: str, revision_id: str, *, dismissed: bool,
+        expected_epoch: int, expected_presentation_revision: int, client_request_id: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Commit visibility and its retry receipt without touching execution or content."""
+        session_key = canonicalize_session_key(session_key)
+        if not revision_id.strip() or not client_request_id.strip():
+            raise PlanValidationError("revision and client request identity are required")
+        if not isinstance(dismissed, bool) or any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (expected_epoch, expected_presentation_revision)
+        ):
+            raise PlanValidationError("invalid presentation state or revision")
+        request_json = json.dumps(
+            [revision_id, dismissed, expected_epoch, expected_presentation_revision],
+            separators=(",", ":"),
+        )
+        async with self._write_transaction("set_plan_presentation") as conn:
+            async with conn.execute(
+                "SELECT session_id, epoch FROM sessions WHERE session_key = ?",
+                (session_key,),
+            ) as cur:
+                session = await cur.fetchone()
+            if session is None:
+                raise KeyError(f"Session not found: {session_key}")
+            if int(session["epoch"] or 0) != expected_epoch:
+                raise StaleEpochError("session changed before plan presentation update")
+            session_id = session["session_id"]
+            # Generation validation precedes replay; replay precedes presentation CAS.
+            async with conn.execute(
+                """
+                SELECT request_json, result_json FROM plan_presentation_receipts
+                WHERE session_id = ? AND session_epoch = ? AND client_request_id = ?
+                """,
+                (session_id, expected_epoch, client_request_id),
+            ) as cur:
+                receipt = await cur.fetchone()
+            if receipt is not None:
+                if receipt["request_json"] != request_json:
+                    raise PlanPresentationRequestConflictError("client request id was reused")
+                return json.loads(receipt["result_json"]), True
+            revision = await self._select_plan_revision_on_conn(conn, revision_id)
+            if revision is None or (
+                revision.source_session_key != session_key
+                or revision.source_session_id != session_id
+                or revision.source_epoch != expected_epoch
+            ):
+                raise PlanValidationError(
+                    "plan revision does not belong to this session generation"
+                )
+            async with conn.execute(
+                "SELECT 1 FROM plan_runs WHERE plan_revision_id = ? AND driver_kind = 'goal'",
+                (revision_id,),
+            ) as cur:
+                if await cur.fetchone() is not None:
+                    raise PlanValidationError("Goal internals are not Plan proposals")
+            async with conn.execute(
+                """
+                SELECT state_revision FROM plan_presentations
+                WHERE session_id = ? AND session_epoch = ? AND revision_id = ?
+                """,
+                (session_id, expected_epoch, revision_id),
+            ) as cur:
+                current = await cur.fetchone()
+            current_revision = int(current["state_revision"]) if current is not None else 0
+            if current_revision != expected_presentation_revision:
+                raise PlanPresentationConflictError("plan presentation changed before update")
+            result = {"revisionId": revision_id, "dismissed": dismissed,
+                      "stateRevision": current_revision + 1}
+            now = _now_ms()
+            await conn.execute(
+                """
+                INSERT INTO plan_presentations
+                    (session_key, session_id, session_epoch, revision_id,
+                     dismissed, state_revision, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, session_epoch, revision_id) DO UPDATE SET
+                    dismissed = excluded.dismissed, state_revision = excluded.state_revision,
+                    updated_at = excluded.updated_at
+                """,
+                (session_key, session_id, expected_epoch, revision_id,
+                 int(dismissed), current_revision + 1, now),
+            )
+            await conn.execute(
+                """
+                INSERT INTO plan_presentation_receipts
+                    (session_key, session_id, session_epoch, client_request_id,
+                     request_json, result_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (session_key, session_id, expected_epoch, client_request_id,
+                 request_json, json.dumps(result), now),
+            )
+            return result, False
 
     async def set_collaboration_mode(
         self,

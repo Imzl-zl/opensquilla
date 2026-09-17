@@ -3977,6 +3977,8 @@
       }
     },
     "plan": {
+      "hidePlan": "Hide plan",
+      "showPlan": "Show plan",
       "label": "Plan",
       "process": "Planning process",
       "revision": "Revision {id}",

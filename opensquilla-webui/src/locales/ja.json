@@ -3892,6 +3892,8 @@
       }
     },
     "plan": {
+      "hidePlan": "計画を非表示",
+      "showPlan": "計画を表示",
       "label": "プラン",
       "process": "計画プロセス",
       "revision": "リビジョン {id}",
