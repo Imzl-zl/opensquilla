@@ -422,16 +422,21 @@
                   || (sessionRoutingBusy ? t('chat.composer.routingUpdateBlocked') : sendButtonTitle)"
                 :aria-label="replanActive ? t('chat.plan.reviseSend') : t('chat.send')"
                 :aria-describedby="sendBlockedMessage ? 'chat-composer-send-status' : undefined"
-                :aria-busy="sessionRoutingBusy ? 'true' : 'false'"
-                :disabled="Boolean(sendBlockedMessage) || sessionRoutingBusy || inputDisabled"
+                :aria-busy="sendPending || sessionRoutingBusy ? 'true' : 'false'"
+                :disabled="sendPending || Boolean(sendBlockedMessage) || sessionRoutingBusy || inputDisabled"
                 @click="emit('send')"
               >
-                <Icon name="arrowUp" :size="17" />
+                <LoadingSpinner v-if="sendPending" />
+                <Icon v-else name="arrowUp" :size="17" />
               </button>
             </Transition>
           </div>
           </div>
         </div>
+      </div>
+      <div v-if="sendPending" class="chat-composer-send-pending">
+        <LoadingSpinner aria-hidden="true" />
+        <span role="status" aria-live="polite">{{ t('chat.sendPending') }}</span>
       </div>
       <div v-if="sendBlockedMessage" class="chat-collapse-region">
         <p
@@ -460,6 +465,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
+import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import type { IconName } from '@/utils/icons'
 import ChatComposerAddMenu from '@/components/chat/ChatComposerAddMenu.vue'
 import ChatComposerGoalMode from '@/components/chat/ChatComposerGoalMode.vue'
@@ -491,6 +497,7 @@ const props = withDefaults(defineProps<{
   attachments: Attachment[]
   busySendMode: 'queue' | 'steer'
   hasSendContent: boolean
+  sendPending?: boolean
   isStreaming: boolean
   canStop: boolean
   stopTargetsPlanRun?: boolean
@@ -1902,6 +1909,21 @@ button.attachment-chip__primary:focus-visible {
   background: var(--bg-hover);
   color: var(--text-dim);
   border-color: var(--bg-hover);
+}
+
+.chat-composer-send-pending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.chat-composer-send-pending .loading-spinner,
+.chat-send-btn .loading-spinner {
+  width: 14px;
+  height: 14px;
 }
 
 .chat-send-btn.btn--primary:hover {

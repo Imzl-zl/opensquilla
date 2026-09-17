@@ -30,6 +30,7 @@ from opensquilla.engine.types import (
     RouterDecisionEvent,
 )
 from opensquilla.engine.types import DoneEvent as EngineDoneEvent
+from opensquilla.engine.types import ProviderActivityEvent as EngineProviderActivityEvent
 from opensquilla.gateway.config import GatewayConfig
 from opensquilla.provider import (
     ChatConfig,
@@ -711,7 +712,8 @@ def test_fallback_leg_rebinds_request_budget_and_model_capabilities(
 
     assert rebound is not original
     assert rebound.max_tokens == 2_048
-    assert rebound.provider_request_max_chars == 17_408
+    assert rebound.provider_context_window_tokens == 8_192
+    assert rebound.provider_request_max_chars == 20_480
     assert rebound.model_capabilities == ModelCapabilities(
         supports_tools=False,
         supports_vision=False,
@@ -804,11 +806,11 @@ def test_fallback_leg_preserves_global_context_window_override(
         max_output_tokens=2_048,
     )
 
-    assert original.provider_request_max_chars == 17_408
+    assert original.provider_request_max_chars == 20_480
     assert wrapper.fallback_after_invalid_response("upstream 503") is True
     rebound = wrapper._config_for_active_leg(original)
 
-    assert rebound.provider_request_max_chars == 17_408
+    assert rebound.provider_request_max_chars == 20_480
     assert rebound.context_window_tokens_global_override == 8_192
     assert rebound.provider_request_max_chars_explicit_cap == 0
 
@@ -1295,6 +1297,9 @@ def test_dynamic_tokenrhythm_fallback_without_exact_limit_is_not_cross_clamped()
 
 PRIMARY_MODEL = "routed-primary"
 FALLBACK_MODEL = "fallback-secondary"
+ACTIVITY_PRIMARY_MODEL = "deepseek-v4-pro"
+ACTIVITY_FALLBACK_MODEL = "kimi-k2.7-code"
+ACTIVITY_TERTIARY_MODEL = "deepseek-v4-pro-0813"
 
 
 class _ChainProvider:
@@ -1486,6 +1491,90 @@ class _ChainSelector:
         self.current_config = self._remaining_chain[1]
         self._remaining_chain = self._remaining_chain[1:]
         return _ChainProvider(FALLBACK_MODEL, fail=False)
+
+
+class _ThreeLinkActivityProvider:
+    """Script the reported A -> B retry -> C success chain."""
+
+    provider_name = "openrouter"
+
+    def __init__(self, model: str) -> None:
+        self._model = model
+
+    async def chat(
+        self,
+        messages: list[Any],
+        tools: Any = None,
+        config: Any = None,
+    ) -> AsyncIterator[Any]:
+        del messages, tools, config
+        if self._model == ACTIVITY_PRIMARY_MODEL:
+            yield ErrorEvent(message="synthetic unavailable", code="503")
+            return
+        if self._model == ACTIVITY_FALLBACK_MODEL:
+            yield ProviderActivityEvent(
+                phase="retry_wait",
+                reason="provider_overloaded",
+                retry_attempt=1,
+                retry_limit=1,
+                retry_after_ms=1,
+            )
+            yield ProviderActivityEvent(
+                phase="retrying",
+                reason="provider_overloaded",
+                retry_attempt=1,
+                retry_limit=1,
+            )
+            yield ErrorEvent(
+                message="synthetic gateway timeout",
+                code="504",
+                retry_after_s=901,
+            )
+            return
+        yield TextDeltaEvent(text="answer-from-tertiary")
+        yield DoneEvent(model=self._model, input_tokens=3, output_tokens=2)
+
+    async def list_models(self) -> list[Any]:
+        return []
+
+
+class _ThreeLinkActivitySelector:
+    def __init__(self) -> None:
+        self._chain = [
+            SimpleNamespace(provider="openrouter", model=ACTIVITY_PRIMARY_MODEL),
+            SimpleNamespace(provider="openrouter", model=ACTIVITY_FALLBACK_MODEL),
+            SimpleNamespace(provider="openrouter", model=ACTIVITY_TERTIARY_MODEL),
+        ]
+        self._index = 0
+        self.current_config = self._chain[0]
+
+    def clone(self) -> _ThreeLinkActivitySelector:
+        return self
+
+    def override_model(self, model: str) -> None:
+        if model != self.current_config.model:
+            raise AssertionError(f"unexpected model override: {model}")
+
+    @property
+    def active_provider_id(self) -> str:
+        return str(self.current_config.provider)
+
+    def remaining_chain(self) -> list[SimpleNamespace]:
+        return list(self._chain[self._index :])
+
+    def resolve(self) -> _ThreeLinkActivityProvider:
+        return _ThreeLinkActivityProvider(str(self.current_config.model))
+
+    def next_fallback_after_failure(
+        self,
+        exc: Exception,
+    ) -> _ThreeLinkActivityProvider:
+        del exc
+        self._index += 1
+        if self._index >= len(self._chain):
+            raise IndexError("No fallback chain available")
+        self.current_config = self._chain[self._index]
+        return _ThreeLinkActivityProvider(str(self.current_config.model))
 
 
 async def test_physical_attempt_limit_prevents_selector_internal_fallback() -> None:
@@ -2911,9 +3000,12 @@ async def _run_turn_events(
     *,
     primary_fails: bool,
     pending_input_provider: ListPendingInputProvider | None = None,
+    model_catalog: ModelCatalog | None = None,
 ) -> list[Any]:
     monkeypatch.setattr(TurnRunner, "_run_pipeline", _routed_pipeline_fake(PRIMARY_MODEL))
-    runner = TurnRunner(provider_selector=_ChainSelector(primary_fails=primary_fails))
+    runner = TurnRunner(
+        provider_selector=_ChainSelector(primary_fails=primary_fails), model_catalog=model_catalog,
+    )
     return [
         event
         async for event in runner.run(
@@ -2923,6 +3015,25 @@ async def _run_turn_events(
             history_has_persisted_user=False,
             no_memory_capture=True,
             pending_input_provider=pending_input_provider,
+        )
+    ]
+
+
+async def _run_three_link_activity_events(monkeypatch: Any) -> list[Any]:
+    monkeypatch.setattr(
+        TurnRunner,
+        "_run_pipeline",
+        _routed_pipeline_fake(ACTIVITY_PRIMARY_MODEL),
+    )
+    runner = TurnRunner(provider_selector=_ThreeLinkActivitySelector())
+    return [
+        event
+        async for event in runner.run(
+            "hi",
+            "agent:main:selector-fallback-activity",
+            tool_context=ToolContext(is_owner=True, caller_kind=CallerKind.CLI),
+            history_has_persisted_user=False,
+            no_memory_capture=True,
         )
     ]
 
@@ -2972,6 +3083,40 @@ async def test_precontent_fallback_keeps_one_route_decision_and_appends_executio
     ]
 
 
+async def test_provider_activity_tracks_three_link_physical_fallback_chain(
+    monkeypatch: Any,
+) -> None:
+    events = await _run_three_link_activity_events(monkeypatch)
+
+    router_events = [event for event in events if isinstance(event, RouterDecisionEvent)]
+    assert len(router_events) == 1
+    assert router_events[0].model == ACTIVITY_PRIMARY_MODEL
+
+    activity = [
+        (event.phase, event.model)
+        for event in events
+        if isinstance(event, EngineProviderActivityEvent)
+    ]
+    assert activity == [
+        ("requesting", ACTIVITY_PRIMARY_MODEL),
+        ("fallback", ACTIVITY_FALLBACK_MODEL),
+        ("retry_wait", ACTIVITY_FALLBACK_MODEL),
+        ("retrying", ACTIVITY_FALLBACK_MODEL),
+        ("fallback", ACTIVITY_TERTIARY_MODEL),
+        ("requesting", ACTIVITY_TERTIARY_MODEL),
+    ]
+
+    done = next(event for event in events if isinstance(event, EngineDoneEvent))
+    assert done.route_plan is not None
+    assert done.route_plan["model"] == ACTIVITY_PRIMARY_MODEL
+    assert done.model == ACTIVITY_TERTIARY_MODEL
+    assert [leg["model"] for leg in done.execution_legs] == [
+        ACTIVITY_PRIMARY_MODEL,
+        ACTIVITY_FALLBACK_MODEL,
+        ACTIVITY_TERTIARY_MODEL,
+    ]
+
+
 async def test_same_turn_pending_input_preserves_route_plan_and_model(
     monkeypatch: Any,
 ) -> None:
@@ -3002,11 +3147,20 @@ async def test_same_turn_pending_input_applies_after_precontent_selector_fallbac
 ) -> None:
     pending = ListPendingInputProvider()
     pending.append("replace the original constraint")
+    catalog = ModelCatalog()
+    catalog._populate_from_data([
+        {
+            "id": model, "context_length": 32_000,
+            "top_provider": {"max_completion_tokens": 8192},
+        }
+        for model in (PRIMARY_MODEL, FALLBACK_MODEL)
+    ])
 
     events = await _run_turn_events(
         monkeypatch,
         primary_fails=True,
         pending_input_provider=pending,
+        model_catalog=catalog,
     )
 
     assert len(pending.applications) == 1
@@ -3020,6 +3174,27 @@ async def test_same_turn_pending_input_applies_after_precontent_selector_fallbac
         for item in done.route_plan["fallback_chain"]
     } >= {("openrouter", FALLBACK_MODEL)}
     assert done.model == FALLBACK_MODEL
+
+
+async def test_same_turn_pending_input_stays_queued_when_fallback_window_is_unknown(
+    monkeypatch: Any,
+) -> None:
+    pending = ListPendingInputProvider()
+    pending.append("replace the original constraint")
+
+    events = await _run_turn_events(
+        monkeypatch, primary_fails=True, pending_input_provider=pending,
+    )
+
+    assert pending.applications == ()
+    assert pending.peek_pending() == ["replace the original constraint"]
+    done = next(event for event in events if isinstance(event, EngineDoneEvent))
+    assert done.model == FALLBACK_MODEL
+    assert done.route_plan is not None
+    fallback = next(
+        leg for leg in done.route_plan["fallback_chain"] if leg["model"] == FALLBACK_MODEL
+    )
+    assert fallback["capabilities"]["context_window"] == 0
 
 
 async def test_turn_without_fallback_hop_emits_exactly_one_router_decision(

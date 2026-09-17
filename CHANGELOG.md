@@ -63,6 +63,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- DeepSeek settings now discover official models for the model picker and expose
+  refresh, loading, and discovery errors in the provider editor. New configurations
+  use `deepseek-flash` with current vision support and peak-rate cost estimates;
+  saved legacy model IDs remain unchanged.
+
+- Python code execution in packaged Gateways now uses the bundled Python runtime,
+  allowing tools to create documents with bundled dependencies such as `python-pptx`.
+  Linux Bubblewrap also retains read-only access to the selected Python runtime
+  instead of unnecessarily falling back to a system Python without those dependencies.
+- Automatic session titles now fall back to the first user message when the
+  naming model refuses. Known historical refusal titles also use this display
+  fallback, including the original message archived by context compaction;
+  manual names and stored title data remain unchanged.
+- Restored V1 installation/version reporting and daily conversation/token
+  aggregation and uploads alongside V2 telemetry. Uploads start after Gateway
+  readiness, retain installation state, and honor reporting opt-outs. Daily
+  deduplication now uses a persistent identity per aggregate database so separate
+  profiles do not lose each other's totals. Already acknowledged days remain
+  untouched; pending legacy days adopt the new keys, which can replay an old
+  accepted upload if its acknowledgment was lost before this upgrade.
+  V2 events and the retired provider install-ID header are unchanged.
 - Default Gateway, CLI, decision, trace and safety logs no longer retain
   prompt/conversation previews, tool output or exception payloads. Gateway
   operational logs keep their level prefix and use JSON metadata with event
@@ -91,6 +112,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `Task exception was never retrieved` with a nested
   `ValueError: ... was created in a different Context` chain, and the
   subscriber-visible turn-terminal event could be lost.
+
+- Skill catalog filtering and trigger matching tolerate numeric or nested YAML
+  trigger values, including restored caches and older Gateway responses (#1018).
 
 ## [0.5.4] - 2026-08-25
 

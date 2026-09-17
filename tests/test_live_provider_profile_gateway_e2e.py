@@ -869,7 +869,7 @@ def test_attachment_capacity_runner_reaches_provider_through_real_gateway(
         thread.join(timeout=5)
 
     assert result["ok"] is True, result
-    assert len(requests) == 1
+    assert len(requests) == 1, result
     assert requests[0]["model"] == "kimi-k2.6"
     case = result["cases"][0]
     assert case["usage"]["physical_request_count"] == 1
@@ -938,8 +938,10 @@ def test_attachment_capacity_runner_bounds_provider_http_failures_to_one_call(
         server.server_close()
         thread.join(timeout=5)
 
-    assert result["ok"] is False
-    assert len(requests) == 1
+    assert result["ok"] is False, result
+    # The runner already sanitizes this bounded report. Preserve the failure
+    # stage when the Gateway fails before reaching the synthetic provider.
+    assert len(requests) == 1, result
     case = result["cases"][0]
     assert case["failure_kind"] == expected_failure
     assert case["usage"]["physical_request_count"] == 1
@@ -957,6 +959,7 @@ def test_attachment_capacity_runner_bounds_provider_http_failures_to_one_call(
         ("timeout", "transport", 0),
     ],
 )
+@pytest.mark.ci_serial
 def test_attachment_capacity_runner_fails_closed_for_stream_faults(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

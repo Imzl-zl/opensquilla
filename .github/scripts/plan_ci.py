@@ -52,6 +52,25 @@ _ELECTRON_DEPENDENCY_EXACT: Final = {
     "desktop/electron/package.json",
     "desktop/electron/package-lock.json",
 }
+# These inputs previously triggered the separate NSIS workflow. Keep its native
+# acceptance in the canonical plan so required CI cannot pass while it fails.
+_WINDOWS_NSIS_INPUTS: Final = (
+    ".github/scripts/verify-release-profile-preservation.py",
+    ".github/scripts/upgrade_baseline.py",
+    "tests/fixtures/upgrade-v054/**",
+    "desktop/electron/scripts/nsis/**",
+    "desktop/electron/scripts/test-nsis-*.cjs",
+    "desktop/electron/scripts/test-nsis-*.mjs",
+    "desktop/electron/scripts/*packaged-first-send*.mjs",
+    "desktop/electron/scripts/*packaged-retained-interaction*.mjs",
+    "desktop/electron/scripts/fixtures/packaged-retained-interaction/**",
+    "desktop/electron/scripts/e2e-shutdown-helpers.mjs",
+    "desktop/electron/scripts/packaged-smoke-helpers.mjs",
+    "desktop/electron/scripts/build-gateway.mjs",
+    "desktop/electron/scripts/gateway-integrity.mjs",
+    "scripts/release_dependency_inventory.py",
+    "scripts/build_wheelhouse_zip.py",
+)
 _TUI_DEPENDENCY_EXACT: Final = {
     "packages/opensquilla-tui-host/pyproject.toml",
     "src/opensquilla/cli/tui/opentui/package/.bun-version",
@@ -168,6 +187,14 @@ _SKILL_HUB_TESTS: Final = frozenset(
         "tests/test_skills_hub_lockfile_contract.py",
         "tests/test_skills_hub_doctor.py",
         "tests/test_skills_hash_consumers.py",
+        "tests/test_engine/test_skill_install_turn.py",
+        "tests/test_engine/test_skill_install_settlement.py",
+        "tests/test_gateway/test_skill_install_status.py",
+        "tests/test_skills/test_hub_install_operations.py",
+        "tests/test_skills/test_staging_io_worker.py",
+        "tests/test_skill_install_source.py",
+        "tests/test_skills_hub_streaming.py",
+        "tests/test_skills_hub_streaming_faults.py",
         "tests/test_skills/test_hub_management_service.py",
         "tests/test_skills/test_hub_scanner.py",
         "tests/test_skills/test_hub_transaction_recovery.py",
@@ -200,6 +227,9 @@ _SKILL_HUB_SOURCE_EXACT: Final = frozenset(
         "src/opensquilla/cli/skills_meta_cmd.py",
         "src/opensquilla/application/skill_catalog.py",
         "src/opensquilla/application/skill_management.py",
+        "src/opensquilla/engine/runtime.py",
+        "src/opensquilla/engine/agent.py",
+        "src/opensquilla/application/skill_source.py",
         "src/opensquilla/application/skill_proposal_review.py",
         "src/opensquilla/gateway/app.py",
         "src/opensquilla/gateway/adapters/skill_catalog.py",
@@ -391,6 +421,7 @@ _PYTHON_TARGET_RULES: Final[tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]]
     (("src/opensquilla/onboarding/",), ("tests/test_onboarding",)),
 )
 _FIXED_PLATFORM_MATRIX: Final[dict[str, tuple[tuple[str, str], ...]]] = {
+    "dependency-audit": (("ubuntu-latest", "default"),),
     "workflow-lint": (("ubuntu-latest", "default"),),
     "readme-locale": (("ubuntu-latest", "default"),),
     "frontend-artifact": (("ubuntu-latest", "artifact"),),
@@ -400,12 +431,23 @@ _FIXED_PLATFORM_MATRIX: Final[dict[str, tuple[tuple[str, str], ...]]] = {
         ("windows-latest", "contract-determinism"),
     ),
     "wheel-webui-roundtrip": (("ubuntu-latest", "package"),),
-    "webui-chat-recovery": (("ubuntu-latest", "chromium"),),
+    "webui-chat-recovery": (("ubuntu-22.04", "chromium"),),
     "tui": (("ubuntu-latest", "default"),),
     "desktop-static": (("ubuntu-latest", "default"),),
     "python-targeted": (("ubuntu-latest", "targeted"),),
     "macos-recovery": (("macos-latest", "recovery"),),
     "release-packaging": (("ubuntu-latest", "default"),),
+    "windows-nsis-regression": (
+        ("windows-2022", "build"),
+        ("windows-2022", "wheelhouse-core"),
+        ("windows-2022", "wheelhouse-recommended"),
+        *(("windows-2022", f"{baseline}-{path}-{scenario}")
+          for baseline in ("0.5.3", "0.5.4")
+          for path in ("default", "custom")
+          for scenario in ("baseline", "readlock", "longpath")),
+        ("windows-2022", "fresh-default-fresh"),
+        ("windows-2022", "fresh-custom-fresh"),
+    ),
     "skill-hub": (
         ("ubuntu-latest", "default"),
         ("macos-latest", "default"),
@@ -1634,6 +1676,10 @@ def plan_changes(
             continue
 
         dependency_domain = _dependency_domain(path)
+        if dependency_domain in {"python", "webui", "electron"} or any(
+            fnmatch.fnmatchcase(path, pattern) for pattern in _WINDOWS_NSIS_INPUTS
+        ):
+            suites.add("windows-nsis-regression")
         if dependency_domain == "python":
             suites.update(
                 {

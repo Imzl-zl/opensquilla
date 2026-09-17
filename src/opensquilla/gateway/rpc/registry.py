@@ -19,6 +19,8 @@ silently grow the RPC surface.
 
 from __future__ import annotations
 
+import hashlib
+import re
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
@@ -62,6 +64,24 @@ from opensquilla.gateway.session_services import get_session_storage
 from opensquilla.session.storage import StorageBusyError
 
 log = structlog.get_logger(__name__)
+
+_SEND_COMMAND_METHODS = frozenset({
+    "chat.send",
+    "sessions.send",
+    "sessions.steer.v2",
+    "sessions.pending_inputs.enqueue",
+    "sessions.pending_inputs.dispatch",
+    "sessions.pending_inputs.steer",
+})
+_LOG_ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
+
+
+def _log_correlation_id(value: object) -> str | None:
+    # Request IDs are client-controlled; log a stable digest, never their text.
+    if not isinstance(value, str) or not value:
+        return None
+    return "sha256:" + hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+
 
 _ARTIFACT_PRODUCT_METHOD_PREFIXES = (
     "artifacts.",
@@ -172,7 +192,6 @@ class RpcContext:
     cron_scheduler: Any = None  # SchedulerEngine instance (injected at boot)
     turn_runner: TurnRunner | None = None  # TurnRunner instance (injected at boot)
     task_runtime: Any = None  # TaskRuntime instance (injected at boot)
-    flush_service: Any = None  # SessionFlushService | None (injected at boot)
     heartbeat_service: Any = None  # Task-style heartbeat service (injected at boot)
     heartbeat_loop: Any = None  # Background heartbeat loop (injected at boot)
     prompt_cache_keepalive_service: Any = None  # Opt-in, in-memory session lease service.
@@ -228,9 +247,7 @@ class RpcHandlerError(Exception):
     The dispatcher converts this into a ``ResFrame`` with
     :class:`ErrorShape` populated from the exception's ``code``, ``message``,
     and ``details`` attributes. Handlers use it when a raw exception would
-    lose context the client needs — e.g. ``sessions.reset`` returning a
-    :class:`FlushReceipt` alongside the error so the UI can render the
-    failure mode.
+    lose context the client needs to explain or recover from the failure.
     """
 
     def __init__(
@@ -340,6 +357,25 @@ class RpcRegistry:
         return self._methods.get(name)
 
     async def dispatch(self, req_id: str, method: str, params: Any, ctx: RpcContext) -> ResFrame:
+        response = await self._dispatch(req_id, method, params, ctx)
+        if isinstance(method, str) and method in _SEND_COMMAND_METHODS and response.error:
+            error = response.error
+            # Log the projected outcome even for early authorization/validation
+            # denials. Messages, params and details may contain private inputs.
+            log.warning(
+                "rpc.send_failed",
+                method=method,
+                # Use the existing metadata schema so production privacy
+                # projection retains these explicitly hashed correlations.
+                request_id=_log_correlation_id(req_id),
+                connection_id=_log_correlation_id(getattr(ctx, "conn_id", None)),
+                code=error.code if _LOG_ERROR_CODE.fullmatch(error.code) else "UNKNOWN_ERROR",
+                accepted=error.accepted,
+                retryable=error.retryable,
+            )
+        return response
+
+    async def _dispatch(self, req_id: str, method: str, params: Any, ctx: RpcContext) -> ResFrame:
         safe_req_id = req_id if isinstance(req_id, str) and is_utf8_encodable(req_id) else ""
         if not isinstance(req_id, str) or not isinstance(method, str):
             return make_error_res(
@@ -480,12 +516,13 @@ class RpcRegistry:
                     exc=exc,
                     may_have_applied=entry.required_scope in _ARTIFACT_WRITE_SCOPES,
                 )
-            log.error(
-                "rpc.dispatch_failed",
-                method=method,
-                error=str(exc),
-                exc_info=True,
-            )
+            if method not in _SEND_COMMAND_METHODS:
+                log.error(
+                    "rpc.dispatch_failed",
+                    method=method,
+                    error=str(exc),
+                    exc_info=True,
+                )
             return make_error_res(req_id, "INTERNAL_ERROR", str(exc))
 
 

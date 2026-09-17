@@ -212,6 +212,8 @@ class ErrorEvent:
     model_usage_breakdown: list[dict[str, Any]] = field(default_factory=list)
     usage_missing_count: int = 0
     generation_epoch: int | None = None
+    # Preserve request accounting when an ensemble's terminal call fails.
+    ensemble_trace: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,6 +343,7 @@ class ProviderActivityEvent:
     retry_after_ms: int = 0
     started_at: int = 0
     heartbeat: bool = False
+    model: str = ""
 
 
 @dataclass
@@ -588,6 +591,14 @@ class ChatConfig(BaseModel):
     )
     thinking_level: Any | None = None
     provider_request_max_chars: int = 0
+    # Resolved window of this physical deployment, rebound for every routed
+    # or ensemble leg. Zero preserves legacy callers without catalog facts.
+    provider_context_window_tokens: int = Field(
+        default=0,
+        ge=0,
+        exclude=True,
+        repr=False,
+    )
     # Runtime-only provenance for an explicit global
     # ``llm.context_window_tokens`` override. Selector fallback must resolve the
     # new physical model with this same operator setting; zero means the active

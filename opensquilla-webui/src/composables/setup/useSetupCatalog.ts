@@ -1,5 +1,6 @@
-import { inject, ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { inject, provide, ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import i18n from '@/i18n'
+import { MODEL_CAPACITY_KEY, useModelCapacityForm } from './useModelCapacityForm'
 import { useSetupCapabilitiesForm } from '@/composables/setup/useSetupCapabilitiesForm'
 import { useSetupBehaviorForm } from '@/composables/setup/useSetupBehaviorForm'
 import {
@@ -7,6 +8,8 @@ import {
   normalizeCatalogSyncStatus,
   normalizeDiscoveredModels,
   normalizeProbeTimings,
+  PROVIDER_MODEL_PROBE_REQUEST_TIMEOUT_MS,
+  isProbeTimeoutError,
   useSetupProviderForm,
   type ConnectionState,
   type DiscoveredModelCatalog,
@@ -484,6 +487,9 @@ const setupWorkflow: SetupWorkflow = injectedSetupWorkflow
 const injectedProviderConfiguration = inject(PROVIDER_CONFIGURATION_KEY)
 if (!injectedProviderConfiguration) throw new Error('ProviderConfiguration was not provided')
 const providerConfiguration: ProviderConfiguration = injectedProviderConfiguration
+const modelCapacity = useModelCapacityForm(providerConfiguration)
+provide(MODEL_CAPACITY_KEY, modelCapacity)
+let restoreProviderCapacityDrafts: (() => void) | null = null
 const { pushToast } = useToasts()
 const { confirm } = useConfirm()
 const t = i18n.global.t
@@ -507,6 +513,10 @@ let saveAllRequestPending = false
 
 const providerForm = useSetupProviderForm(setupWorkflow)
 const configuredProviderProbes = ref<Record<string, ConnectionState>>({})
+const configuredProviderProbeRuns = new Map<string, {
+  controller: AbortController
+  previous: ConnectionState | undefined
+}>()
 let configuredProbeEpoch = 0
 const providerActivation = ref<{
   providerId: string
@@ -540,6 +550,14 @@ const capabilitiesForm = useSetupCapabilitiesForm()
 const promotedForm = useSettingsPromotedForm()
 
 const tierModelCatalogs = ref<DiscoveredModelsByProvider>({})
+// Discovery may populate the runtime catalog after the first capacity read.
+// Re-read visible targets only; this watch never initiates discovery itself.
+watch(() => providerForm.connection.value.models, () => {
+  if (providerForm.connection.value.modelSource === 'live') modelCapacity.invalidate()
+})
+watch(tierModelCatalogs, catalogs => {
+  if (Object.values(catalogs).some(catalog => catalog.source === 'live')) modelCapacity.invalidate()
+})
 const tierModelDiscoveries = new Map<string, Promise<void>>()
 let tierModelDiscoveryEpoch = 0
 type ImageModelCatalogSource = 'live' | 'catalog' | 'none'
@@ -793,6 +811,9 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  providerForm.cancelProbe()
+  for (const run of configuredProviderProbeRuns.values()) run.controller.abort()
+  configuredProviderProbeRuns.clear()
 })
 
 // ---------------------------------------------------------------------------
@@ -841,11 +862,14 @@ async function loadData(options: {
     catalog.value = (cat || {}) as OnboardingCatalog
     status.value = (st || {}) as OnboardingStatus
     config.value = (cfg || {}) as ConfigData
+    modelCapacity.invalidate()
     effectiveConfig.value = (effective || {}) as EffectiveConfigData
     // A probe result describes one exact saved deployment. Any successful
     // reload may follow a key, endpoint, model, activation, or deletion
     // mutation, so stale results must never survive it.
     configuredProbeEpoch += 1
+    for (const run of configuredProviderProbeRuns.values()) run.controller.abort()
+    configuredProviderProbeRuns.clear()
     configuredProviderProbes.value = {}
     resetTierModelDiscovery()
     resetImageModelDiscovery()
@@ -1564,6 +1588,23 @@ const providerProbeMissingFields = computed(() => {
     .map(providerProbeFieldLabel)
 })
 
+const providerReachabilityMissingFields = computed(() => {
+  if (!providerForm.selectedProvider.value) return []
+  // A clean saved profile is resolved by the Gateway. Its endpoint may come
+  // from redacted or inherited state that is intentionally absent here.
+  if (providerSelectionKind.value === 'profile' && !providerForm.isDirty.value) return []
+  return providerFields.value
+    .filter(field => (
+      field.required === true
+      && field.name !== 'model'
+      && !isProviderCredentialField(field)
+    ))
+    .filter(field => !String(
+      providerForm.fieldValue(field, currentProviderConfig.value) ?? '',
+    ).trim())
+    .map(providerProbeFieldLabel)
+})
+
 const providerProbeDisabledReason = computed(() => {
   if (providerProbeMissingFields.value.length === 0) return ''
   return t('setup.provider.probeMissingRequired', {
@@ -1638,6 +1679,14 @@ const providerCredentialPanel = computed<ProviderCredentialPanelState | null>(()
   const probeDisabledReason = !fieldsReady
     ? providerProbeDisabledReason.value
     : (!credentialReady ? t('setup.provider.addKeyToTestHint') : '')
+  const reachabilityFieldsReady = providerReachabilityMissingFields.value.length === 0
+  const reachabilityDisabledReason = !reachabilityFieldsReady
+    ? t('setup.provider.probeMissingRequired', {
+        fields: providerReachabilityMissingFields.value.join(
+          t('setup.provider.requiredFieldJoiner'),
+        ),
+      })
+    : (!credentialReady ? t('setup.provider.addKeyToTestHint') : '')
 
   return {
     providerLabel: providerSpec.value.label || providerForm.selectedProvider.value,
@@ -1663,7 +1712,12 @@ const providerCredentialPanel = computed<ProviderCredentialPanelState | null>(()
     draftCredentialSource: hasDraftKey ? 'key' : (envReferenceEdited ? 'env' : ''),
     probeReady: Boolean(providerForm.selectedProvider.value) && fieldsReady && credentialReady,
     probeDisabledReason,
-    probeButtonLabel: credentialReady ? t('setup.provider.testCurrentSettings') : t('setup.provider.addKeyToTest'),
+    probeButtonLabel: credentialReady ? t('setup.provider.testModel') : t('setup.provider.addKeyToTest'),
+    reachabilityReady: Boolean(providerForm.selectedProvider.value)
+      && reachabilityFieldsReady
+      && credentialReady,
+    reachabilityDisabledReason,
+    probeModesSupported: setupWorkflow.capabilities.providerProbeModes !== false,
     connection: providerForm.connection.value,
     onReveal: revealProviderCredential,
     // Hiding is local-only and should remain available even while a save or
@@ -2281,6 +2335,8 @@ function sectionForDetailName(name: string): SettingsSectionId | null {
 // ---------------------------------------------------------------------------
 
 const providerDirty = computed(() => (
+  modelCapacity.dirty(`provider:${normalizeProviderId(providerForm.selectedProvider.value)}`)
+  ||
   providerForm.isDirty.value
   || (providerOwnsFixedModelDraft.value && modelStrategyForm.fixedModelDirty.value)
   || (editingPrimaryProvider.value && promotedForm.timeoutDirty.value)
@@ -2290,6 +2346,8 @@ const behaviorDirty = computed(() => behaviorForm.isDirty.value)
 const securityPrivacyDirty = computed(() => privacyDirty.value)
 const memorySettingsDirty = computed(() => promotedForm.captureDirty.value)
 const modelStrategyDirty = computed(() => (
+  modelCapacity.dirty('modelStrategy')
+  ||
   routerForm.isDirty.value
   || ensembleForm.isDirty.value
   || modelStrategyForm.fixedProviderDirty.value
@@ -2384,6 +2442,8 @@ async function saveDirtySections() {
 async function discardChanges() {
   if (saveAllRequestPending || modelStrategyRoutingBusy.value) return
   if (providerInteractionLocked()) return
+  restoreProviderCapacityDrafts = null
+  for (const draft of [...modelCapacity.drafts.values()]) modelCapacity.discard(draft.scope)
   await loadData()
 }
 
@@ -2462,6 +2522,7 @@ async function requestSelectConfiguredProvider(value: string) {
   if (providerInteractionLocked()) return
   const next = normalizeProviderId(value)
   if (!next) return
+  restoreProviderCapacityDrafts ??= modelCapacity.captureProviderDrafts(next)
   if (providerFixedModelDraftSnapshot.value == null) {
     providerFixedModelDraftSnapshot.value = {
       provider: modelStrategyForm.fixedProvider.value,
@@ -2481,12 +2542,16 @@ async function requestAddProvider(value: string) {
   if (providerInteractionLocked()) return
   const next = normalizeProviderId(value)
   if (!next || !(await confirmProviderDraftDiscard())) return
+  restoreProviderCapacityDrafts ??= modelCapacity.captureProviderDrafts(next)
   providerForm.selectProvider(next)
   onProviderChange()
 }
 
 function cancelProviderEdit() {
   if (providerInteractionLocked()) return
+  if (restoreProviderCapacityDrafts) restoreProviderCapacityDrafts()
+  else modelCapacity.discard(`provider:${normalizeProviderId(providerForm.selectedProvider.value)}`)
+  restoreProviderCapacityDrafts = null
   if (providerOwnsFixedModelDraft.value && providerFixedModelDraftSnapshot.value != null) {
     modelStrategyForm.setFixedProvider(providerFixedModelDraftSnapshot.value.provider)
     modelStrategyForm.setFixedModel(providerFixedModelDraftSnapshot.value.model)
@@ -2507,6 +2572,9 @@ function cancelProviderEdit() {
 function freshConfiguredProbe(phase: ConnectionState['phase'] = 'unverified'): ConnectionState {
   return {
     phase,
+    verificationLevel: 'none',
+    failureStage: '',
+    probeMode: null,
     failureKind: '',
     detail: '',
     firstResponseMs: null,
@@ -2595,9 +2663,14 @@ async function probeConfiguredProvider(value: string) {
   const providerId = normalizeProviderId(value)
   const row = configuredProviders.value.find(item => normalizeProviderId(item.providerId) === providerId)
   if (!providerId || !row?.ready || configuredProviderProbes.value[providerId]?.phase === 'probing') return
+  const controller = new AbortController()
+  configuredProviderProbeRuns.set(providerId, {
+    controller,
+    previous: configuredProviderProbes.value[providerId],
+  })
   configuredProviderProbes.value = {
     ...configuredProviderProbes.value,
-    [providerId]: freshConfiguredProbe('probing'),
+    [providerId]: { ...freshConfiguredProbe('probing'), probeMode: 'model' },
   }
   const probeEpoch = configuredProbeEpoch
   const active = providerId === normalizeProviderId(currentProvider.value)
@@ -2606,33 +2679,74 @@ async function probeConfiguredProvider(value: string) {
     : representativeProviderModel(providerId)
   try {
     const probe = active ? setupWorkflow.provider.probePrimary : setupWorkflow.profile.probeProfile
-    const res = await probe({ providerId, model }) as {
+    const res = await probe(
+      {
+        providerId,
+        model,
+        ...(setupWorkflow.capabilities.providerProbeModes !== false
+          ? { mode: 'model' as const }
+          : {}),
+      },
+      {
+        signal: controller.signal,
+        timeoutMs: PROVIDER_MODEL_PROBE_REQUEST_TIMEOUT_MS,
+      },
+    ) as {
       ok?: boolean
       failureKind?: string
       message?: string
+      detail?: string
+      verificationLevel?: 'reachable' | 'model_verified' | 'none'
+      failureStage?: 'reachability' | 'model'
       firstResponseMs?: number
       totalMs?: number
       latencyMs?: number
     }
-    if (probeEpoch !== configuredProbeEpoch) return
+    if (
+      controller.signal.aborted
+      || probeEpoch !== configuredProbeEpoch
+      || configuredProviderProbeRuns.get(providerId)?.controller !== controller
+    ) return
     const timings = normalizeProbeTimings(res)
     configuredProviderProbes.value = {
       ...configuredProviderProbes.value,
       [providerId]: {
-        ...freshConfiguredProbe(res?.ok ? 'verified' : (res?.failureKind === 'auth_invalid' ? 'key_invalid' : 'unreachable')),
+        ...freshConfiguredProbe(res?.ok
+          ? 'model_verified'
+          : (res?.failureKind === 'probe_timeout'
+              ? 'timed_out'
+              : (res?.failureKind === 'auth_invalid'
+                  ? 'key_invalid'
+                  : (res?.verificationLevel === 'reachable'
+                      ? 'reachable_error'
+                      : 'unreachable')))),
+        verificationLevel: res?.ok ? 'model_verified' : (res?.verificationLevel ?? 'none'),
+        failureStage: res?.failureStage ?? (res?.ok ? '' : 'model'),
+        probeMode: 'model',
         failureKind: String(res?.failureKind || ''),
-        detail: String(res?.message || ''),
+        detail: String(res?.message || res?.detail || ''),
         ...timings,
       },
     }
   } catch (err) {
-    if (probeEpoch !== configuredProbeEpoch) return
+    if (
+      controller.signal.aborted
+      || probeEpoch !== configuredProbeEpoch
+      || configuredProviderProbeRuns.get(providerId)?.controller !== controller
+    ) return
     configuredProviderProbes.value = {
       ...configuredProviderProbes.value,
       [providerId]: {
-        ...freshConfiguredProbe('unreachable'),
+        ...freshConfiguredProbe(isProbeTimeoutError(err) ? 'timed_out' : 'unreachable'),
+        failureStage: 'model',
+        probeMode: 'model',
+        failureKind: isProbeTimeoutError(err) ? 'probe_timeout' : '',
         detail: saveFailedMessage(err),
       },
+    }
+  } finally {
+    if (configuredProviderProbeRuns.get(providerId)?.controller === controller) {
+      configuredProviderProbeRuns.delete(providerId)
     }
   }
 }
@@ -2648,6 +2762,18 @@ function pushPrimaryRouterOutcome(action: string | undefined, previousBinding: s
   pushToast(t(action === 'disable' ? 'setup.provider.routerOutcomeDisabled'
     : action === 'use_recommended' || previousBinding === 'follow_primary' ? 'setup.provider.routerOutcomeSynchronized'
       : 'setup.provider.routerOutcomePreserved'))
+}
+
+function cancelConfiguredProviderProbe(value: string) {
+  const providerId = normalizeProviderId(value)
+  const run = configuredProviderProbeRuns.get(providerId)
+  if (!run) return
+  run.controller.abort()
+  configuredProviderProbeRuns.delete(providerId)
+  const next = { ...configuredProviderProbes.value }
+  if (run.previous) next[providerId] = run.previous
+  else delete next[providerId]
+  configuredProviderProbes.value = next
 }
 
 async function activateProvider(value: string) {
@@ -2874,11 +3000,13 @@ async function removeProviderCredential() {
 }
 
 // Optional accelerator: live-probe the CURRENT (possibly unsaved) provider
-// form values. Never gates saving. The probe RPC requires a model id, so an
-// empty model field falls back to the catalog's default for the provider.
-async function probeProviderConnection() {
+// form values. Never gates saving. Only the explicit model test needs a model;
+// endpoint reachability can run before the user chooses one.
+async function probeProviderConnection(mode: 'reachability' | 'model' = 'reachability') {
   if (providerInteractionLocked()) return
-  if (!providerCredentialPanel.value?.probeReady) return
+  const credentialPanel = providerCredentialPanel.value
+  if (!credentialPanel) return
+  if (mode === 'reachability' ? !credentialPanel.reachabilityReady : !credentialPanel.probeReady) return
   const storedProfileDraft = selectedStoredProfile.value && providerForm.isDirty.value
   const persistedStoredProfile = selectedStoredProfile.value && !storedProfileDraft
   await providerForm.probeConnection({
@@ -2890,6 +3018,7 @@ async function probeProviderConnection() {
       : undefined,
     storedProfile: persistedStoredProfile,
     draftProfile: storedProfileDraft,
+    mode,
   })
   // Verification is deliberately non-mutating. The editor keeps the verified
   // draft visible so the user can review the discovered model and then commit
@@ -3704,6 +3833,32 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
     pushToast(t('setup.toast.chooseProvider'), { tone: 'danger' })
     return false
   }
+  const capacityScope = `provider:${normalizeProviderId(providerForm.selectedProvider.value)}`
+  if (!modelCapacity.valid(capacityScope)) {
+    pushToast(t('setup.capacity.invalid'), { tone: 'danger' })
+    return false
+  }
+  const capacityOnly = modelCapacity.dirty(capacityScope)
+    && !providerForm.isDirty.value
+    && !(providerOwnsFixedModelDraft.value && modelStrategyForm.fixedModelDirty.value)
+    && !promotedForm.timeoutDirty.value && !promotedForm.contextWindowDirty.value
+    && !options.activate
+  if (capacityOnly) {
+    providerSavePending.value = true
+    primaryMutationPending.value = true
+    try {
+      await modelCapacity.save(capacityScope, deepPatchConfig)
+      restoreProviderCapacityDrafts = null
+      pushToast(t('setup.capacity.saved'))
+      return true
+    } catch {
+      pushToast(t('setup.capacity.saveFailed'), { tone: 'danger' })
+      return false
+    } finally {
+      providerSavePending.value = false
+      primaryMutationPending.value = false
+    }
+  }
   // A saved identity with an unavailable primary is still a first usable
   // configuration. The primary action is labelled “Save and start using” in
   // that state, so route it through the same atomic upsert+activate RPC as the
@@ -3720,13 +3875,6 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
     && Boolean(currentProvider.value)
     && !profileSaveSupported.value
   )
-  if (
-    replacesPrimaryOnLegacyGateway
-    && providerForm.connection.value.phase !== 'verified'
-  ) {
-    pushToast(t('setup.provider.currentSettingsNotTested'), { tone: 'danger' })
-    return false
-  }
   let primaryAcknowledged = false
   let refreshStarted = false
   let resolvedRouterAction: 'use_recommended' | 'disable' | undefined
@@ -3807,6 +3955,8 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
         await setupWorkflow.profile.upsertProfile(payload)
       }
       primaryAcknowledged = true
+      await modelCapacity.save(capacityScope, deepPatchConfig)
+      restoreProviderCapacityDrafts = null
       if (options.reload !== false) {
         // Saving a routing-only profile refreshes its persisted status without
         // discarding drafts in any other Settings section. Provider-owned
@@ -3842,6 +3992,8 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
     // deliberately preserves the saved primary model until Model Routing is
     // saved), and skip the patch entirely when no model is selected.
     if (contextPatch) await deepPatchConfig(contextPatch)
+    await modelCapacity.save(capacityScope, deepPatchConfig)
+    restoreProviderCapacityDrafts = null
     if (options.reload !== false) {
       // Replacing the primary deployment on a legacy Gateway changes the
       // identity that Router and the fixed fallback are based on. Rebuild that
@@ -3859,6 +4011,15 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
     return true
   } catch (err) {
     if (primaryAcknowledged) {
+      if (!refreshStarted && modelCapacity.dirty(capacityScope)) {
+        try {
+          const selected = normalizeProviderId(providerForm.selectedProvider.value)
+          await reloadProviderData(true)
+          if (selected !== normalizeProviderId(currentProvider.value)) applyConfiguredProviderSelection(selected)
+        } catch { /* Keep drafts when the read-back itself is unavailable. */ }
+        pushToast(t('setup.capacity.providerPartialSaved'), { tone: 'danger' })
+        return false
+      }
       pushToast(t(refreshStarted ? 'setup.modelStrategy.savedRefreshFailed' : 'setup.provider.primarySavedAdditionalFailed'), { tone: 'danger' })
     } else await reportPrimaryMutationFailure(err)
     return false
@@ -3990,7 +4151,12 @@ async function saveModelStrategy(options: SaveOptions & {
   const hasRouterWork = Boolean(routerRoutingPayload) || Object.keys(routerVisualPatches).length > 0
   const hasFixedModelWork = fixedProviderChanged || Object.keys(fixedModelPatches).length > 0
   const hasEnsembleWork = Object.keys(ensemblePayload).length > 0
-  if (!hasRouterWork && !hasFixedModelWork && !hasEnsembleWork) return true
+  const hasCapacityWork = modelCapacity.dirty('modelStrategy')
+  if (!modelCapacity.valid('modelStrategy')) {
+    pushToast(t('setup.capacity.invalid'), { tone: 'danger' })
+    return false
+  }
+  if (!hasRouterWork && !hasFixedModelWork && !hasEnsembleWork && !hasCapacityWork) return true
   if (hasFixedModelWork && !fixedModel) {
     pushToast(t('setup.toast.chooseFixedModel'), { tone: 'danger' })
     return false
@@ -4015,11 +4181,26 @@ async function saveModelStrategy(options: SaveOptions & {
   let routerSaved = false
   let visualSaved = false
   let ensembleSaved = false
+  let fixedSaved = false
   let primaryActivationAttempted = false
   const refreshPartialSave = async (unknownPrimaryResult = false) => {
+    const savedSections: string[] = []
+    const pendingSections: string[] = []
+    for (const [changed, acknowledged, label] of [
+      [Boolean(routerRoutingPayload), routerSaved, 'setup.modelStrategy.cards.router.title'],
+      [Object.keys(routerVisualPatches).length > 0, visualSaved, 'setup.modelStrategy.visualModeLabel'],
+      [hasEnsembleWork, ensembleSaved, 'setup.modelStrategy.cards.ensemble.title'],
+      [hasFixedModelWork, fixedSaved, 'setup.modelStrategy.cards.single.title'],
+      [hasCapacityWork, !modelCapacity.dirty('modelStrategy'), 'setup.capacity.title'],
+    ] as const) {
+      if (changed) (acknowledged ? savedSections : pendingSections).push(t(label))
+    }
     const message = t(unknownPrimaryResult
       ? 'setup.toast.modelStrategyPartialSaveUncertain'
-      : 'setup.toast.modelStrategyPartialSaved')
+      : hasCapacityWork && modelCapacity.dirty('modelStrategy')
+        ? 'setup.capacity.partialSaved' : 'setup.toast.modelStrategyPartialSaved', {
+      saved: savedSections.join(', '), pending: pendingSections.join(', '),
+    })
     try {
       await loadData({ preserveFormDrafts: true, throwOnError: true })
     } catch (refreshError) {
@@ -4027,6 +4208,11 @@ async function saveModelStrategy(options: SaveOptions & {
       pushToast(saveFailedMessage(refreshError), { tone: 'danger' })
       pushToast(message, { tone: 'danger' })
       return
+    }
+    if (fixedSaved) {
+      modelStrategyForm.initFixedModel(config.value.llm?.model || '', config.value.llm?.provider || '')
+      providerOwnsFixedModelDraft.value = false
+      providerFixedModelDraftSnapshot.value = null
     }
     if (ensembleSaved) {
       const detail = (status.value.sectionDetails || {}).ensemble || {}
@@ -4102,6 +4288,13 @@ async function saveModelStrategy(options: SaveOptions & {
       savedAny = true
     }
 
+    fixedSaved = hasFixedModelWork
+
+    if (hasCapacityWork) {
+      await modelCapacity.save('modelStrategy', deepPatchConfig)
+      savedAny = true
+      pushToast(t('setup.capacity.saved'))
+    }
     if (savedAny && options.reload !== false) await loadData({ preserveProviderDraft: true, preserveDirtySectionDrafts: true, forceResetModelStrategy: true, throwOnError: true })
     return savedAny
   } catch (err) {
@@ -4246,6 +4439,7 @@ async function copyConfigPath() {
 }
 
   return {
+    modelCapacity,
     status,
     config,
     section,
@@ -4319,8 +4513,10 @@ async function copyConfigPath() {
     updateLlmTimeout,
     updateContextWindow,
     probeProviderConnection,
+    cancelProviderProbe: providerForm.cancelProbe,
     refreshProviderModels,
     probeConfiguredProvider,
+    cancelConfiguredProviderProbe,
     activateProvider,
     removeProviderProfile,
     revealProviderCredential,

@@ -115,8 +115,12 @@ def test_release_workflow_builds_desktop_installers() -> None:
     assert "await header.getAttribute(HEADER_IDENTITY_ATTRIBUTE)" in first_send_gate
     assert "landingHeaderNode.evaluate" not in first_send_gate
     assert "await page.mouse.move(1, 1)" in first_send_gate
-    assert "rendererErrors" in first_send_gate
-    assert "consoleErrorMessages" in first_send_gate
+    first_send_evidence = Path(
+        "desktop/electron/scripts/packaged-first-send-evidence.mjs"
+    ).read_text(encoding="utf-8")
+    assert "rendererErrors" in first_send_evidence
+    assert "consoleErrorDetails" in first_send_gate
+    assert "evaluateFirstSendEvidence" in first_send_gate
     assert "DESKTOP_GATEWAY_STARTUP_TIMEOUT_MS" in first_send_gate
     assert (
         "INITIAL_GATEWAY_CONNECTION_TIMEOUT_MS = "
@@ -135,8 +139,8 @@ def test_release_workflow_builds_desktop_installers() -> None:
     assert initial_connection < probe_install < current_probe_install
     assert "await page.reload" not in first_send_gate
     assert "timeout: SEND_TIMEOUT_MS" in first_send_gate[current_probe_install:]
-    assert "PLAYWRIGHT_ELECTRON_SANDBOX_ERRORS" in first_send_gate
-    assert "unexpectedRendererErrorCount" in first_send_gate
+    assert "PLAYWRIGHT_ELECTRON_SANDBOX_ERRORS" in first_send_evidence
+    assert "unexpectedRendererErrorCount" in first_send_evidence
 
 
 def test_release_workflow_runs_v053_windows_upgrade_checks_on_server_2022() -> None:
@@ -1079,8 +1083,27 @@ def test_privacy_docs_describe_network_observability_controls() -> None:
         assert "OPENSQUILLA_UPDATE_CHECK_DISABLED=true" in text, path
 
     privacy = docs["PRIVACY.md"]
-    assert "The automatic installation upload at `/v1/install`" in privacy
-    assert "are retired" in privacy
+    normalized_privacy = " ".join(privacy.split())
+    assert "V1 statistics run alongside V2." in privacy
+    assert (
+        "sends `install` on first use and `version_seen` once per new version to `/v1/install`"
+    ) in normalized_privacy
+    assert (
+        "conversation turns, input tokens, output tokens, cached tokens, and cache-write tokens"
+    ) in normalized_privacy
+    assert (
+        "uploads pending completed days to `/v1/usage` at startup and retries hourly"
+    ) in normalized_privacy
+    assert "The current UTC day is excluded until it ends." in normalized_privacy
+    assert "`X-OpenSquilla-Install-Id` provider header remains retired" in normalized_privacy
+    assert (
+        "`OPENSQUILLA_TELEMETRY_DISABLED=true` remains a hard veto for V1 and V2 telemetry"
+    ) in normalized_privacy
+    assert (
+        "`OPENSQUILLA_UPDATE_CHECK_DISABLED=true` disables update checks and, "
+        "for compatibility with V1, installation and daily usage uploads; "
+        "it does not disable V2 telemetry"
+    ) in normalized_privacy
     assert "passive update checks" in privacy
     assert "automatic desktop update checks at startup" in privacy
     assert "during long-running app sessions" in privacy
