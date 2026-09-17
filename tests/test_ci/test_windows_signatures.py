@@ -234,9 +234,12 @@ def test_signtool_discovery_and_precedence(verifier: VerifierFixture, source: st
 
 @pytest.mark.parametrize("source", ["parameter", "environment"])
 @pytest.mark.parametrize("invalid", ["missing", "directory", "whitespace"])
+@pytest.mark.ci_serial
 def test_explicit_invalid_signtool_fails_without_fallback(
     verifier: VerifierFixture, source: str, invalid: str
 ) -> None:
+    # Keep real PowerShell startup out of the worker-saturated phase, as for
+    # discovery above. Invalid-path rejection retains the 30-second deadline.
     verifier.tool(verifier.path_bin / "signtool.exe")
     verifier.sdk_tool("10.0.10000.0")
     path = {
