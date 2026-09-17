@@ -23,12 +23,22 @@ from opensquilla.gateway.subagent_announce import (
     quiesce_background_completion_sessions,
 )
 from opensquilla.project_workspaces import (
+    ProjectWorkspaceStateError,
     adopt_legacy_project_workspaces,
     project_workspace_payload,
     resolve_project_path,
+    resolve_validated_project_workspace,
 )
 from opensquilla.session.models import ProjectWorkspace
 from opensquilla.session.storage import ProjectSessionSnapshotMismatchError
+from opensquilla.workspace_git_changes import (
+    WorkspaceGitUnavailableError,
+    WorkspacePathError,
+    is_untracked_path,
+    normalize_repo_path,
+    read_workspace_changes,
+    read_workspace_diff,
+)
 
 _d = get_dispatcher()
 
@@ -298,8 +308,113 @@ async def _handle_workspaces_history_delete(
     return await _settle_despite_cancellation(_delete_fenced_history())
 
 
+_WORKSPACE_STATE_NOT_FOUND_REASONS = frozenset({"not_found", "removed"})
+
+
+def _workspace_state_error(exc: ProjectWorkspaceStateError) -> RpcHandlerError:
+    if exc.reason in _WORKSPACE_STATE_NOT_FOUND_REASONS:
+        return RpcHandlerError("WORKSPACE_NOT_FOUND", "Project workspace not found.")
+    return RpcHandlerError(
+        "UNAVAILABLE",
+        f"Project workspace is unavailable ({exc.reason}).",
+    )
+
+
+async def _git_workspace_path(ctx: RpcContext, workspace_id: str) -> str:
+    """Resolve the trusted canonical path a Git read may run against."""
+
+    storage = _storage(ctx)
+    try:
+        validated = await resolve_validated_project_workspace(storage, workspace_id)
+    except ProjectWorkspaceStateError as exc:
+        raise _workspace_state_error(exc) from exc
+    return validated.canonical_path
+
+
+async def _handle_workspaces_git_status(
+    params: dict | None,
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    _require_owner(ctx)
+    workspace_id = _workspace_id(params)
+    workspace_path = await _git_workspace_path(ctx, workspace_id)
+    # Git runs in a worker thread: a cold `status` on a large tree must not
+    # stall the Gateway event loop that also serves chat and event streams.
+    changes = await asyncio.to_thread(read_workspace_changes, workspace_path)
+    return {
+        "available": changes.available,
+        "availabilityReason": changes.availability_reason,
+        "branch": changes.branch,
+        "detached": changes.detached,
+        "upstream": changes.upstream,
+        "ahead": changes.ahead,
+        "behind": changes.behind,
+        "totalCount": changes.total_count,
+        "truncated": changes.truncated,
+        "entries": [
+            {
+                "path": entry.path,
+                "previousPath": entry.previous_path,
+                "changeType": entry.change_type,
+                "staged": entry.staged,
+                "unstaged": entry.unstaged,
+            }
+            for entry in changes.entries
+        ],
+    }
+
+
+async def _handle_workspaces_git_diff(
+    params: dict | None,
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    _require_owner(ctx)
+    values = _params(params)
+    workspace_id = _workspace_id(values)
+    staged = values.get("staged", False)
+    if not isinstance(staged, bool):
+        raise RpcHandlerError("INVALID_PARAMS", "staged must be a boolean")
+    raw_path = values.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise RpcHandlerError("INVALID_PARAMS", "path is required")
+    try:
+        repo_path = normalize_repo_path(raw_path)
+    except WorkspacePathError as exc:
+        # A present path that escapes the workspace is a different failure from
+        # a missing parameter, and the Contract declares both codes separately.
+        raise RpcHandlerError("INVALID_PATH", str(exc)) from exc
+    workspace_path = await _git_workspace_path(ctx, workspace_id)
+    try:
+        untracked = await asyncio.to_thread(
+            is_untracked_path,
+            workspace_path,
+            repo_path,
+        )
+        diff = await asyncio.to_thread(
+            read_workspace_diff,
+            workspace_path,
+            repo_path,
+            staged=staged,
+            untracked=untracked,
+        )
+    except WorkspaceGitUnavailableError as exc:
+        raise RpcHandlerError(
+            "UNAVAILABLE",
+            f"Git is unavailable for this workspace ({exc.reason}).",
+        ) from exc
+    return {
+        "path": diff.path,
+        "staged": diff.staged,
+        "text": diff.text,
+        "truncated": diff.truncated,
+        "binary": diff.binary,
+    }
+
+
 _WORKSPACE_CATALOG_CONTRACT_IMPLEMENTATIONS = {
     "workspaces.list": _handle_workspaces_list,
+    "workspaces.git.status": _handle_workspaces_git_status,
+    "workspaces.git.diff": _handle_workspaces_git_diff,
     "workspaces.open": _handle_workspaces_open,
     "workspaces.update": _handle_workspaces_update,
     "workspaces.pin": _handle_workspaces_pin,

@@ -1,0 +1,158 @@
+import { describe, expect, it, vi } from 'vitest'
+import type { TransportCallOptions as RpcCallOptions } from './transportTypes'
+import { createV4WorkspaceChanges } from './workspaceChangesV4'
+
+/**
+ * The transport request is generic, and a `vi.fn` mock keeps its own concrete
+ * call signature; the cast re-states the generic contract so call assertions
+ * still see every recorded argument.
+ */
+function transport(payload: unknown) {
+  return {
+    request: vi.fn(async <T = unknown>(
+      _method: string,
+      _params?: Record<string, unknown>,
+      _options?: RpcCallOptions,
+    ): Promise<T> => payload as T) as unknown as <T = unknown>(
+      method: string,
+      params?: Record<string, unknown>,
+      options?: RpcCallOptions,
+    ) => Promise<T>,
+  }
+}
+
+function statusResult(overrides: Record<string, unknown> = {}) {
+  return {
+    available: true,
+    availabilityReason: null,
+    branch: 'main',
+    detached: false,
+    upstream: null,
+    ahead: 0,
+    behind: 0,
+    totalCount: 1,
+    truncated: false,
+    entries: [
+      {
+        path: 'src/a.ts',
+        previousPath: null,
+        changeType: 'modified',
+        staged: false,
+        unstaged: true,
+      },
+    ],
+    ...overrides,
+  }
+}
+
+function diffResult(overrides: Record<string, unknown> = {}) {
+  return {
+    path: 'src/a.ts',
+    staged: false,
+    text: '@@ -1 +1 @@\n-a\n+b\n',
+    truncated: false,
+    binary: false,
+    ...overrides,
+  }
+}
+
+describe('createV4WorkspaceChanges', () => {
+  it('projects the validated working-tree result', async () => {
+    const { request } = transport(statusResult())
+    const changes = createV4WorkspaceChanges({ request })
+
+    await expect(changes.readChanges('workspace-1')).resolves.toEqual({
+      available: true,
+      availabilityReason: null,
+      branch: 'main',
+      detached: false,
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+      totalCount: 1,
+      truncated: false,
+      entries: [
+        {
+          path: 'src/a.ts',
+          previousPath: null,
+          changeType: 'modified',
+          staged: false,
+          unstaged: true,
+        },
+      ],
+    })
+    expect(request).toHaveBeenCalledWith(
+      'workspaces.git.status',
+      { workspaceId: 'workspace-1' },
+      undefined,
+    )
+  })
+
+  it('keeps an unavailable workspace distinct from an empty change list', async () => {
+    const { request } = transport(statusResult({
+      available: false,
+      availabilityReason: 'not_repository',
+      branch: null,
+      totalCount: 0,
+      entries: [],
+    }))
+    const changes = createV4WorkspaceChanges({ request })
+
+    const result = await changes.readChanges('workspace-1')
+
+    expect(result.available).toBe(false)
+    expect(result.availabilityReason).toBe('not_repository')
+    expect(result.entries).toEqual([])
+  })
+
+  it('rejects a response that violates the generated Contract', async () => {
+    const { request } = transport({ available: true })
+    const changes = createV4WorkspaceChanges({ request })
+
+    await expect(changes.readChanges('workspace-1'))
+      .rejects.toThrow('workspaces.git.status returned an invalid response')
+  })
+
+  it('sends the staged flag only when the caller sets it', async () => {
+    const { request } = transport(diffResult())
+    const changes = createV4WorkspaceChanges({ request })
+
+    await changes.readDiff({ workspaceId: 'workspace-1', path: 'src/a.ts' })
+    await changes.readDiff({ workspaceId: 'workspace-1', path: 'src/a.ts', staged: true })
+
+    expect(request).toHaveBeenNthCalledWith(
+      1,
+      'workspaces.git.diff',
+      { workspaceId: 'workspace-1', path: 'src/a.ts' },
+      undefined,
+    )
+    expect(request).toHaveBeenNthCalledWith(
+      2,
+      'workspaces.git.diff',
+      { workspaceId: 'workspace-1', path: 'src/a.ts', staged: true },
+      undefined,
+    )
+  })
+
+  it('rejects an invalid diff response instead of returning a partial model', async () => {
+    const { request } = transport({ path: 'src/a.ts', text: 'x' })
+    const changes = createV4WorkspaceChanges({ request })
+
+    await expect(changes.readDiff({ workspaceId: 'workspace-1', path: 'src/a.ts' }))
+      .rejects.toThrow('workspaces.git.diff returned an invalid response')
+  })
+
+  it('forwards the abort signal as a rejecting call option', async () => {
+    const { request } = transport(statusResult())
+    const changes = createV4WorkspaceChanges({ request })
+    const controller = new AbortController()
+
+    await changes.readChanges('workspace-1', { signal: controller.signal })
+
+    expect(request).toHaveBeenCalledWith(
+      'workspaces.git.status',
+      { workspaceId: 'workspace-1' },
+      { signal: controller.signal, abortAction: 'reject', timeoutAction: 'reject' },
+    )
+  })
+})

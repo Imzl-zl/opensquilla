@@ -15,10 +15,13 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 
+from opensquilla import git_runtime
 from opensquilla.gateway.auth import Principal
 from opensquilla.gateway.config import GatewayConfig
 from opensquilla.gateway.rpc import RpcContext
 from opensquilla.gateway.rpc_workspaces import (
+    _handle_workspaces_git_diff,
+    _handle_workspaces_git_status,
     _handle_workspaces_list,
     _handle_workspaces_open,
 )
@@ -1791,3 +1794,299 @@ async def test_all_workspace_handlers_require_local_owner(
         with pytest.raises(RpcHandlerError) as excinfo:
             await handler(params, ctx)
         assert excinfo.value.code == "OWNER_REQUIRED"
+
+
+# ---------------------------------------------------------------------------
+# workspaces.git.status / workspaces.git.diff
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def git_workspace_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Isolate Git configuration for the handler-level Git reads.
+
+    The handlers run Git through the shared runtime with the process
+    environment, so the test pins it: a developer's ``diff.algorithm`` or
+    ``core.quotepath`` must not change these assertions.
+    """
+
+    capability = git_runtime.resolve_git_capability(force_refresh=True)
+    if not capability.available:
+        pytest.skip(f"Git capability is unavailable: {capability.reason}")
+    global_config = tmp_path / "isolated-gitconfig"
+    global_config.write_text("[init]\n\tdefaultBranch = main\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+
+
+def _git_in(repository: Path, args: tuple[str, ...]) -> None:
+    result = git_runtime.run_git(args, cwd=repository, timeout=10.0)
+    assert result.state is git_runtime.GitRunState.OK, result.stderr_text
+
+
+def _init_git_repository(repository: Path) -> None:
+    repository.mkdir(parents=True, exist_ok=True)
+    _git_in(repository, ("-c", "init.templateDir=", "init", "-q"))
+    _git_in(repository, ("config", "user.email", "tests@example.invalid"))
+    _git_in(repository, ("config", "user.name", "OpenSquilla Tests"))
+    _git_in(repository, ("config", "commit.gpgsign", "false"))
+
+
+def _commit_in(repository: Path, message: str = "commit") -> None:
+    _git_in(repository, ("add", "--all"))
+    _git_in(repository, ("commit", "-q", "--allow-empty", "-m", message))
+
+
+async def _open_trusted_workspace(
+    ctx: RpcContext,
+    project: Path,
+) -> str:
+    opened = await _handle_workspaces_open(
+        {"path": str(project), "trusted": True},
+        ctx,
+    )
+    return str(opened["workspace"]["id"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler", "params"),
+    (
+        (_handle_workspaces_git_status, {"workspaceId": "missing"}),
+        (_handle_workspaces_git_diff, {"workspaceId": "missing", "path": "a.txt"}),
+    ),
+)
+async def test_git_reads_require_a_local_owner(
+    handler: Any,
+    params: dict[str, Any],
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+) -> None:
+    from opensquilla.gateway.rpc import RpcHandlerError
+
+    ctx, _ = workspace_ctx
+
+    with pytest.raises(RpcHandlerError) as raised:
+        await handler(params, _remote_ctx(ctx))
+
+    assert raised.value.code == "OWNER_REQUIRED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler", "params"),
+    (
+        (_handle_workspaces_git_status, None),
+        (_handle_workspaces_git_status, {}),
+        (_handle_workspaces_git_status, {"workspaceId": "  "}),
+        (_handle_workspaces_git_diff, {"workspaceId": "ws"}),
+    ),
+)
+async def test_git_reads_reject_invalid_params(
+    handler: Any,
+    params: dict[str, Any] | None,
+) -> None:
+    from opensquilla.gateway.rpc import RpcHandlerError
+
+    with pytest.raises(RpcHandlerError) as raised:
+        await handler(params, _owner_ctx_without_storage())
+
+    assert raised.value.code == "INVALID_PARAMS"
+
+
+@pytest.mark.asyncio
+async def test_git_diff_rejects_a_non_boolean_staged_flag(
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+) -> None:
+    from opensquilla.gateway.rpc import RpcHandlerError
+
+    ctx, _ = workspace_ctx
+
+    with pytest.raises(RpcHandlerError) as raised:
+        await _handle_workspaces_git_diff(
+            {"workspaceId": "ws", "path": "a.txt", "staged": "yes"},
+            ctx,
+        )
+
+    assert raised.value.code == "INVALID_PARAMS"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ("/etc/passwd", "../outside.txt", "C:/Windows"))
+async def test_git_diff_rejects_paths_outside_the_workspace(
+    path: str,
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+) -> None:
+    from opensquilla.gateway.rpc import RpcHandlerError
+
+    ctx, _ = workspace_ctx
+
+    with pytest.raises(RpcHandlerError) as raised:
+        await _handle_workspaces_git_diff(
+            {"workspaceId": "ws", "path": path},
+            ctx,
+        )
+
+    # The path is validated before any workspace lookup or Git launch.
+    assert raised.value.code == "INVALID_PATH"
+
+
+@pytest.mark.asyncio
+async def test_git_reads_report_a_missing_workspace(
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+) -> None:
+    from opensquilla.gateway.rpc import RpcHandlerError
+
+    ctx, _ = workspace_ctx
+
+    with pytest.raises(RpcHandlerError) as status_raised:
+        await _handle_workspaces_git_status({"workspaceId": "missing"}, ctx)
+    assert status_raised.value.code == "WORKSPACE_NOT_FOUND"
+
+    with pytest.raises(RpcHandlerError) as diff_raised:
+        await _handle_workspaces_git_diff(
+            {"workspaceId": "missing", "path": "a.txt"},
+            ctx,
+        )
+    assert diff_raised.value.code == "WORKSPACE_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_git_reads_report_an_untrusted_workspace(
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+    tmp_path: Path,
+) -> None:
+    from opensquilla.gateway.rpc import RpcHandlerError
+
+    ctx, storage = workspace_ctx
+    project = tmp_path / "untrusted-git"
+    project.mkdir()
+    workspace = await storage.create_or_restore_project_workspace(
+        path=str(project.resolve()),
+        path_key=project_path_key(project, strict=True),
+        display_name=project.name,
+        trusted_at=None,
+    )
+
+    with pytest.raises(RpcHandlerError) as raised:
+        await _handle_workspaces_git_status(
+            {"workspaceId": workspace.workspace_id},
+            ctx,
+        )
+
+    assert raised.value.code == "UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_git_status_reports_a_workspace_without_a_repository(
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+    tmp_path: Path,
+    git_workspace_env: None,
+) -> None:
+    ctx, _ = workspace_ctx
+    project = tmp_path / "not-a-repo"
+    project.mkdir()
+    workspace_id = await _open_trusted_workspace(ctx, project)
+
+    result = await _handle_workspaces_git_status({"workspaceId": workspace_id}, ctx)
+
+    assert result["available"] is False
+    assert result["availabilityReason"] == "not_repository"
+    assert result["entries"] == []
+    assert result["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_git_status_projects_a_real_repository(
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+    tmp_path: Path,
+    git_workspace_env: None,
+) -> None:
+    ctx, _ = workspace_ctx
+    project = tmp_path / "repo"
+    _init_git_repository(project)
+    (project / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_in(project)
+    (project / "tracked.txt").write_text("two\n", encoding="utf-8")
+    (project / "fresh.txt").write_text("new\n", encoding="utf-8")
+    workspace_id = await _open_trusted_workspace(ctx, project)
+
+    result = await _handle_workspaces_git_status({"workspaceId": workspace_id}, ctx)
+
+    assert result["available"] is True
+    assert result["availabilityReason"] is None
+    assert result["branch"] == "main"
+    assert result["detached"] is False
+    assert result["totalCount"] == 2
+    assert result["truncated"] is False
+    assert sorted(result["entries"], key=lambda entry: entry["path"]) == [
+        {
+            "path": "fresh.txt",
+            "previousPath": None,
+            "changeType": "untracked",
+            "staged": False,
+            "unstaged": True,
+        },
+        {
+            "path": "tracked.txt",
+            "previousPath": None,
+            "changeType": "modified",
+            "staged": False,
+            "unstaged": True,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_git_diff_separates_staged_from_unstaged_content(
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+    tmp_path: Path,
+    git_workspace_env: None,
+) -> None:
+    ctx, _ = workspace_ctx
+    project = tmp_path / "repo"
+    _init_git_repository(project)
+    (project / "file.txt").write_text("one\n", encoding="utf-8")
+    _commit_in(project)
+    (project / "file.txt").write_text("two\n", encoding="utf-8")
+    _git_in(project, ("add", "file.txt"))
+    (project / "file.txt").write_text("three\n", encoding="utf-8")
+    workspace_id = await _open_trusted_workspace(ctx, project)
+
+    staged = await _handle_workspaces_git_diff(
+        {"workspaceId": workspace_id, "path": "file.txt", "staged": True},
+        ctx,
+    )
+    unstaged = await _handle_workspaces_git_diff(
+        {"workspaceId": workspace_id, "path": "file.txt"},
+        ctx,
+    )
+
+    assert staged["staged"] is True
+    assert "+two" in staged["text"]
+    assert "+three" not in staged["text"]
+    assert unstaged["staged"] is False
+    assert "+three" in unstaged["text"]
+    assert (staged["truncated"], staged["binary"]) == (False, False)
+
+
+@pytest.mark.asyncio
+async def test_git_diff_renders_an_untracked_file_as_a_new_file(
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+    tmp_path: Path,
+    git_workspace_env: None,
+) -> None:
+    ctx, _ = workspace_ctx
+    project = tmp_path / "repo"
+    _init_git_repository(project)
+    _commit_in(project)
+    (project / "fresh.txt").write_text("brand new\n", encoding="utf-8")
+    workspace_id = await _open_trusted_workspace(ctx, project)
+
+    result = await _handle_workspaces_git_diff(
+        {"workspaceId": workspace_id, "path": "fresh.txt"},
+        ctx,
+    )
+
+    assert "new file mode" in result["text"]
+    assert "+brand new" in result["text"]
+    assert result["staged"] is False

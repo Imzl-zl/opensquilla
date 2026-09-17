@@ -22,14 +22,14 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
     specs = runner.discover_contracts()
     targets = runner.load_production_targets(specs)
 
-    assert len(targets) == 197
+    assert len(targets) == 199
     assert Counter(role for roles in targets.values() for role in roles) == {
-        "result": 187,
+        "result": 189,
         "params": 20,
         "payload": 9,
         "frame": 1,
     }
-    assert sum(len(spec.targets) for spec in specs) == 870
+    assert sum(len(spec.targets) for spec in specs) == 878
     assert targets[("method", "sessions.executionLog.read")] == ("params", "result")
     assert targets[("method", "sessions.list")] == ("result",)
     assert targets[("method", "skills.install.status")] == ("result",)
@@ -37,6 +37,9 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
     assert targets[("method", "meta.inspect")] == ("result",)
     assert targets[("method", "telemetry.product_active.record")] == ("result",)
     assert targets[("method", "sessions.messages.snapshot.read")] == ("params", "result")
+    # The workspace Git reads validate only the gateway-to-UI direction.
+    assert targets[("method", "workspaces.git.status")] == ("result",)
+    assert targets[("method", "workspaces.git.diff")] == ("result",)
     assert targets[("method", "transport.flow.update")] == ("params", "result")
     assert targets[("method", "onboarding.llmProfile.upsertAndActivate")] == (
         "params", "result",
