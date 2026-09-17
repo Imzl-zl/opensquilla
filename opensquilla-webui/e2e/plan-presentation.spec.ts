@@ -12,6 +12,7 @@ async function installGateway(page: Page, status: 'queued' | 'running') {
   let dismissed = false
   let presentationRevision = 0
   let cancelled = false
+  let settleCancellation: (() => void) | undefined
   const mutations: Array<{ method: string; params: Record<string, unknown> }> = []
   const plan = {
     revisionId: REVISION, planId: 'presentation-plan', generation: 1,
@@ -55,8 +56,16 @@ async function installGateway(page: Page, status: 'queued' | 'running') {
       }
       if (frame.method === 'plans.cancelRun') {
         mutations.push({ method: frame.method, params: frame.params })
-        cancelled = true
-        reply(frame.id, { sessionKey: SESSION, planRun: run() })
+        // Keep cancellation pending until the test delivers the owning task's
+        // terminal event and the authoritative cancellation response.
+        settleCancellation = () => {
+          cancelled = true
+          ws.send(JSON.stringify({ type: 'event', event: 'task.cancelled', payload: {
+            key: SESSION, session_key: SESSION, task_id: 'presentation-task',
+            epoch: 1, reason: 'aborted',
+          } }))
+          reply(frame.id, { sessionKey: SESSION, planRun: run() })
+        }
         return
       }
       const metadata = {
@@ -81,14 +90,23 @@ async function installGateway(page: Page, status: 'queued' | 'running') {
       reply(frame.id, payloads[frame.method] ?? {})
     })
   })
-  return mutations
+  return {
+    mutations,
+    settleCancellation() {
+      if (!settleCancellation) throw new Error('No cancellation request is pending')
+      const settle = settleCancellation
+      settleCancellation = undefined
+      settle()
+    },
+  }
 }
 
 for (const width of [1280, 390]) {
   for (const status of ['queued', 'running'] as const) {
-    test(`plan presentation survives refresh without stopping ${status} work at ${width}px`, { tag: '@plan-goal-runtime' }, async ({ page }) => {
+    test(`hidden plan keeps Stop reachable through ${status} cancellation and refresh at ${width}px`, { tag: '@plan-goal-runtime' }, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 })
-      const mutations = await installGateway(page, status)
+      const gateway = await installGateway(page, status)
+      const { mutations } = gateway
       await page.goto(`/control/chat?session=${encodeURIComponent(SESSION)}`)
       const card = page.locator(`[data-plan-revision-id="${REVISION}"]`)
       const cancel = page.locator('.plan-run__cancel')
@@ -102,20 +120,36 @@ for (const width of [1280, 390]) {
       await page.reload()
       const restore = card.getByRole('button', { name: 'Show plan', exact: true })
       await expect(restore).toBeVisible()
-      await restore.focus()
-      await page.keyboard.press('Enter')
-      await expect(card.getByText('Keep this proposal in history.')).toBeVisible()
+      // Stop remains outside the hidden proposal, including after reload.
       await expect(cancel).toBeVisible()
       const bounds = await cancel.boundingBox()
       expect(bounds?.height).toBeGreaterThanOrEqual(44)
       expect((bounds?.x ?? -1) + (bounds?.width ?? 0)).toBeLessThanOrEqual(width)
       await cancel.click()
+      await expect.poll(() => mutations.filter(item => item.method === 'plans.cancelRun').length).toBe(1)
+      await expect(cancel).toBeDisabled()
+      await expect(page.locator(`.plan-run--${status}`)).toBeVisible()
+      await expect(restore).toBeVisible()
+      await expect(page.locator('.plan-run--cancelled')).toHaveCount(0)
+
+      gateway.settleCancellation()
+      await expect(page.locator('.plan-run--cancelled')).toBeVisible()
       await expect(cancel).toHaveCount(0)
+      await expect(restore).toBeVisible()
+
+      // Stopping execution cannot discard the historical proposal or its
+      // presentation preference. Restoration still works after fresh hydration.
+      await page.reload()
+      await expect(restore).toBeVisible()
+      await expect(cancel).toHaveCount(0)
+      await restore.focus()
+      await page.keyboard.press('Enter')
+      await expect(card.getByText('Keep this proposal in history.')).toBeVisible()
       expect(mutations.map(item => item.method)).toEqual([
-        'plans.setPresentation', 'plans.setPresentation', 'plans.cancelRun',
+        'plans.setPresentation', 'plans.cancelRun', 'plans.setPresentation',
       ])
-      expect(mutations[1]?.params.expectedPresentationRevision).toBe(1)
-      expect(mutations[2]?.params).toMatchObject({ runId: 'presentation-run', expectedStateRevision: 1 })
+      expect(mutations[1]?.params).toMatchObject({ runId: 'presentation-run', expectedStateRevision: 1 })
+      expect(mutations[2]?.params.expectedPresentationRevision).toBe(1)
     })
   }
 }

@@ -21,6 +21,15 @@ from opensquilla.gateway.user_input_broker import validate_user_input_fields
 from scripts import live_plan_goal_runtime as live
 
 
+@pytest.fixture(autouse=True)
+def restore_disconnect_instrumentation(monkeypatch):
+    from opensquilla.gateway.websocket import ConnectionRegistry
+
+    # install_dispatch_guard wraps this process-wide boundary only in the
+    # isolated Gateway; unit tests must restore it along with the HTTP hooks.
+    monkeypatch.setattr(ConnectionRegistry, "unregister", ConnectionRegistry.unregister)
+
+
 def _request(model: str = "deepseek-chat", **kwargs: object) -> bytes:
     return json.dumps({"model": model, "max_tokens": 4096, **kwargs}).encode()
 
@@ -373,7 +382,7 @@ def test_goal_suite_requires_real_child_case() -> None:
     assert "childbudget" in live.SCENARIOS["goal"]
     assert {"sessions_spawn", "sessions_yield"} <= set(live.ALLOWED_TOOLS)
     assert live.MODELS["tokenrhythm"] == "deepseek-v4-pro-0813"
-    assert live.MODELS["deepseek"] == "deepseek-v4-flash"
+    assert live.MODELS["deepseek"] == "deepseek-flash"
 
 
 def test_child_environment_drops_other_keys_and_injection() -> None:
@@ -742,7 +751,11 @@ async def test_all_model_waits_share_case_deadline_instead_of_resetting_timeouts
             await case.pending("synthetic")
 
 
-def test_exact_user_task_evidence_rejects_hidden_auto_turn(tmp_path: Path) -> None:
+@pytest.mark.parametrize("details", [
+    {}, {"goal_context": None}, {"goal_effective_context": None},
+    {"goal_effective_context": None, "goal_context": {"automatic": True}},
+])
+def test_exact_user_task_evidence_rejects_hidden_auto_turn(tmp_path: Path, details) -> None:
     case = live.LiveCase(tmp_path, "deepseek", "deepseek-chat", {})
     with sqlite3.connect(case.root / "state" / "sessions.db") as db:
         db.executescript(
@@ -754,8 +767,8 @@ def test_exact_user_task_evidence_rejects_hidden_auto_turn(tmp_path: Path) -> No
         db.execute("INSERT INTO session_goals VALUES ('synthetic','goal','paused',NULL,0,0)")
         for index in range(3):
             task = f"task-{index}"
-            db.execute("INSERT INTO agent_tasks VALUES (?, 'succeeded', '{}', 'synthetic', ?)",
-                       (task, index))
+            db.execute("INSERT INTO agent_tasks VALUES (?, 'succeeded', ?, 'synthetic', ?)",
+                       (task, json.dumps(details), index))
             case.guard.claim("root_turns", 4, turn_id=task)
     live.exact_user_tasks(case, "synthetic", ["task-0", "task-1", "task-2"])
     with sqlite3.connect(case.root / "state" / "sessions.db") as db:

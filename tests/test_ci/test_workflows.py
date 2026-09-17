@@ -2245,6 +2245,7 @@ def test_webui_chat_recovery_runs_the_verified_dist_through_gateway() -> None:
         "plan-presentation.spec.ts",
         "task-progress.spec.ts",
         "provider-error-experience.spec.ts",
+        "router-physical-model.spec.ts",
         "queue-steer.spec.ts",
         "session-created-card.spec.ts",
         "session-switch-transport.spec.ts",
@@ -2851,10 +2852,20 @@ def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_
             "tests/test_gateway/test_goal_rpc.py",
             "tests/test_tools/test_dispatch_legacy_coverage.py",
             "tests/unit/cli/repl/test_slash_bridge.py",
+            "tests/test_gateway/test_channel_turn_ingress.py",
+            "tests/test_gateway/test_goal_registry_cleanup.py",
+            "tests/functional/test_gateway_silent_reply_process_e2e.py",
         })
         assert '"${{ matrix.shard }}" == "desktop-installer-contracts"' in preflight["run"]
+        assert '"${{ matrix.shard }}" == "gateway-sqlite"' in preflight["run"]
         assert '"${regression_args[@]}"' in preflight["run"]
         assert "-o faulthandler_timeout=60" in preflight["run"]
+    if job_name == "windows-full":
+        expected_preflight_files.update({
+            "tests/test_live_plan_stop_child.py",
+            "tests/test_ci/test_windows_signatures.py",
+        })
+        assert '"${{ matrix.shard }}" == "core"' in preflight["run"]
     assert set(re.findall(r"tests/[a-zA-Z0-9_/.]+\.py", preflight["run"])) == (
         expected_preflight_files
     )

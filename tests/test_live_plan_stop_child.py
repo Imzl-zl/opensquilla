@@ -24,7 +24,7 @@ async def _start_fixture(workspace: Path, maximum: str = "5"):
     )
     try:
         async with asyncio.timeout(5):
-            assert await process.stdout.readline() == b"STARTED\n"
+            assert await process.stdout.readline() in (b"STARTED\n", b"STARTED\r\n")
     except BaseException:
         process.kill()
         await process.wait()

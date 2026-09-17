@@ -68,7 +68,7 @@ LIMITS = {
 }
 MODELS = {
     "tokenrhythm": "deepseek-v4-pro-0813",
-    "deepseek": "deepseek-v4-flash",
+    "deepseek": "deepseek-flash",
     "openrouter": "deepseek/deepseek-v4-flash",
 }
 SCENARIOS = {
@@ -245,17 +245,119 @@ class DispatchGuard:
             }
 
 
-def install_dispatch_guard(guard: DispatchGuard) -> None:
+
+class DisconnectDispatchGate:
+    """Hold an armed request until the real Gateway registry loses its last client."""
+
+    def __init__(self, guard: DispatchGuard) -> None:
+        self.guard = guard
+        self.disconnected = asyncio.Event()
+        self.waiting = asyncio.Event()
+
+    def arm(self, turn_id: str) -> None:
+        with self.guard.connect() as db:
+            db.execute("INSERT OR REPLACE INTO settings VALUES ('disconnect_gate_turn', ?)",
+                       (turn_id,))
+
+    def _armed_turn(self) -> str | None:
+        with self.guard.connect() as db:
+            row = db.execute(
+                "SELECT value FROM settings WHERE name='disconnect_gate_turn'"
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def after_unregister(self, registry: Any) -> None:
+        if not self._armed_turn() or registry.all():
+            return
+        # The existing Goal observer has already run, and this is the actual
+        # registry-removal boundary, not completion of client.close().
+        with self.guard.connect() as db:
+            roots = db.execute(
+                "SELECT value FROM counters WHERE name='root_turns'"
+            ).fetchone()
+            db.execute(
+                "INSERT OR IGNORE INTO settings VALUES ('disconnect_boundary_roots', ?)",
+                (str(roots[0] if roots else 0),),
+            )
+            calls = db.execute(
+                "SELECT value FROM counters WHERE name='physical_calls'"
+            ).fetchone()
+            db.execute(
+                "INSERT OR IGNORE INTO settings VALUES ('disconnect_boundary_calls', ?)",
+                (str(calls[0] if calls else 0),),
+            )
+            db.execute(
+                "INSERT OR IGNORE INTO settings VALUES ('disconnect_boundary_connections', '0')"
+            )
+        self.disconnected.set()
+
+    async def before_dispatch(self, turn_id: str | None, registry: Any) -> None:
+        armed = self._armed_turn()
+        if not turn_id or not armed:
+            return
+        if turn_id != armed:
+            if self.disconnected.is_set():
+                if registry.all():
+                    raise DispatchLimitError("disconnect_gate_connection_returned")
+                with self.guard.connect() as db:
+                    db.execute("INSERT OR REPLACE INTO settings VALUES "
+                               "('automatic_dispatch_without_connections', '1')")
+            return
+        with self.guard.connect() as db:
+            started = float(db.execute(
+                "SELECT value FROM settings WHERE name='started'"
+            ).fetchone()[0])
+        remaining = max(0.0, started + LIMITS['case_seconds'] - time.time())
+        self.waiting.set()
+        async with asyncio.timeout(remaining):
+            await self.disconnected.wait()
+        if registry.all():
+            raise DispatchLimitError("disconnect_gate_connection_returned")
+        with self.guard.connect() as db:
+            db.execute(
+                "INSERT OR REPLACE INTO settings VALUES ('disconnect_dispatch_connections', '0')"
+            )
+
+    def evidence(self) -> dict[str, int | None]:
+        with self.guard.connect() as db:
+            settings = dict(db.execute(
+                "SELECT name,value FROM settings WHERE name IN "
+                "('disconnect_boundary_roots', 'disconnect_boundary_connections', "
+                "'disconnect_boundary_calls', 'disconnect_dispatch_connections', "
+                "'automatic_dispatch_without_connections')"
+            ))
+        return {key: int(value) if value is not None else None for key, value in {
+            "roots_at_disconnect": settings.get("disconnect_boundary_roots"),
+            "connections_at_disconnect": settings.get("disconnect_boundary_connections"),
+            "connections_at_dispatch": settings.get("disconnect_dispatch_connections"),
+            "calls_at_disconnect": settings.get("disconnect_boundary_calls"),
+            "automatic_dispatch_without_connections": settings.get(
+                "automatic_dispatch_without_connections"
+            ),
+        }.items()}
+
+
+def install_dispatch_guard(guard: DispatchGuard) -> DisconnectDispatchGate:
     """Safety instrumentation only; preserve real provider and real task execution."""
     import httpx
 
+    from opensquilla.engine.usage_accounting import current_usage_accounting_scope
     from opensquilla.gateway.task_runtime import TaskRuntime
+    from opensquilla.gateway.websocket import ConnectionRegistry, get_registry
     from opensquilla.observability.turn_call_log import TurnCallLogger
 
     original_http = httpx.AsyncHTTPTransport.handle_async_request
     original_sync = httpx.HTTPTransport.handle_request
     original_running = TaskRuntime._mark_running
     original_log = TurnCallLogger.write
+    original_unregister = ConnectionRegistry.unregister
+    disconnect_gate = DisconnectDispatchGate(guard)
+
+    def observed_unregister(registry: Any, conn_id: str) -> None:
+        present = registry.get(conn_id) is not None
+        original_unregister(registry, conn_id)
+        if present and registry is get_registry():
+            disconnect_gate.after_unregister(registry)
 
     class DeadlineStream(httpx.AsyncByteStream):
         def __init__(self, stream: Any, deadline: float, index: int) -> None:
@@ -277,6 +379,11 @@ def install_dispatch_guard(guard: DispatchGuard) -> None:
         if not os.environ.get(get_provider_spec(guard.provider).env_key):
             raise DispatchLimitError("missing_provider_credential")
         body = await request.aread()
+        if request.method == "POST":
+            scope = current_usage_accounting_scope()
+            await disconnect_gate.before_dispatch(
+                scope.context.turn_id if scope is not None else None, get_registry(),
+            )
         index = guard.request(request.method, str(request.url), body)
         deadline = asyncio.get_running_loop().time() + LIMITS["request_seconds"]
         try:
@@ -330,6 +437,8 @@ def install_dispatch_guard(guard: DispatchGuard) -> None:
     httpx.HTTPTransport.handle_request = bounded_sync
     TaskRuntime._mark_running = bounded_running
     TurnCallLogger.write = bounded_log
+    ConnectionRegistry.unregister = observed_unregister
+    return disconnect_gate
 
 
 def selected_model(provider: str, env: Mapping[str, str]) -> str:
@@ -1930,9 +2039,11 @@ def durable_case_state(state: Path, key: str) -> dict[str, Any]:
         raise CaseFailureError("missing_usage_ledger")
     with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)) as db:
         tasks = [
-            {"id": task, "status": status, "goal": (json.loads(raw or "{}"))
-             .get("goal_effective_context", (json.loads(raw or "{}"))
-                  .get("goal_context", {}))}
+            {"id": task, "status": status, "goal": (
+                json.loads(raw or "{}").get(
+                    "goal_effective_context", json.loads(raw or "{}").get("goal_context")
+                ) or {}
+            )}
             for task, status, raw in db.execute(
                 "SELECT task_id,status,details FROM agent_tasks "
                 "WHERE session_key=? ORDER BY created_at,rowid", (key,)
@@ -2006,11 +2117,16 @@ async def background_case(case: LiveCase) -> None:
     before = durable_case_state(case.root / "state", key)
     case.check("background_first_turn_waits", len(before["tasks"]) == 1)
     case.check("background_policy_explicit", bool(before["goal"][4]))
+    disconnect_gate = DisconnectDispatchGate(case.guard)
+    disconnect_gate.arm(first)
     await case.answer(key, pending)
     await case.disconnect()
-    calls_at_disconnect = case.guard.snapshot()["counts"].get("physical_calls", 0)
-    after = durable_case_state(case.root / "state", key)
-    case.check("background_disconnected_before_auto", len(after["tasks"]) == 1)
+    boundary = disconnect_gate.evidence()
+    calls_at_disconnect = boundary["calls_at_disconnect"]
+    case.check(
+        "background_disconnected_before_auto",
+        boundary["roots_at_disconnect"] == 1 and boundary["connections_at_disconnect"] == 0,
+    )
     # The harness has exactly one WS client. Remain completely disconnected and
     # observe only SQLite and the real transport guard until the Goal settles.
     async with asyncio.timeout_at(case.deadline):
@@ -2035,6 +2151,9 @@ async def background_case(case: LiveCase) -> None:
     case.check(
         "background_provider_dispatched_without_client",
         case.client is None and state["calls"].get(auto["id"], 0) > 0
+        and disconnect_gate.evidence()["connections_at_dispatch"] == 0
+        and disconnect_gate.evidence()["automatic_dispatch_without_connections"] == 1
+        and calls_at_disconnect is not None
         and case.guard.snapshot()["counts"].get("physical_calls", 0) > calls_at_disconnect,
     )
     case.check(
@@ -2059,6 +2178,7 @@ async def background_case(case: LiveCase) -> None:
     case.evidence["background"] = {
         "initial_turns": 1, "automatic_turns_without_client": len(automatic),
         "automatic_finalized_calls": state["calls"][auto["id"]],
+        "disconnect_boundary": disconnect_gate.evidence(),
     }
 
 
@@ -2112,22 +2232,46 @@ async def goal_case(case: LiveCase) -> None:
 
 async def budget_case(case: LiveCase) -> None:
     key = "agent:main:webchat:live-budget"
+    release = case.workspace / "release.txt"
+    case.check("budget_external_release_initially_absent", not release.exists())
     task = await case.send(
         key,
-        "Create a Goal with token budget exactly 1 to audit a synthetic "
-        "large project in the workspace. Use create_goal with token_budget=1. "
-        "Do not claim completion without an audit. Report the current Goal state.",
+        "Create a Goal with token budget exactly 1 to inspect release.txt supplied by an "
+        "external operator. Use create_goal with token_budget=1 first, then use read_file "
+        "to check release.txt and observe its missing-file result. It is initially absent. "
+        "Do not create "
+        "or modify release.txt or substitute any other evidence. This Goal can only be "
+        "complete after the external operator supplies the real release.txt; until then "
+        "keep it unfinished and do not call complete or blocked. Report its current state. "
+        "The token budget should pause automatic continuation naturally.",
     )
-    await case.done(key, task)
+    initial = await case.done(key, task)
+    case.check("budget_goal_created", isinstance(initial.get("goal"), dict))
     snapshot = await case.until(
         key,
-        lambda s: (
-            (s.get("goal") or {}).get("status") == "paused"
-            and (s.get("goal") or {}).get("pauseReason") == "token_budget"
-        ),
+        lambda s: (s.get("goal") or {}).get("status") in {
+            "paused", "complete", "blocked", "usage_limited",
+        },
     )
     goal = snapshot["goal"]
-    case.check("budget_stops_goal", goal["tokenBudget"] == 1 and goal["budgetTokensUsed"] >= 1)
+    case.check("budget_external_release_not_fabricated", not release.exists())
+    case.check(
+        "budget_stops_goal",
+        goal["status"] == "paused" and goal["pauseReason"] == "token_budget"
+        and goal["tokenBudget"] == 1 and goal["budgetTokensUsed"] >= 1,
+    )
+    checked_release = False
+    for record in case.records():
+        payload = record.get("payload") or {}
+        args = payload.get("arguments") or {}
+        if (record.get("kind") == "tool_request" and record.get("turn_id") == task
+                and payload.get("name") == "read_file" and isinstance(args, dict)):
+            raw_path = args.get("path")
+            if isinstance(raw_path, str):
+                path = Path(raw_path)
+                path = path if path.is_absolute() else case.workspace / path
+                checked_release |= path.resolve() == release.resolve()
+    case.check("budget_external_release_checked", checked_release)
     calls = case.guard.snapshot()["counts"].get("physical_calls", 0)
     await asyncio.sleep(1)
     case.check(
