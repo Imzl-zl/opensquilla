@@ -18,10 +18,11 @@ function memoryStorage() {
     removeItem: (key: string) => { values.delete(key) },
   }
 }
-function harness(input: { capable?: boolean; storage?: ReturnType<typeof memoryStorage>; list?: () => Promise<ModelCatalogResult> } = {}) {
+function harness(input: { catalogAvailable?: boolean; capable?: boolean; storage?: ReturnType<typeof memoryStorage>; list?: () => Promise<ModelCatalogResult> } = {}) {
   const sessionKey = ref('agent:main:webchat:one')
   const draft = ref(true)
   const capable = ref(input.capable ?? true)
+  const catalogAvailable = input.catalogAvailable === undefined ? undefined : ref(input.catalogAvailable)
   const routingMode = ref<ModelRoutingMode>('off')
   const busy = ref(false)
   const connectionEpoch = ref(1)
@@ -30,12 +31,44 @@ function harness(input: { capable?: boolean; storage?: ReturnType<typeof memoryS
   const scope = effectScope()
   const api = scope.run(() => useNewTaskModelSelection({
     catalog: { list }, sessionKey, isDraft: () => draft.value,
-    capable, routingMode, busy, connectionEpoch, storage,
+    capable, catalogAvailable, routingMode, busy, connectionEpoch, storage,
   }))!
-  return { api, list, sessionKey, draft, capable, routingMode, busy, connectionEpoch, storage, scope }
+  return { api, list, sessionKey, draft, capable, catalogAvailable, routingMode, busy, connectionEpoch, storage, scope }
 }
 
 describe('new-task model selection', () => {
+  it('shares one catalog with existing tasks without enabling a draft pin there', async () => {
+    const h = harness({ catalogAvailable: true })
+    await h.api.refresh()
+    expect(h.list).toHaveBeenCalledTimes(1)
+    h.api.select(PIN)
+    h.draft.value = false
+    await nextTick()
+    expect(h.api.available.value).toBe(false)
+    expect(h.api.selection.value).toBeNull()
+    expect(h.api.models.value).toEqual([MODEL])
+    expect(h.list).toHaveBeenCalledTimes(1)
+    expect(await h.api.selectWithRouting(PIN, async () => true)).toBe(false)
+    expect(h.api.select(PIN)).toBe(false)
+    await h.api.refresh()
+    expect(h.list).toHaveBeenCalledTimes(2)
+    h.scope.stop()
+  })
+
+  it('invalidates a shared catalog on disconnect and rejects its late response', async () => {
+    let accept!: (value: ModelCatalogResult) => void
+    const h = harness({ catalogAvailable: true, list: () => new Promise(resolve => { accept = resolve }) })
+    h.draft.value = false
+    h.catalogAvailable!.value = false
+    await nextTick()
+    accept({ models: [MODEL], errors: [] })
+    await nextTick()
+    expect(h.api.models.value).toEqual([])
+    expect(h.api.loading.value).toBe(false)
+    expect(h.api.selection.value).toBeNull()
+    h.scope.stop()
+  })
+
   it('does not query an unsupported gateway, and loads when its capability appears', async () => {
     const h = harness({ capable: false })
     expect(h.list).not.toHaveBeenCalled()

@@ -358,6 +358,7 @@ async def test_chat_send_atomically_snapshots_initial_routing_mode(tmp_path: Pat
             "source": "session",
             "initialized": False,
             "appliesTo": "next_accepted_turn",
+            "modelSelection": None,
         }
         created = await stack.storage.get_session(SESSION_KEY)
         assert created is not None

@@ -11,24 +11,25 @@ const props = withDefaults(
     modelRoutingMode: ModelRoutingMode
     busy: boolean
     routingAvailable?: boolean
-    newTaskModelAvailable?: boolean
-    newTaskModels?: readonly ModelDescriptor[]
-    newTaskModelSelection?: { model: string; provider: string } | null
-    newTaskDefaultModel?: { model: string; provider: string } | null
+    isNewTask?: boolean
+    modelSelectionAvailable?: boolean
+    availableModels?: readonly ModelDescriptor[]
+    modelSelection?: { model: string; provider: string | null } | null
+    defaultModel?: { model: string; provider: string } | null
     sessionModelName?: string | null
-    newTaskModelsLoading?: boolean
-    newTaskModelsError?: string | null
-    newTaskModelsProviderErrors?: readonly ProviderListError[]
-    newTaskModelDisabledReason?: 'routing' | 'busy' | 'unavailable' | null
+    modelsLoading?: boolean
+    modelsError?: string | null
+    modelProviderErrors?: readonly ProviderListError[]
+    modelSelectionDisabledReason?: 'routing' | 'busy' | 'unavailable' | null
   }>(),
-  { routingAvailable: true },
+  { routingAvailable: true, isNewTask: true },
 )
 const emit = defineEmits<{
   close: [restoreFocus?: boolean]
   setSessionRoutingMode: [mode: ModelRoutingMode]
-  selectNewTaskModel: [selection: { model: string; provider: string } | null]
+  selectModel: [selection: { model: string; provider: string } | null]
   openModelSettings: []
-  refreshNewTaskModels: []
+  refreshModels: []
 }>()
 const { t } = useI18n()
 const id = useId()
@@ -44,7 +45,7 @@ const position = ref({ left: '12px', bottom: '12px', width: '224px', '--routing-
 const submenuPosition = ref({ left: '12px', top: '12px', height: '360px' })
 const submenuSide = ref<'left' | 'right' | 'compact'>('right')
 const hasModelPicker = computed(() =>
-  Boolean(props.newTaskModelAvailable || props.newTaskModelSelection),
+  Boolean(props.modelSelectionAvailable || props.modelSelection),
 )
 const modes = computed(
   () =>
@@ -66,14 +67,14 @@ const modes = computed(
       },
     ] as const,
 )
-const key = (model: { model: string; provider: string }) =>
+const key = (model: { model: string; provider: string | null }) =>
   JSON.stringify([model.provider, model.model])
 const selectedKey = computed(() =>
-  props.newTaskModelSelection ? key(props.newTaskModelSelection) : 'default',
+  props.modelSelection ? key(props.modelSelection) : 'default',
 )
 const models = computed(() => {
-  const catalog = new Map(
-    (props.newTaskModels ?? []).map((model) => [
+  const catalog = new Map<string, { key: string; label: string; model: string; provider: string | null; missing: boolean }>(
+    (props.availableModels ?? []).map((model) => [
       key({ model: model.id, provider: model.provider }),
       {
         key: key({ model: model.id, provider: model.provider }),
@@ -84,7 +85,7 @@ const models = computed(() => {
       },
     ]),
   )
-  const selection = props.newTaskModelSelection
+  const selection = props.modelSelection
   if (selection && !catalog.has(selectedKey.value))
     catalog.set(selectedKey.value, {
       key: selectedKey.value,
@@ -103,10 +104,14 @@ const models = computed(() => {
     ...catalog.values(),
   ]
 })
+const pickerTitle = computed(() => t(props.isNewTask ? 'chat.newTaskModel.title' : 'chat.modelRouting.sessionModelTitle'))
+const pickerHint = computed(() => t(props.modelSelectionDisabledReason === 'busy' && !props.isNewTask
+  ? 'chat.modelRouting.sessionModelBusy'
+  : props.isNewTask ? 'chat.newTaskModel.scope' : 'chat.modelRouting.sessionModelHint'))
 const defaultModelName = computed(() => {
-  const model = props.newTaskDefaultModel
+  const model = props.defaultModel
   return model
-    ? props.newTaskModels?.find(
+    ? props.availableModels?.find(
         (item) => item.id === model.model && item.provider === model.provider,
       )?.name || model.model
     : ''
@@ -114,13 +119,13 @@ const defaultModelName = computed(() => {
 const selectedModelLabel = computed(() => {
   if (props.modelRoutingMode !== 'off') return undefined
   if (!hasModelPicker.value) return props.sessionModelName || t('chat.modelRouting.sessionModelFallback')
-  return props.newTaskModelSelection
+  return props.modelSelection
     ? models.value.find((model) => model.key === selectedKey.value)?.label
     : defaultModelName.value || t('chat.newTaskModel.gatewayDefault')
 })
 const defaultModelHint = computed(() =>
   defaultModelName.value
-    ? `${defaultModelName.value} · ${props.newTaskDefaultModel!.provider}`
+    ? `${defaultModelName.value} · ${props.defaultModel!.provider}`
     : t('chat.newTaskModel.gatewayDefaultHint'),
 )
 const filteredModels = computed(() =>
@@ -131,9 +136,9 @@ const filteredModels = computed(() =>
   ),
 )
 const issue = computed(() => {
-  if (props.newTaskModelDisabledReason === 'unavailable') return t('chat.newTaskModel.unavailable')
-  if (props.newTaskModelsError) return props.newTaskModelsError
-  const failures = props.newTaskModelsProviderErrors ?? []
+  if (props.modelSelectionDisabledReason === 'unavailable') return t('chat.newTaskModel.unavailable')
+  if (props.modelsError) return props.modelsError
+  const failures = props.modelProviderErrors ?? []
   return failures.length
     ? t('chat.newTaskModel.partialFailure', {
         providers: failures.map((error) => error.provider).join(', '),
@@ -143,9 +148,9 @@ const issue = computed(() => {
 function modelDisabled(model: (typeof models.value)[number]) {
   return (
     props.busy ||
-    props.newTaskModelDisabledReason === 'busy' ||
+    props.modelSelectionDisabledReason === 'busy' ||
     model.missing ||
-    (model.key !== 'default' && !props.newTaskModelAvailable)
+    (!props.modelSelectionAvailable && (!props.isNewTask || model.key !== 'default'))
   )
 }
 function selectMode(mode: ModelRoutingMode) {
@@ -155,10 +160,10 @@ function selectMode(mode: ModelRoutingMode) {
 }
 function selectModel(index: number) {
   const model = filteredModels.value[index]
-  if (!model || modelDisabled(model)) return
+  if (!model || modelDisabled(model) || (model.key !== 'default' && !model.provider)) return
   emit(
-    'selectNewTaskModel',
-    model.key === 'default' ? null : { model: model.model, provider: model.provider },
+    'selectModel',
+    model.key === 'default' ? null : { model: model.model, provider: model.provider! },
   )
   emit('close')
 }
@@ -402,7 +407,7 @@ defineExpose({ element: () => rootRef.value })
                 <span class="routing-mode__model-dot" aria-hidden="true" />
                 <span class="routing-mode__model-name">{{ selectedModelLabel }}</span>
                 <span
-                  v-if="hasModelPicker && !newTaskModelSelection && defaultModelName"
+                  v-if="hasModelPicker && !modelSelection && defaultModelName"
                   class="routing-mode__default"
                   >{{ t('chat.newTaskModel.defaultBadge') }}</span
                 >
@@ -429,7 +434,7 @@ defineExpose({ element: () => rootRef.value })
         class="new-task-model-menu"
         :data-side="submenuSide"
         :style="compact ? undefined : submenuPosition"
-        :aria-label="t('chat.newTaskModel.title')"
+        :aria-label="pickerTitle"
       >
         <header class="routing-heading">
           <button
@@ -441,7 +446,7 @@ defineExpose({ element: () => rootRef.value })
           >
             <Icon name="chevronLeft" :size="16" />
           </button>
-          <strong>{{ t('chat.newTaskModel.title') }}</strong>
+          <strong>{{ pickerTitle }}</strong>
           <span class="routing-catalog-label">{{ t('chat.newTaskModel.catalog') }}</span>
         </header>
         <label class="routing-search">
@@ -465,8 +470,8 @@ defineExpose({ element: () => rootRef.value })
           :id="`${id}-models`"
           class="routing-models"
           role="listbox"
-          :aria-label="t('chat.newTaskModel.title')"
-          :aria-busy="newTaskModelsLoading"
+          :aria-label="pickerTitle"
+          :aria-busy="modelsLoading"
         >
           <button
             v-for="(model, index) in filteredModels"
@@ -501,23 +506,23 @@ defineExpose({ element: () => rootRef.value })
           </button>
           <p v-if="!filteredModels.length" class="routing-empty" role="status">
             {{
-              newTaskModelsLoading ? t('chat.newTaskModel.loading') : t('chat.newTaskModel.empty')
+              modelsLoading ? t('chat.newTaskModel.loading') : t('chat.newTaskModel.empty')
             }}
           </p>
         </div>
-        <div v-if="issue || newTaskModelsLoading" class="routing-issue" role="status">
-          <span>{{ newTaskModelsLoading ? t('chat.newTaskModel.loading') : issue }}</span>
+        <div v-if="issue || modelsLoading" class="routing-issue" role="status">
+          <span>{{ modelsLoading ? t('chat.newTaskModel.loading') : issue }}</span>
           <button
             v-if="issue"
             type="button"
             class="routing-retry"
-            :disabled="newTaskModelsLoading"
-            @click="emit('refreshNewTaskModels')"
+            :disabled="modelsLoading"
+            @click="emit('refreshModels')"
           >
             {{ t('chat.newTaskModel.retry') }}
           </button>
         </div>
-        <p class="routing-model-scope">{{ t('chat.newTaskModel.scope') }}</p>
+        <p class="routing-model-scope">{{ pickerHint }}</p>
       </section>
     </div>
   </Teleport>

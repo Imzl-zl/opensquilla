@@ -74,10 +74,10 @@ describe('ChatComposer popovers', () => {
     { mode: 'off', pin: null, defaultModel: null, label: 'Single model', badge: true },
   ])('shows the active selection without confusing defaults and pins: $mode / $label / $badge', async ({ mode, pin, defaultModel, label, badge }) => {
     const { app, el } = await mountComposer({
-      newTaskModelAvailable: true,
-      newTaskModels: [{ id: 'base', provider: 'provider-a', name: 'Base model' }],
-      newTaskModelSelection: pin,
-      newTaskDefaultModel: defaultModel,
+      modelSelectionAvailable: true,
+      availableModels: [{ id: 'base', provider: 'provider-a', name: 'Base model' }],
+      modelSelection: pin,
+      defaultModel: defaultModel,
       sessionRoutingMode: mode,
     })
     expect(el.querySelector('.chat-model-routing-btn__label')?.textContent).toBe(label)
@@ -85,12 +85,36 @@ describe('ChatComposer popovers', () => {
     app.unmount()
   })
   it('shows a persisted session model without a default badge or new-task selector', async () => {
-    const { app, el } = await mountComposer({ newTaskModelAvailable: false, sessionModelName: 'bound-model' })
+    const { app, el } = await mountComposer({ modelSelectionAvailable: false, sessionModelName: 'bound-model' })
     expect(el.querySelector('.chat-model-routing-btn__label')?.textContent).toBe('bound-model')
     expect(el.querySelector('.chat-model-routing-btn__default')).toBeNull()
     await clickButton(el, 'Models & routing')
     expect(document.body.querySelector('.routing-mode__model-name')?.textContent).toBe('bound-model')
     expect(document.body.querySelector('[aria-haspopup="listbox"]')).toBeNull()
+    app.unmount()
+  })
+  it('forwards a model change for an existing conversation through the unified menu', async () => {
+    const selected = vi.fn(), refresh = vi.fn()
+    const { app, el } = await mountComposer({
+      isNewTask: false,
+      modelSelectionAvailable: true,
+      modelSelection: { model: 'base', provider: 'provider-a' },
+      availableModels: [
+        { id: 'base', provider: 'provider-a', name: 'Base model' },
+        { id: 'next', provider: 'provider-b', name: 'Next model' },
+      ],
+      onSelectModel: selected,
+      onRefreshModels: refresh,
+    })
+    await clickButton(el, 'Models & routing')
+    expect(refresh).toHaveBeenCalledOnce()
+    document.body.querySelector<HTMLButtonElement>('[data-mode="off"]')!.click()
+    await nextTick()
+    expect(document.body.querySelector('.new-task-model-menu strong')?.textContent).toBe('Conversation model')
+    document.body.querySelector<HTMLButtonElement>('[role="option"]:nth-child(3)')!.click()
+    expect(selected).toHaveBeenCalledWith({ model: 'next', provider: 'provider-b' })
+    await nextTick()
+    expect(document.body.querySelector('.composer-model-routing')).toBeNull()
     app.unmount()
   })
   it('keeps the focused routing option mounted while a mutation is busy', async () => {

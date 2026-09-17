@@ -38,6 +38,7 @@ async function mountPanel(options: {
     streamIdleTimeoutMs: null,
     concurrentHistoryReads: false,
     chatSendInitialModel: false,
+    sessionsRoutingModelSelection: false,
     detachedSessionHydration: false,
     turnCommittedEvents: false,
     subscriptionEpoch: 0,

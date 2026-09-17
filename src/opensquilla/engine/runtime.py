@@ -5371,6 +5371,12 @@ class TurnRunner:
         # config object in accepted_turn_config_scope().
         return accepted
 
+    def _session_model_pin_applies(self) -> bool:
+        """A saved single-model choice must not override a routed session turn."""
+        return getattr(_ACCEPTED_TURN_CONFIG.get(), "session_mode", None) not in {
+            "router", "ensemble",
+        }
+
     @property
     def router_control_hold_store(self) -> RouterControlHoldStore:
         """Session-keyed router-control hold store consulted by the router step.
@@ -6030,6 +6036,8 @@ class TurnRunner:
             raise ValueError(
                 "expected_session_id and expected_session_epoch must form a valid pair"
             )
+        if not self._session_model_pin_applies():
+            model = None
         normalized_input_provenance = self._normalize_input_provenance(input_provenance)
         lock = self.get_session_lock(session_key)
         effective_tool_context = replace(

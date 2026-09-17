@@ -640,14 +640,15 @@
       :session-routing-control-blocked="goalBusy || modelRoutingSettingsBusy"
       :session-routing-available="sessionRoutingAvailable"
       :session-model-name="sessionModelName"
-      :new-task-model-available="newTaskModelAvailable"
-      :new-task-models="newTaskModels"
-      :new-task-model-selection="newTaskModelSelection"
-      :new-task-default-model="newTaskDefaultModel"
-      :new-task-models-loading="newTaskModelsLoading"
-      :new-task-models-error="newTaskModelsError"
-      :new-task-models-provider-errors="newTaskModelsProviderErrors"
-      :new-task-model-disabled-reason="newTaskModelDisabledReason"
+      :is-new-task="isProvisionalDraftSession()"
+      :model-selection-available="composerModelSelectionAvailable"
+      :available-models="newTaskModels"
+      :model-selection="composerModelSelection"
+      :default-model="composerDefaultModel"
+      :models-loading="newTaskModelsLoading"
+      :models-error="newTaskModelsError"
+      :model-provider-errors="newTaskModelsProviderErrors"
+      :model-selection-disabled-reason="composerModelDisabledReason"
       :coding-mode-enabled="codingModeEnabled"
       :coding-mode-settings-busy="codingModeSettingsBusy"
       :goal-draft-armed="goalDraftArmed"
@@ -687,8 +688,8 @@
       @set-busy-send-mode="busySendMode = $event"
       @set-run-mode="setComposerRunMode"
       @set-session-routing-mode="setComposerSessionRoutingMode"
-      @select-new-task-model="setComposerNewTaskModel"
-      @refresh-new-task-models="refreshComposerModels"
+      @select-model="setComposerModel"
+      @refresh-models="refreshComposerModels"
       @open-model-settings="openComposerModelSettings"
       @set-coding-mode-enabled="setComposerCodingModeEnabled"
       @set-collaboration-mode="setCollaborationMode"
@@ -2150,8 +2151,8 @@ const {
   bindFeatureRefresh,
 } = chatFeatureToggles
 
-const newTaskDefaultModel = computed(() => (
-  isProvisionalDraftSession() ? defaultModelForAgent(draftAgentId()) : null
+const composerDefaultModel = computed(() => defaultModelForAgent(
+  isProvisionalDraftSession() ? draftAgentId() : agentIdFromSessionKey(sessionKey.value),
 ))
 
 const chatSessionModel = useChatSessionModel({
@@ -2161,7 +2162,7 @@ const chatSessionModel = useChatSessionModel({
   available: computed(() => gatewayAccess.isAvailable && gatewayAccess.isAuthenticated),
   connectionEpoch: computed(() => gatewayAccess.subscriptionEpoch),
 })
-const { modelName: sessionModelName } = chatSessionModel
+const { modelName: storedSessionModelName } = chatSessionModel
 
 const sessionRoutingAvailable = computed(() => {
   return gatewayAccess.isAvailable
@@ -2171,6 +2172,8 @@ const sessionRoutingAvailable = computed(() => {
 const chatSessionRouting = useChatSessionRouting({
   routing: sessionRouting,
   sessionKey,
+  connectionEpoch: computed(() => gatewayAccess.subscriptionEpoch),
+  modelSelectionCapable: computed(() => gatewayAccess.sessionsRoutingModelSelection && sessionRoutingAvailable.value),
   globalMode: globalModelRoutingMode,
   globalImageInputAdmission,
   globalImageInputAdmissionReason,
@@ -2193,6 +2196,8 @@ const {
 } = chatSessionRouting
 const newTaskModel = useNewTaskModelSelection({
   catalog: injectedProviderConfiguration,
+  catalogAvailable: computed(() => gatewayAccess.isAvailable && gatewayAccess.isAuthenticated
+    && (gatewayAccess.chatSendInitialModel || chatSessionRouting.modelSelectionSupported.value)),
   sessionKey,
   isDraft: isProvisionalDraftSession,
   capable: computed(() => gatewayAccess.chatSendInitialModel
@@ -2211,6 +2216,19 @@ const {
   providerErrors: newTaskModelsProviderErrors,
   disabledReason: newTaskModelDisabledReason,
 } = newTaskModel
+const composerModelSelectionAvailable = computed(() => isProvisionalDraftSession()
+  ? newTaskModelAvailable.value
+  : sessionRoutingAvailable.value && chatSessionRouting.modelSelectionSupported.value)
+const composerModelSelection = computed(() => isProvisionalDraftSession()
+  ? newTaskModelSelection.value : chatSessionRouting.modelSelection.value)
+const sessionModelName = computed(() => chatSessionRouting.modelSelectionSupported.value
+  ? chatSessionRouting.modelSelection.value?.model ?? null : storedSessionModelName.value)
+const composerModelDisabledReason = computed(() => {
+  if (isProvisionalDraftSession()) return newTaskModelDisabledReason.value
+  if (!composerModelSelectionAvailable.value) return 'unavailable' as const
+  return isStreaming.value || modelRoutingMutationBusy.value
+    || acceptanceStopPending.value || acceptanceRecoveryPending.value ? 'busy' as const : null
+})
 watch(
   [newTaskModelSelection, sessionRoutingAvailable],
   ([selection, available]) => {
@@ -2226,7 +2244,7 @@ watch(
 // draft pin must not inherit that model's image restriction. Unknown model
 // capabilities remain a gateway admission decision.
 const imageInputAdmission = computed(() => {
-  const selected = newTaskModelSelection.value
+  const selected = composerModelSelection.value
   if (!selected || modelRoutingMode.value !== 'off') return sessionImageInputAdmission.value
   const descriptor = newTaskModels.value.find(model => (
     model.id === selected.model && model.provider === selected.provider
@@ -4924,14 +4942,19 @@ async function setComposerSessionRoutingMode(mode: ModelRoutingMode) {
   await newTaskModel.selectRoutingMode(mode, chatSessionRouting.setMode)
 }
 
-async function setComposerNewTaskModel(selection: NewTaskModelSelection | null) {
-  if (goalBusy.value) return
-  await newTaskModel.selectWithRouting(selection, chatSessionRouting.setMode)
+async function setComposerModel(selection: NewTaskModelSelection | null) {
+  if (goalBusy.value || composerModelDisabledReason.value === 'busy') return
+  if (isProvisionalDraftSession()) {
+    await newTaskModel.selectWithRouting(selection, chatSessionRouting.setMode)
+  } else {
+    await chatSessionRouting.setModel(selection)
+  }
 }
 
 async function refreshComposerModels() {
   await Promise.allSettled([
     newTaskModel.refresh(), loadFeatureToggles(), chatSessionModel.refresh(),
+    chatSessionRouting.load(),
   ])
 }
 

@@ -4479,6 +4479,9 @@
       "title": "模型与路由",
       "direct": "单模型",
       "sessionModelFallback": "沿用任务模型",
+      "sessionModelTitle": "当前会话模型",
+      "sessionModelHint": "从下一轮对话生效，保留当前会话记录，不修改全局设置。",
+      "sessionModelBusy": "当前回复完成后可切换模型。",
       "router": "智能路由",
       "ensemble": "多模型协作"
     },

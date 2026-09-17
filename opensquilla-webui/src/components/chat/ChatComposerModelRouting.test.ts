@@ -22,17 +22,17 @@ async function mount(overrides: Record<string, unknown> = {}, openModels = true)
   const props = reactive({
     modelRoutingMode: 'off',
     busy: false,
-    newTaskModelAvailable: true,
-    newTaskModelSelection: null as { model: string; provider: string } | null,
-    newTaskModels: [
+    modelSelectionAvailable: true,
+    modelSelection: null as { model: string; provider: string } | null,
+    availableModels: [
       { id: 'shared-model', name: 'Model Alpha', provider: 'provider-a' },
       { id: 'shared-model', name: 'Model Beta', provider: 'provider-b' },
     ],
-    onSelectNewTaskModel: selected,
+    onSelectModel: selected,
     onSetSessionRoutingMode: mode,
     onClose: close,
     onOpenModelSettings: settings,
-    onRefreshNewTaskModels: refresh,
+    onRefreshModels: refresh,
     ...overrides,
   })
   const el = document.createElement('div')
@@ -119,14 +119,14 @@ describe('Native cascading model routing menu', () => {
   })
   it('shows the selected provider-specific model in the primary menu and updates it', async () => {
     const { props } = await mount(
-      { newTaskModelSelection: { model: 'shared-model', provider: 'provider-b' } },
+      { modelSelection: { model: 'shared-model', provider: 'provider-b' } },
       false,
     )
     expect(query('.routing-mode__model').textContent).toContain('Model Beta')
-    props.newTaskModelSelection = { model: 'shared-model', provider: 'provider-a' }
+    props.modelSelection = { model: 'shared-model', provider: 'provider-a' }
     await nextTick()
     expect(query('.routing-mode__model').textContent).toContain('Model Alpha')
-    props.newTaskModelSelection = null
+    props.modelSelection = null
     await nextTick()
     expect(query('.routing-mode__model').textContent).toContain('Default model')
     props.modelRoutingMode = 'squilla_router'
@@ -135,7 +135,7 @@ describe('Native cascading model routing menu', () => {
   })
   it('distinguishes the configured default from an explicit pin to the same model', async () => {
     const { props } = await mount({
-      newTaskDefaultModel: { model: 'shared-model', provider: 'provider-b' },
+      defaultModel: { model: 'shared-model', provider: 'provider-b' },
     })
     expect(query('.routing-mode__model-name').textContent).toBe('Model Beta')
     expect(query('.routing-mode__default').textContent).toBe('Default')
@@ -143,7 +143,7 @@ describe('Native cascading model routing menu', () => {
     expect(query('[role="option"] .routing-model__provider').textContent).toContain(
       'Model Beta · provider-b',
     )
-    props.newTaskModelSelection = { model: 'shared-model', provider: 'provider-b' }
+    props.modelSelection = { model: 'shared-model', provider: 'provider-b' }
     await nextTick()
     expect(query('.routing-mode__model-name').textContent).toBe('Model Beta')
     expect(query('.routing-mode__default')).toBeNull()
@@ -153,7 +153,7 @@ describe('Native cascading model routing menu', () => {
   it('lets a model selection request the direct-mode handoff from router mode', async () => {
     const { selected } = await mount({
       modelRoutingMode: 'squilla_router',
-      newTaskModelDisabledReason: 'routing',
+      modelSelectionDisabledReason: 'routing',
     })
     query<HTMLButtonElement>('.routing-mode').click()
     await nextTick()
@@ -185,8 +185,8 @@ describe('Native cascading model routing menu', () => {
   })
   it('keeps unavailable selected models visible and prevents accidental replacement during partial failure', async () => {
     const { selected, refresh } = await mount({
-      newTaskModelSelection: { model: 'offline-model', provider: 'provider-c' },
-      newTaskModelsProviderErrors: [{ provider: 'provider-c', error: 'offline' }],
+      modelSelection: { model: 'offline-model', provider: 'provider-c' },
+      modelProviderErrors: [{ provider: 'provider-c', error: 'offline' }],
     })
     const missing = query<HTMLButtonElement>('[aria-selected="true"]')
     expect(missing.textContent).toContain('offline-model')
@@ -210,7 +210,7 @@ describe('Native cascading model routing menu', () => {
     expect(selected).not.toHaveBeenCalled()
   })
   it('retains all routing modes and settings for an existing task without exposing a new-task picker', async () => {
-    const { mode, settings } = await mount({ newTaskModelAvailable: false, sessionModelName: 'session-bound-model' })
+    const { mode, settings } = await mount({ modelSelectionAvailable: false, sessionModelName: 'session-bound-model' })
     expect(query('.routing-mode__model-name').textContent).toBe('session-bound-model')
     expect(query('.routing-mode__default')).toBeNull()
     expect(document.querySelectorAll('[role="menuitemradio"]')).toHaveLength(3)
@@ -220,4 +220,50 @@ describe('Native cascading model routing menu', () => {
     query<HTMLButtonElement>('.routing-settings').click()
     expect(settings).toHaveBeenCalledOnce()
   })
+  it('keeps model selection available after a conversation has started', async () => {
+    const { selected } = await mount({
+      isNewTask: false,
+      modelSelection: { model: 'shared-model', provider: 'provider-b' },
+    })
+    expect(query('.new-task-model-menu strong').textContent).toBe('Conversation model')
+    expect(query('.routing-model-scope').textContent).toContain('next turn')
+    expect(query('[aria-selected="true"]').textContent).toContain('Model Beta')
+    await search('Alpha')
+    query<HTMLButtonElement>('[role="option"]').click()
+    expect(selected).toHaveBeenCalledWith({ model: 'shared-model', provider: 'provider-a' })
+  })
+  it('keeps a legacy model without provider distinct from the default and provider-specific models', async () => {
+    const { selected } = await mount({
+      isNewTask: false,
+      modelSelection: { model: 'shared-model', provider: null },
+    })
+    const legacy = query<HTMLButtonElement>('[aria-selected="true"]')
+    expect(legacy.textContent).toContain('shared-model')
+    expect(legacy.getAttribute('aria-disabled')).toBe('true')
+    legacy.click()
+    expect(selected).not.toHaveBeenCalled()
+    query<HTMLButtonElement>('[role="option"]:nth-child(2)').click()
+    expect(selected).toHaveBeenCalledWith({ model: 'shared-model', provider: 'provider-a' })
+  })
+  it('blocks concrete model changes during a response while retaining next-turn routing controls', async () => {
+    const { selected, mode } = await mount({ isNewTask: false, modelSelectionDisabledReason: 'busy' })
+    expect(query('.routing-model-scope').textContent).toContain('Finish the current response')
+    query<HTMLButtonElement>('[role="option"]:nth-child(2)').click()
+    query<HTMLButtonElement>('[role="option"]').click()
+    expect(selected).not.toHaveBeenCalled()
+    query<HTMLButtonElement>('[data-mode="squilla_router"]').click()
+    expect(mode).toHaveBeenCalledWith('squilla_router')
+  })
+
+  it('does not offer a local default escape for a disconnected existing session', async () => {
+    const { selected } = await mount({
+      isNewTask: false, modelSelectionAvailable: false,
+      modelSelection: { model: 'shared-model', provider: 'provider-a' },
+    })
+    const defaultRow = query<HTMLButtonElement>('[role="option"]')
+    expect(defaultRow.getAttribute('aria-disabled')).toBe('true')
+    defaultRow.click()
+    expect(selected).not.toHaveBeenCalled()
+  })
+
 })

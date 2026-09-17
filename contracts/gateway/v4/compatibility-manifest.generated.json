@@ -138,7 +138,7 @@
       "delivery": "live-only-best-effort",
       "family": "sessions.routing.changed",
       "schema": "sessions/sessions-routing-changed.schema.json",
-      "schemaSha256": "7693f117cc094803f34b3097518f1bf5c3eefcc5683277294ff1624adb9c4bda",
+      "schemaSha256": "4b86ff4f980331e81259da9269bb384341fdab4d6d7f2247e64875b24ed20ef9",
       "schemaVersion": 1,
       "wireNames": [
         "sessions.routing.changed"
@@ -1265,13 +1265,13 @@
       "lifecycle": "stable",
       "name": "sessions.routing.get",
       "schema": "sessions/sessions-routing-get.schema.json",
-      "schemaSha256": "79c4c50696ed7906a8bf02d140fe44704edc7956302afe7ab8fd6e07704c6918"
+      "schemaSha256": "4e728ebc3b3e065885490911a40471f804a672386387de4df42b02f361b24abd"
     },
     {
       "lifecycle": "stable",
       "name": "sessions.routing.set",
       "schema": "sessions/sessions-routing-set.schema.json",
-      "schemaSha256": "2b42db49f3124cbfd4144065f7b75cc764d3434447b5e6dace497571a20f8111"
+      "schemaSha256": "ad98fbf8b727bf1cac115a8a49ce1029be678c65648e5968489069fac33bcd9d"
     },
     {
       "lifecycle": "stable",
@@ -1472,7 +1472,7 @@
     "generatorSha256": "21d14e9a61e9e6b068b66c2713e75f259de6e107514bd421da849999638e4e84",
     "methodCount": 216,
     "schemaCount": 226,
-    "schemaTreeSha256": "189715c060ead400afa465b9bc92278eee15d7b8a8aa7218c953ebc5c019e1d8"
+    "schemaTreeSha256": "26db7c95f2f4b8f26941d204be5890e79dd5848374c24d94e1ad906b83479e93"
   },
   "wireVersion": 4
 }

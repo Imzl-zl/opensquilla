@@ -5,6 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from opensquilla.engine.turn_runner.harness import (
     _TurnRunnerAgentFactoryAdapter,
 )
@@ -356,6 +358,7 @@ async def test_production_resolver_keeps_append_only_session_adapter_compatible(
         raise AssertionError("append-only adapters have no session deployment to resolve")
 
     runner = SimpleNamespace(
+        _session_model_pin_applies=lambda: True,
         _session_manager=object(), _session_deployment_resolver=unexpected_deployment,
         _resolve_provider=lambda: (provider, selector),
     )
@@ -377,6 +380,7 @@ async def test_production_session_resolver_carries_only_nonsecret_pool_provenanc
         return deployment
     provider, selector = object(), object()
     runner = SimpleNamespace(
+        _session_model_pin_applies=lambda: True,
         _session_manager=SimpleNamespace(get_session=AsyncMock(return_value=object())),
         _provider_selector=None, _session_deployment_resolver=resolve,
         _resolve_provider=lambda **_kwargs: (provider, selector),
@@ -388,3 +392,35 @@ async def test_production_session_resolver_carries_only_nonsecret_pool_provenanc
         "session_credential_pool": {"provider": "openai", "session_key": "pool-session"},
     }
     assert "synthetic-private" not in str(result[2])
+
+
+@pytest.mark.parametrize("mode", ["router", "ensemble"])
+async def test_routed_session_ignores_saved_single_model_provider_before_resolution(mode):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from opensquilla.engine.runtime import TurnRunner, accepted_turn_config_scope
+    from opensquilla.engine.turn_runner.harness import _TurnRunnerProviderResolverAdapter
+    from opensquilla.gateway.config import GatewayConfig
+    from opensquilla.gateway.model_routing import capture_model_routing_config
+
+    runner = object.__new__(TurnRunner)
+    manager = SimpleNamespace(get_session=AsyncMock())
+    runner._session_manager = manager
+    def unwanted(*_args):
+        raise AssertionError("saved direct deployment must not be selected in routed turns")
+    runner._session_deployment_resolver = unwanted
+    provider, selector = object(), object()
+    runner._resolve_provider = lambda: (provider, selector)
+    accepted = capture_model_routing_config(GatewayConfig(), session_mode=mode)
+    with accepted_turn_config_scope(accepted):
+        assert runner._session_model_pin_applies() is False
+        adapter = _TurnRunnerProviderResolverAdapter(runner)
+        resolved = await adapter.resolve_session_provider("session")
+    assert resolved == (provider, selector, {})
+    manager.get_session.assert_not_awaited()
+    # Background/legacy callers without a session mode retain their own model choice.
+    assert runner._session_model_pin_applies() is True
+    direct = capture_model_routing_config(GatewayConfig(), session_mode="direct")
+    with accepted_turn_config_scope(direct):
+        assert runner._session_model_pin_applies() is True

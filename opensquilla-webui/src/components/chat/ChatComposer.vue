@@ -370,10 +370,10 @@
               class="chat-settings-anchor"
             >
               <button
-                class="btn btn--ghost chat-model-routing-btn"
+                class="chat-model-routing-btn"
                 :class="[
                   `chat-model-routing-btn--${sessionRoutingMode}`,
-                  { 'is-active': modelRoutingOpen || sessionRoutingMode !== 'off' },
+                  { 'is-open': modelRoutingOpen },
                 ]"
                 :title="`${t('chat.modelRouting.title')}: ${modelRoutingTriggerLabel}${modelRoutingUsesDefault ? ` · ${t('chat.newTaskModel.defaultBadge')}` : ''}`"
                 :aria-label="t('chat.modelRouting.title')"
@@ -399,20 +399,21 @@
                 ref="modelRoutingPanelRef"
                 :anchor="modelRoutingAnchorEl"
                 :model-routing-mode="sessionRoutingMode"
-                :busy="sessionRoutingBusy || sessionRoutingControlBlocked || newTaskModelDisabledReason === 'busy'"
+                :busy="sessionRoutingBusy || sessionRoutingControlBlocked"
                 :routing-available="sessionRoutingAvailable"
-                :new-task-model-available="newTaskModelAvailable"
-                :new-task-models="newTaskModels"
-                :new-task-model-selection="newTaskModelSelection"
-                :new-task-default-model="newTaskDefaultModel"
+                :is-new-task="isNewTask"
+                :model-selection-available="modelSelectionAvailable"
+                :available-models="availableModels"
+                :model-selection="modelSelection"
+                :default-model="defaultModel"
                 :session-model-name="sessionModelName"
-                :new-task-models-loading="newTaskModelsLoading"
-                :new-task-models-error="newTaskModelsError"
-                :new-task-models-provider-errors="newTaskModelsProviderErrors"
-                :new-task-model-disabled-reason="newTaskModelDisabledReason"
+                :models-loading="modelsLoading"
+                :models-error="modelsError"
+                :model-provider-errors="modelProviderErrors"
+                :model-selection-disabled-reason="modelSelectionDisabledReason"
                 @close="closeModelRouting"
-                @select-new-task-model="emit('selectNewTaskModel', $event)"
-                @refresh-new-task-models="emit('refreshNewTaskModels')"
+                @select-model="emit('selectModel', $event)"
+                @refresh-models="emit('refreshModels')"
                 @open-model-settings="openModelSettings"
                 @set-session-routing-mode="emit('setSessionRoutingMode', $event)"
               />
@@ -537,15 +538,16 @@ const props = withDefaults(defineProps<{
   sessionRoutingBusy: boolean
   sessionRoutingControlBlocked?: boolean
   sessionRoutingAvailable?: boolean
-  newTaskModelAvailable?: boolean
-  newTaskModels?: readonly ModelDescriptor[]
-  newTaskModelSelection?: { model: string; provider: string } | null
-  newTaskDefaultModel?: { model: string; provider: string } | null
+  isNewTask?: boolean
+  modelSelectionAvailable?: boolean
+  availableModels?: readonly ModelDescriptor[]
+  modelSelection?: { model: string; provider: string | null } | null
+  defaultModel?: { model: string; provider: string } | null
   sessionModelName?: string | null
-  newTaskModelsLoading?: boolean
-  newTaskModelsError?: string | null
-  newTaskModelsProviderErrors?: readonly ProviderListError[]
-  newTaskModelDisabledReason?: 'routing' | 'busy' | 'unavailable' | null
+  modelsLoading?: boolean
+  modelsError?: string | null
+  modelProviderErrors?: readonly ProviderListError[]
+  modelSelectionDisabledReason?: 'routing' | 'busy' | 'unavailable' | null
   codingModeEnabled?: boolean
   codingModeSettingsBusy?: boolean
   addMenuAvoidElement?: HTMLElement | null
@@ -602,8 +604,8 @@ const emit = defineEmits<{
   setBusySendMode: [mode: 'queue' | 'steer']
   setRunMode: [mode: SandboxRunMode]
   setSessionRoutingMode: [mode: ModelRoutingMode]
-  selectNewTaskModel: [selection: { model: string; provider: string } | null]
-  refreshNewTaskModels: []
+  selectModel: [selection: { model: string; provider: string } | null]
+  refreshModels: []
   openModelSettings: []
   setCodingModeEnabled: [enabled: boolean]
   setCollaborationMode: [mode: CollaborationMode]
@@ -663,17 +665,17 @@ const fileInputEl = ref<HTMLInputElement | null>(null)
 const addMenuOpen = ref(false)
 const modelRoutingOpen = ref(false)
 const modelRoutingPanelRef = ref<{ element: () => HTMLElement | null } | null>(null)
-const modelRoutingVisible = computed(() => Boolean(props.sessionRoutingAvailable || props.newTaskModelAvailable || props.newTaskModelSelection))
+const modelRoutingVisible = computed(() => Boolean(props.sessionRoutingAvailable || props.modelSelectionAvailable || props.modelSelection))
 const modelRoutingTriggerLabel = computed(() => {
   if (props.sessionRoutingMode === 'squilla_router') return t('chat.modelRouting.router')
   if (props.sessionRoutingMode === 'llm_ensemble') return t('chat.modelRouting.ensemble')
-  const pin = props.newTaskModelSelection
-  if (pin) return props.newTaskModels?.find(model => model.id === pin.model && model.provider === pin.provider)?.name || pin.model
-  const defaultModel = props.newTaskModelAvailable && props.newTaskDefaultModel
-  if (defaultModel) return props.newTaskModels?.find(model => model.id === defaultModel.model && model.provider === defaultModel.provider)?.name || defaultModel.model
+  const pin = props.modelSelection
+  if (pin) return props.availableModels?.find(model => model.id === pin.model && model.provider === pin.provider)?.name || pin.model
+  const defaultModel = props.modelSelectionAvailable && props.defaultModel
+  if (defaultModel) return props.availableModels?.find(model => model.id === defaultModel.model && model.provider === defaultModel.provider)?.name || defaultModel.model
   return props.sessionModelName || t('chat.modelRouting.direct')
 })
-const modelRoutingUsesDefault = computed(() => props.sessionRoutingMode === 'off' && props.newTaskModelAvailable && !props.newTaskModelSelection)
+const modelRoutingUsesDefault = computed(() => props.sessionRoutingMode === 'off' && props.modelSelectionAvailable && !props.modelSelection)
 useDialogLayer(modelRoutingOpen)
 watch(modelRoutingVisible, visible => { if (!visible) modelRoutingOpen.value = false })
 function closeModelRouting(restoreFocus = true) {
@@ -800,7 +802,7 @@ function toggleModelRouting() {
   modelRoutingOpen.value = !modelRoutingOpen.value
   if (modelRoutingOpen.value) {
     dismissRouterNewBadge()
-    emit('refreshNewTaskModels')
+    emit('refreshModels')
     addMenuOpen.value = false
     runModeOpen.value = false
     moreActionsOpen.value = false
@@ -1792,14 +1794,31 @@ button.attachment-chip__primary:focus-visible {
 }
 
 .chat-model-routing-btn {
-  gap: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
   max-width: min(230px, 40vw);
-  padding-inline: 8px;
+  padding: 0 9px;
   width: auto;
   position: relative;
-  border-color: transparent;
-  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-surface);
   color: var(--text-muted);
+  font-family: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.chat-model-routing-btn > .icon {
+  flex-shrink: 0;
+}
+
+.chat-model-routing-btn > .icon:first-child {
+  color: var(--accent);
 }
 
 .chat-model-routing-btn__label {
@@ -1810,7 +1829,15 @@ button.attachment-chip__primary:focus-visible {
 }
 
 .chat-model-routing-btn__dot {
-  flex: 0 0 5px;
+  flex: 0 0 17px;
+  width: 17px;
+  height: 17px;
+  display: grid;
+  place-items: center;
+}
+
+.chat-model-routing-btn__dot::before {
+  content: "";
   width: 5px;
   height: 5px;
   border-radius: 50%;
@@ -1843,63 +1870,20 @@ button.attachment-chip__primary:focus-visible {
   pointer-events: none;
 }
 
-.chat-model-routing-btn.btn--ghost:not(:disabled):hover {
-  border-color: color-mix(in srgb, var(--accent) 18%, transparent);
-  background: color-mix(in srgb, var(--accent) 6%, var(--bg-surface));
-  color: var(--accent);
+.chat-model-routing-btn:hover,
+.chat-model-routing-btn.is-open {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-surface));
+  color: var(--text);
 }
 
-.chat-model-routing-btn--off.btn--ghost:not(:disabled):hover {
-  border-color: color-mix(in srgb, var(--text-dim) 14%, transparent);
-  background: color-mix(in srgb, var(--text-dim) 6%, var(--bg-surface));
-  color: var(--text-muted);
+.chat-model-routing-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
-.chat-model-routing-btn.btn--ghost.is-active {
-  border-color: color-mix(in srgb, var(--accent) 24%, transparent);
-  background: color-mix(in srgb, var(--accent) 9%, var(--bg-surface));
-  color: var(--accent);
-}
-
-.chat-model-routing-btn--off.btn--ghost.is-active {
-  border-color: color-mix(in srgb, var(--text-dim) 18%, transparent);
-  background: color-mix(in srgb, var(--text-dim) 8%, var(--bg-surface));
-  color: var(--text-muted);
-}
-
-.chat-model-routing-btn--squilla_router.btn--ghost.is-active::after {
-  content: "";
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 6px;
-  height: 2px;
-  border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--accent) 62%, transparent);
-}
-
-.chat-model-routing-btn--llm_ensemble.btn--ghost.is-active {
-  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
-  background: color-mix(in srgb, var(--accent) 11%, var(--bg-surface));
-}
-
-.chat-model-routing-btn--llm_ensemble.btn--ghost.is-active::before,
-.chat-model-routing-btn--llm_ensemble.btn--ghost.is-active::after {
-  content: "";
-  position: absolute;
-  bottom: 6px;
-  width: 6px;
-  height: 2px;
-  border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--accent) 62%, transparent);
-}
-
-.chat-model-routing-btn--llm_ensemble.btn--ghost.is-active::before {
-  left: 10px;
-}
-
-.chat-model-routing-btn--llm_ensemble.btn--ghost.is-active::after {
-  right: 10px;
+.chat-model-routing-btn[aria-disabled="true"] {
+  cursor: default;
 }
 
 .chat-run-mode-btn {

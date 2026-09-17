@@ -916,6 +916,9 @@ class SessionManager:
         mode: str,
         *,
         expected_revision: int | None = None,
+        update_model: bool = False,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> dict[str, Any]:
         """Compare-and-set the user-selected routing strategy for one session."""
 
@@ -923,6 +926,9 @@ class SessionManager:
             canonicalize_session_key(session_key),
             mode,
             expected_revision=expected_revision,
+            update_model=update_model,
+            model=model,
+            provider=provider,
         )
 
     # ── Lifecycle ────────────────────────────────────────────────────────────

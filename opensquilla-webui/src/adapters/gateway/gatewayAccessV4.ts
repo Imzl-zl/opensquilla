@@ -178,6 +178,9 @@ export function createV4GatewayAccess(source: GatewayAccessSource): GatewayAcces
     get chatSendInitialModel() {
       return source.policy?.chat_send_initial_model === true
     },
+    get sessionsRoutingModelSelection() {
+      return source.policy?.sessions_routing_model_selection === true
+    },
     get concurrentHistoryReads() {
       return source.policy?.concurrent_history_reads === true
     },

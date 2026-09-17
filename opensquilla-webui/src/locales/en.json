@@ -4480,6 +4480,9 @@
       "title": "Models & routing",
       "direct": "Single model",
       "sessionModelFallback": "Use this task’s model",
+      "sessionModelTitle": "Conversation model",
+      "sessionModelHint": "Applies to the next turn in this conversation. Keeps its history and leaves global settings unchanged.",
+      "sessionModelBusy": "Finish the current response before changing its model.",
       "router": "Smart routing",
       "ensemble": "Multi-model"
     },

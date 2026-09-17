@@ -4395,6 +4395,9 @@
       "title": "Modèles et routage",
       "direct": "Modèle unique",
       "sessionModelFallback": "Utiliser le modèle de cette tâche",
+      "sessionModelTitle": "Modèle de cette conversation",
+      "sessionModelHint": "S’applique au prochain tour. L’historique et les paramètres globaux sont conservés.",
+      "sessionModelBusy": "Vous pourrez changer de modèle une fois la réponse en cours terminée.",
       "router": "Routage intelligent",
       "ensemble": "Plusieurs modèles"
     },

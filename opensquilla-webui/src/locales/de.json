@@ -4395,6 +4395,9 @@
       "title": "Modelle und Routing",
       "direct": "Einzelmodell",
       "sessionModelFallback": "Modell dieser Aufgabe verwenden",
+      "sessionModelTitle": "Modell dieser Unterhaltung",
+      "sessionModelHint": "Gilt ab dem nächsten Durchgang. Verlauf und globale Einstellungen bleiben erhalten.",
+      "sessionModelBusy": "Das Modell kann nach Abschluss der aktuellen Antwort geändert werden.",
       "router": "Intelligentes Routing",
       "ensemble": "Mehrere Modelle"
     },

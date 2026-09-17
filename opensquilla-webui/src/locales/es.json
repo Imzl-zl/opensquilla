@@ -4395,6 +4395,9 @@
       "title": "Modelos y enrutamiento",
       "direct": "Un modelo",
       "sessionModelFallback": "Usar el modelo de esta tarea",
+      "sessionModelTitle": "Modelo de esta conversación",
+      "sessionModelHint": "Se aplica al siguiente turno. Conserva el historial y no cambia la configuración global.",
+      "sessionModelBusy": "Podrás cambiar el modelo cuando termine la respuesta actual.",
       "router": "Enrutamiento inteligente",
       "ensemble": "Varios modelos"
     },

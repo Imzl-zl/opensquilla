@@ -24,6 +24,8 @@ export interface UseNewTaskModelSelectionOptions {
   sessionKey: Readonly<Ref<string>>
   isDraft: () => boolean
   capable: Readonly<Ref<boolean>>
+  /** Shares the configured catalog with durable-session model selection. */
+  catalogAvailable?: Readonly<Ref<boolean>>
   routingMode: Readonly<Ref<ModelRoutingMode>>
   busy: Readonly<Ref<boolean>>
   connectionEpoch?: Readonly<Ref<number>>
@@ -62,6 +64,7 @@ export function useNewTaskModelSelection(options: UseNewTaskModelSelectionOption
   const error = ref<string | null>(null)
   const loading = ref(false)
   const available = computed(() => options.isDraft() && options.capable.value)
+  const catalogAvailable = computed(() => options.catalogAvailable?.value ?? available.value)
   const selection = computed(() => (
     options.isDraft() && saved.value?.sessionKey === options.sessionKey.value
       ? saved.value.selection : null
@@ -161,7 +164,7 @@ export function useNewTaskModelSelection(options: UseNewTaskModelSelectionOption
   }
 
   function refresh(): Promise<void> {
-    if (!available.value) return Promise.resolve()
+    if (!catalogAvailable.value) return Promise.resolve()
     if (inFlight) return inFlight
     const currentGeneration = generation
     const requestController = new AbortController()
@@ -171,7 +174,7 @@ export function useNewTaskModelSelection(options: UseNewTaskModelSelectionOption
     const request = (async () => {
       try {
         const result = await options.catalog.list({ scope: 'configured', signal: requestController.signal })
-        if (generation !== currentGeneration || !available.value) return
+        if (generation !== currentGeneration || !catalogAvailable.value) return
         models.value = result.models
         providerErrors.value = result.errors
       } catch (cause) {
@@ -196,9 +199,9 @@ export function useNewTaskModelSelection(options: UseNewTaskModelSelectionOption
     // A new draft replaces it; acceptance retires the current draft pin.
     if ((draft && saved.value.sessionKey !== key) || (!draft && saved.value.sessionKey === key)) persist(null)
   }, { immediate: true })
-  watch([available, () => options.connectionEpoch?.value], () => {
+  watch([catalogAvailable, () => options.connectionEpoch?.value], () => {
     invalidateCatalog()
-    if (available.value) void refresh()
+    if (catalogAvailable.value) void refresh()
   }, { immediate: true })
   if (getCurrentScope()) onScopeDispose(invalidateCatalog)
 

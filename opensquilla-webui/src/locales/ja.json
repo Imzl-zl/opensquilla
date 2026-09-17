@@ -4395,6 +4395,9 @@
       "title": "モデルとルーティング",
       "direct": "単一モデル",
       "sessionModelFallback": "このタスクのモデルを使用",
+      "sessionModelTitle": "現在の会話のモデル",
+      "sessionModelHint": "次のターンから適用されます。会話履歴とグローバル設定は変更されません。",
+      "sessionModelBusy": "現在の応答が完了してからモデルを変更できます。",
       "router": "スマートルーティング",
       "ensemble": "複数モデル"
     },

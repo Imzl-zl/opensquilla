@@ -268,11 +268,11 @@ describe('useChatFeatureToggles default model display', () => {
     expect(api.defaultModelForAgent('main')).toEqual(nextModel)
   })
 
-  it('passes the default only to provisional drafts and refreshes it alongside the picker catalog', () => {
-    expect(chatViewSource).toContain(':new-task-default-model="newTaskDefaultModel"')
-    expect(chatViewSource).toContain('isProvisionalDraftSession() ? defaultModelForAgent(draftAgentId()) : null')
-    expect(chatViewSource).toContain('@refresh-new-task-models="refreshComposerModels"')
-    expect(chatViewSource).toMatch(/Promise\.allSettled\(\[\s*newTaskModel\.refresh\(\), loadFeatureToggles\(\), chatSessionModel\.refresh\(\)/)
+  it('passes agent-specific defaults to both draft and existing selectors and refreshes all authoritative state', () => {
+    expect(chatViewSource).toContain(':default-model="composerDefaultModel"')
+    expect(chatViewSource).toContain('isProvisionalDraftSession() ? draftAgentId() : agentIdFromSessionKey(sessionKey.value)')
+    expect(chatViewSource).toContain('@refresh-models="refreshComposerModels"')
+    expect(chatViewSource).toMatch(/Promise\.allSettled\(\[\s*newTaskModel\.refresh\(\), loadFeatureToggles\(\), chatSessionModel\.refresh\(\),\s*chatSessionRouting\.load\(\)/)
     expect(chatViewSource).toContain('connectionEpoch: computed(() => gatewayAccess.subscriptionEpoch)')
     expect(chatViewSource).toContain('connectionAvailable: computed(() => gatewayAccess.isAvailable && gatewayAccess.isAuthenticated)')
   })

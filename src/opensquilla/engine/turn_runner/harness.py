@@ -173,6 +173,8 @@ class _TurnRunnerProviderResolverAdapter(ProviderResolverPort):
     async def resolve_session_provider(
         self, session_key: str,
     ) -> tuple[Any | None, Any | None, dict[str, Any]]:
+        if not self._runner._session_model_pin_applies():
+            return (*self.resolve_provider(), {})
         resolver = self._runner._session_deployment_resolver
         manager = self._runner._session_manager
         get_session = getattr(manager, "get_session", None)
