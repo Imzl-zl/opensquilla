@@ -77,7 +77,37 @@ describe('elevated preference startup synchronization', () => {
     expect(h.api.elevatedUnavailable.value).toBe(false)
     expect(h.api.elevatedMode.value).toBe('on')
     h.connectionState.value = 'connected'
-    expect(h.setElevatedMode.mock.calls[1]!.slice(0, 2)).toEqual(['draft-b', 'on'])
+    expect(h.setElevatedMode).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['bypass', 'full'])('never transfers a dispatched %s write to another session', mode => {
+    localStorage.setItem('opensquilla.elevatedMode', mode)
+    localStorage.setItem('opensquilla.elevatedMode.version', '2')
+    const h = harness('connected')
+    h.setElevatedMode.mockImplementation(() => new Promise(() => {}))
+    h.api.loadElevatedMode()
+    const signal = h.setElevatedMode.mock.calls[0]![2]!.signal!
+    expect(h.setElevatedMode.mock.calls[0]!.slice(0, 2)).toEqual(['draft-a', mode])
+
+    h.sessionKey.value = 'existing-session-b'
+
+    expect(signal.aborted).toBe(true)
+    expect(h.setElevatedMode).toHaveBeenCalledTimes(1)
+    expect(h.api.elevatedMode.value).toBe(mode)
+  })
+
+  it('never replays a dispatched write after an interrupted connection recovers', () => {
+    const h = harness('connected')
+    h.setElevatedMode.mockImplementation(() => new Promise(() => {}))
+    h.api.setElevatedMode('bypass', { sync: true })
+    const signal = h.setElevatedMode.mock.calls[0]![2]!.signal!
+
+    h.connectionState.value = 'disconnected'
+    expect(signal.aborted).toBe(true)
+    h.connectionState.value = 'connected'
+
+    expect(h.setElevatedMode).toHaveBeenCalledTimes(1)
+    expect(h.api.elevatedMode.value).toBe('bypass')
   })
 
   it('retains forbidden-owner handling and does not automatically retry failures', async () => {

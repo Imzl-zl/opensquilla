@@ -116,12 +116,12 @@ export function useChatElevatedMode(options: UseChatElevatedModeOptions) {
 
   // A Desktop document mounts before its local Gateway is ready. Keep only
   // the latest unsent preference and resolve the session when Hello connects.
-  // Never replay a captured draft/session after a route change or unmount.
+  // An abort cannot undo a dispatched write (bypass/full may resolve pending
+  // approvals), so never queue it again after a route change or reconnect.
   watch([options.sessionKey, options.connectionState], () => {
     if (activeRequest) {
       activeRequest.abort()
       activeRequest = null
-      pendingMode = elevatedMode.value
     }
     if (pendingMode !== null) void flushElevatedMode()
   }, { flush: 'sync' })
