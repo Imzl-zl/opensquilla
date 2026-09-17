@@ -12,6 +12,7 @@ import threading
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterable
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -197,7 +198,7 @@ class TokenStore:
         self, public_id: str,
     ) -> tuple[frozenset[str], frozenset[str], frozenset[str]] | None:
         """Read current roles, scopes and capabilities without loading secrets."""
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             row = connection.execute(
                 "SELECT roles_json, scopes_json, capabilities_json FROM sandbox_tokens "
                 "WHERE public_id = ? AND revoked_at IS NULL",

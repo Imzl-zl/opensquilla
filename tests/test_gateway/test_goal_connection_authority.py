@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 from structlog.testing import capture_logs
 
+from opensquilla.gateway.auth import resolve_auth
+from opensquilla.gateway.config import GatewayConfig
 from opensquilla.gateway.websocket import ConnectionRegistry, get_registry
 from tests.test_gateway.test_goal_rpc import _goal_connection, _open_goal_rpc_stack
 
@@ -64,3 +66,16 @@ def test_old_service_cannot_remove_a_newer_unregister_listener():
     assert registry._unregister_listener is new_listener
     registry.clear_unregister_listener(new_listener)
     assert registry._unregister_listener is None
+
+
+async def test_open_remote_guest_does_not_gain_background_goal_authority(tmp_path):
+    principal = resolve_auth(
+        GatewayConfig(host="0.0.0.0", auth={"mode": "none"}),
+        auth_params={}, role_claim="operator", peer_ip="192.168.1.7",
+    )
+    assert principal is not None
+    assert principal.authenticated is False and principal.auth_state == "guest"
+    assert principal.is_owner is False
+    async with _open_goal_rpc_stack(tmp_path / "guest.sqlite") as stack:
+        assert stack.service._principal_authority_current(principal) is False
+        assert not stack.service._continuity_grants

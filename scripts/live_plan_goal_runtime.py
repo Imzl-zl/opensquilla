@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import math
 import os
 import platform
 import re
@@ -1326,6 +1327,8 @@ def _effect_command(arguments: Any, workspace: Path) -> str | None:
     """Only direct Python execution can prove that a fixture action ran."""
     if not isinstance(arguments, dict) or not isinstance(arguments.get("command"), str):
         return None
+    if any(marker in arguments["command"] for marker in ("$", "`", "\n", "\r")):
+        return None
     try:
         parts = shlex.split(arguments["command"])
         if not parts or not re.fullmatch(
@@ -1337,7 +1340,7 @@ def _effect_command(arguments: Any, workspace: Path) -> str | None:
             rest = rest[1:]
         if len(rest) != 2 or rest[1] not in {"record", "finish"}:
             return None
-        cwd = Path(arguments.get("cwd") or workspace)
+        cwd = Path(arguments.get("workdir") or workspace)
         cwd = cwd if cwd.is_absolute() else workspace / cwd
         script = Path(rest[0])
         script = script if script.is_absolute() else cwd / script
@@ -1356,14 +1359,16 @@ def effect_evidence(
     """Count real requests as well as receipts; never make the fixture deduplicate."""
     requests = [r for r in records if r.get("kind") == "tool_request"]
     actions: dict[str, list[dict[str, Any]]] = {"record": [], "finish": []}
-    opaque_exec = 0
+    opaque_by_phase = {"original": 0, "recovery": 0, "other": 0}
     for row in requests:
         payload = row.get("payload") or {}
         if payload.get("name") != "exec_command":
             continue
         action = _effect_command(payload.get("arguments"), workspace)
         if action is None:
-            opaque_exec += 1
+            phase = ("original" if row.get("turn_id") == record_turn else
+                     "recovery" if finish_turn and row.get("turn_id") == finish_turn else "other")
+            opaque_by_phase[phase] += 1
         else:
             actions[action].append(row)
 
@@ -1407,7 +1412,9 @@ def effect_evidence(
         "finish_exactly_once": lines("effect-finished.txt") == ["FINISHED"],
         "record_requests": len(actions["record"]),
         "finish_requests": len(actions["finish"]),
-        "opaque_exec_requests": opaque_exec,
+        "opaque_exec_requests": opaque_by_phase["original"] + opaque_by_phase["recovery"],
+        "opaque_exec_outside_implementation": opaque_by_phase["other"],
+        "opaque_exec_by_phase": opaque_by_phase,
         "record_succeeded_on_original_turn": succeeded("record", record_turn),
         "finish_succeeded_on_recovery_turn": succeeded("finish", finish_turn),
     }
@@ -1460,7 +1467,10 @@ async def _hold_effect_implementation(
         "without shell wrappers or suppressing exit status. After that tool succeeds, call "
         "request_user_input with question id color, choices Blue and Green. Wait for the "
         "actual answer before executing python3 effect_fixture.py finish. "
-        "Do not edit the fixture or any receipt. Do not execute record more than once.",
+        "Do not edit the fixture or any receipt. Do not execute record more than once. "
+        "The only exec_command calls allowed for this task are those direct record/finish "
+        "commands. If you inspect receipts, use read_file or list_dir; do not use shell "
+        "commands for inspection or environment checks.",
     }
     accepted = await case.rpc("plans.implement", **params)
     request = await case.pending(key, str(accepted["turn_id"]))
@@ -1479,14 +1489,15 @@ async def _hold_effect_implementation(
     proof = effect_evidence(case.records(), case.workspace, fixture, str(accepted["turn_id"]))
     case.evidence["effect_before_interrupt"] = proof
     case.check(
-        "side_effect_finished_before_interrupt",
+        "side_effect_recorded_once_before_interrupt",
         proof["fixture_unchanged"]
         and proof["receipt_exactly_once"]
         and proof["record_marker_present"]
-        and proof["record_succeeded_on_original_turn"]
-        and proof["finish_marker_absent"]
-        and proof["finish_requests"] == proof["opaque_exec_requests"] == 0,
+        and proof["record_succeeded_on_original_turn"],
     )
+    case.check("effect_finish_not_started_before_interrupt",
+               proof["finish_marker_absent"] and proof["finish_requests"] == 0)
+    case.check("effect_no_opaque_exec_before_interrupt", proof["opaque_exec_requests"] == 0)
     return params, accepted, request
 
 
@@ -1632,8 +1643,12 @@ def _plan_stop_child_exec(arguments: Any, workspace: Path) -> bool:
         rest = parts[1:]
         while rest and rest[0] in {"-3", "-u", "-B", "-E", "-s"}:
             rest = rest[1:]
-        if len(rest) != 1:
+        if len(rest) not in {1, 2}:
             return False
+        if len(rest) == 2:
+            maximum = float(rest[1])
+            if not math.isfinite(maximum) or not 0 < maximum <= 180:
+                return False
         path = Path(rest[0])
         path = path if path.is_absolute() else cwd / path
         return path.resolve() == (workspace / "child_wait.py").resolve()
@@ -1825,7 +1840,9 @@ async def plan_recovery_case(case: LiveCase) -> None:
         "Do not execute record again. I now answer Blue. Execute exactly python3 "
         "effect_fixture.py finish (or the platform equivalent Python 3 executable), without "
         "shell wrappers or suppressing exit status, and verify FINISHED. Do not edit the "
-        "fixture or receipts and do not ask another question. Complete this ordinary turn.",
+        "fixture or receipts and do not ask another question. Use read_file or list_dir for "
+        "all observations; the only exec_command permitted is the direct finish command. "
+        "Complete this ordinary turn.",
     }
     resumed = await case.rpc("plans.implement", **resumed_params)
     replay = await case.rpc("plans.implement", **resumed_params)
@@ -2056,6 +2073,7 @@ async def goal_case(case: LiveCase) -> None:
     await case.done(key, first)
     exact_user_tasks(case, key, [first])
     goal = (await case.rpc("goals.status", sessionKey=key))["goal"]
+    case.check("natural_goal_exists", isinstance(goal, dict))
     case.check("natural_goal_created_paused", goal["status"] == "paused")
     case.check("no_implicit_token_budget", goal["tokenBudget"] is None)
     second = await case.send(
@@ -2123,8 +2141,10 @@ async def childbudget_case(case: LiveCase) -> None:
     first = await case.send(
         key,
         "Create a Goal to obtain an independent sum of numbers.txt. Use create_goal first. "
-        "Then use sessions_spawn exactly once to ask a child to read numbers.txt and return its "
-        "sum; do not supply the answer. Tell the child not to spawn others or change files. "
+        "Then use sessions_spawn exactly once to ask a child to read numbers.txt and return the "
+        "sum of its numeric file contents, excluding the read tool's display line numbers. "
+        "Ask it to verify the calculation with python3; do not supply the answer. "
+        "Tell the child not to spawn others or change files. "
         "Call sessions_yield without session_key and wait for the pushed child completion. "
         "After receiving that real result, write child-result.txt with the sum and read it back. "
         "I explicitly request that you pause this Goal with update_goal paused at that point. "

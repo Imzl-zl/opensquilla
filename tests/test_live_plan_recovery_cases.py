@@ -114,10 +114,36 @@ async def test_effect_recovery_requires_both_real_actions_on_their_own_turns(tmp
         "python3 -c 'print(1)'",
         "python3 other.py record",
         "python3 effect_fixture.py finish extra",
+        "python3 effect_fixture.py record\n",
+        "python3 effect_fixture.py $ACTION",
+        "python3 `echo effect_fixture.py` record",
     ],
 )
 def test_effect_execution_proof_rejects_wrappers_and_non_fixture_commands(tmp_path, command):
     assert live._effect_command({"command": command}, tmp_path) is None
+
+
+def test_effect_execution_proof_uses_actual_public_workdir(tmp_path):
+    command = {"command": "python3 effect_fixture.py record", "workdir": str(tmp_path.parent)}
+    assert live._effect_command(command, tmp_path) is None
+    command["workdir"] = str(tmp_path)
+    assert live._effect_command(command, tmp_path) == "record"
+
+
+def test_opaque_execution_is_scoped_to_exact_implementation_and_recovery_tasks(tmp_path):
+    records = _rows("original", "record")
+    for turn in ("planning", "original", "recovery", "other-session"):
+        records.append({"kind": "tool_request", "turn_id": turn, "seq": 5,
+                        "payload": {"name": "exec_command",
+                                    "arguments": {"command": "cat effect-receipt.txt"}}})
+    proof = live.effect_evidence(records, tmp_path, b"", "original", "recovery")
+    assert proof["opaque_exec_requests"] == 2
+    assert proof["opaque_exec_outside_implementation"] == 2
+    assert proof["opaque_exec_by_phase"] == {"original": 1, "recovery": 1, "other": 2}
+    # Direct fixture actions remain global: another turn must not hide replay.
+    records.extend(_rows("other-session", "record", 7))
+    proof = live.effect_evidence(records, tmp_path, b"", "original", "recovery")
+    assert proof["record_requests"] == 2 and not proof["record_succeeded_on_original_turn"]
 
 
 @pytest.mark.parametrize("mutation", ["wrong_turn", "reversed_seq", "duplicate", "failed"])
@@ -239,6 +265,65 @@ class _ProtocolCase:
         self.calls.append(("start", {}))
         self.state = "paused"
         self.run.update(status="paused", pauseReason="process_restart", activeTaskId=None)
+
+
+@pytest.mark.parametrize("extra,expected", [
+    (None, None),
+    ("read_file", None),
+    ("inspect_original", "effect_no_opaque_exec_before_interrupt"),
+    ("inspect_planning", None),
+    ("unknown_command", "effect_no_opaque_exec_before_interrupt"),
+    ("finish", "effect_finish_not_started_before_interrupt"),
+    ("record", "side_effect_recorded_once_before_interrupt"),
+])
+async def test_effect_barrier_distinguishes_observation_from_replay_or_early_finish(
+    tmp_path, extra, expected,
+):
+    class BarrierCase(_ProtocolCase):
+        async def rpc(self, method, **params):
+            assert method == "plans.implement"
+            self.calls.append((method, params))
+            return self.accepted
+
+        async def pending(self, key, task):
+            assert task == "old"
+            return {"request_id": "pending"}
+
+        async def snapshot(self, key):
+            return {"activePlanRun": dict(self.run),
+                    "tasks": [{"task_id": "old", "status": "running"}]}
+
+    case = BarrierCase(tmp_path)
+    fixture = (tmp_path / "effect_fixture.py").read_bytes()
+    if extra in {"finish", "record"}:
+        case.records_rows.extend(_rows("old", extra, 3))
+    elif extra:
+        case.records_rows.append({
+            "kind": "tool_request", "turn_id": "planning" if extra == "inspect_planning"
+            else "old", "seq": 3, "payload": {
+                "name": "read_file" if extra == "read_file" else "exec_command",
+                "arguments": {"command": "cat effect-receipt.txt" if extra.startswith("inspect")
+                              else "python3 -c 'print(1)'"},
+            },
+        })
+    if expected:
+        with pytest.raises(live.CaseFailureError, match=f"^{expected}$"):
+            await live._hold_effect_implementation(case, "synthetic", "revision", fixture)
+        if expected == "effect_no_opaque_exec_before_interrupt":
+            assert case.assertions["side_effect_recorded_once_before_interrupt"]
+            assert case.assertions["effect_finish_not_started_before_interrupt"]
+            proof = case.evidence["effect_before_interrupt"]
+            assert proof["opaque_exec_requests"] == 1
+            phase = "other" if extra == "inspect_planning" else "original"
+            assert proof["opaque_exec_by_phase"][phase] == 1
+    else:
+        await live._hold_effect_implementation(case, "synthetic", "revision", fixture)
+        assert all(case.assertions.values())
+        if extra == "inspect_planning":
+            proof = case.evidence["effect_before_interrupt"]
+            assert proof["opaque_exec_requests"] == 0
+            assert proof["opaque_exec_outside_implementation"] == 1
+    assert "read_file or list_dir" in case.calls[0][1]["message"]
 
 
 @pytest.mark.parametrize("scenario", ["stop", "recovery"])

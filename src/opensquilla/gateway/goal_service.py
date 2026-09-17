@@ -293,7 +293,9 @@ class GoalService:
 
         if (
             principal is None
-            or not principal.authenticated
+            # A loopback-proven owner in auth=none has no credential, but the
+            # ordinary resolver still grants authenticated authority state.
+            or principal.auth_state != "authenticated"
             or not operator_scope_satisfies("operator.write", principal.scopes)
         ):
             return False

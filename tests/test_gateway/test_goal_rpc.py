@@ -5227,8 +5227,9 @@ async def test_goal_reattach_contract_maps_invalid_result_without_running_twice(
     assert error.value.message == "goals.reattach response violated its v4 contract"
 
 
+@pytest.mark.parametrize("open_local_owner", [False, True])
 async def test_background_goal_continues_after_disconnect_but_shutdown_pauses(
-    tmp_path: Path,
+    tmp_path: Path, open_local_owner: bool,
 ) -> None:
     started = asyncio.Event()
     release_first = asyncio.Event()
@@ -5252,6 +5253,16 @@ async def test_background_goal_continues_after_disconnect_but_shutdown_pauses(
         handler=handler,
         wire_lifecycle=True,
     ) as stack:
+        if open_local_owner:
+            from opensquilla.gateway.auth import resolve_auth
+
+            principal = resolve_auth(
+                stack.context.config, auth_params={}, role_claim="operator", peer_ip="127.0.0.1",
+            )
+            assert principal is not None and principal.is_owner
+            assert principal.authenticated is False and principal.auth_state == "authenticated"
+            stack.context.principal = principal
+            get_registry().get(stack.context.conn_id).principal = principal
         created = await _handle_goals_set(
             {**_set_params(), "executionPolicy": "background"},
             stack.context,
@@ -5308,6 +5319,7 @@ async def test_background_goal_rechecks_revoked_authority_before_next_admission(
     from opensquilla.gateway.token_store import TokenStore
 
     entered, finish = asyncio.Event(), asyncio.Event()
+    finish_summary = asyncio.Event()
     runs: list[TaskRun] = []
 
     async def handler(run: TaskRun) -> None:
@@ -5319,6 +5331,9 @@ async def test_background_goal_rechecks_revoked_authority_before_next_admission(
             await stack.service.commit_model_status(
                 run.goal_context, status="complete", reason=None,
             )
+            # Goal completion is durable before this ordinary task finishes.
+            # Keep that valid interval open independently of platform timing.
+            await finish_summary.wait()
 
     async with _open_goal_rpc_stack(
         tmp_path / "background-authority.sqlite", handler=handler, wire_lifecycle=True,
@@ -5387,6 +5402,15 @@ async def test_background_goal_rechecks_revoked_authority_before_next_admission(
             await asyncio.gather(*list(stack.service._kick_tasks.values()))
         if revocation == "named_token_active":
             await _wait_for_goal(stack.storage, lambda goal: goal.status == "complete")
+            task = await stack.storage.get_agent_task(runs[1].task_id)
+            assert task is not None and task.status == AgentTaskStatus.RUNNING
+            # Terminal Goal status prevents further admission even while the
+            # owning task is still performing its ordinary final response.
+            await stack.service._kick_if_idle(SOURCE_KEY)
+            assert len(runs) == 2
+            finish_summary.set()
+            settled = await stack.runtime.wait(runs[1].task_id, timeout=3)
+            assert settled.status == AgentTaskStatus.SUCCEEDED
         expected_runs = 2 if revocation == "named_token_active" else 1
         assert await _table_count(stack.storage, "agent_tasks") == expected_runs
         assert len(runs) == expected_runs
@@ -5426,7 +5450,10 @@ async def test_goal_authority_rollback_cannot_restore_disconnected_downgraded_ow
         assert SOURCE_KEY not in stack.service._continuity_grants
 
 
-async def test_natural_create_attaches_to_ordinary_running_rpc_task(tmp_path: Path) -> None:
+@pytest.mark.parametrize("open_local_owner", [False, True])
+async def test_natural_create_attaches_to_ordinary_running_rpc_task(
+    tmp_path: Path, open_local_owner: bool,
+) -> None:
     created_goals: list[dict[str, Any]] = []
     runtime_contexts: list[dict[str, Any]] = []
 
@@ -5452,6 +5479,16 @@ async def test_natural_create_attaches_to_ordinary_running_rpc_task(tmp_path: Pa
         handler=handler,
         wire_lifecycle=True,
     ) as stack:
+        if open_local_owner:
+            from opensquilla.gateway.auth import resolve_auth
+
+            principal = resolve_auth(
+                stack.context.config, auth_params={}, role_claim="operator", peer_ip="127.0.0.1",
+            )
+            assert principal is not None and principal.is_owner
+            assert principal.authenticated is False and principal.auth_state == "authenticated"
+            stack.context.principal = principal
+            get_registry().get(stack.context.conn_id).principal = principal
         accepted = await _handle_sessions_send_contract(
             {
                 "key": SOURCE_KEY,
