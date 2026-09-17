@@ -318,6 +318,10 @@ def test_bundle_masks_custom_header_and_cli_credentials(tmp_path, _hermetic_conf
 
 @pytest.mark.parametrize("header", [
     "X-AuthToken", "x-authtoken", "X-AUTHTOKEN", "x-accesstoken", "X-ACCESSTOKEN",
+    "X-CSRFToken", "x-csrftoken", "X-CSRFTOKEN",
+    "X-SecurityToken", "x-securitytoken", "X-SECURITYTOKEN",
+    "X-ProviderApiKey", "x-providerapikey", "X-PROVIDERAPIKEY",
+    "X.hasH_token", "X.IsLandToken",
 ])
 def test_bundle_masks_compound_credentials_with_case_insensitive_headers(
     tmp_path, _hermetic_config, header,

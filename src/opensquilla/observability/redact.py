@@ -14,22 +14,22 @@ from typing import Any
 _REDACTED = "[redacted]"
 
 # key=value / key: value / "key": "value" where the key looks secret-shaped.
-# Match credential suffixes only at component boundaries and the complete key
-# end. Prefixes may contain punctuation or Unicode in custom config/header
+# Match complete credential suffixes using component or namespace boundaries.
+# Prefixes may contain punctuation or Unicode in custom config/header
 # names; restricting them to ASCII would weaken existing config redaction.
 # No blanket `_key` suffix: benign identifiers like `session_key` must stay
 # readable in diagnostics.
 # Known compound credentials must also match without camel-case boundaries:
 # HTTP header casing alone must not change whether an auth token is masked.
-_SECRET_KEY_RE = re.compile(
-    r"(?:^|[._])"
+_SECRET_KEY_END = (
     r"(?:api_?key|token|secret_?access_?key|secret_?key|secret|password"
     r"|authorization|signing[_-]?secret|private[_-]?key"
     r"|app[_-]?secret|verification[_-]?token|encrypt[_-]?key|encoding[_-]?aes[_-]?key"
     r"|(?:api|auth|access|refresh|id|bearer|app)_?token|client_?secret"
-    r"|corp_?secret)\Z",
-    re.IGNORECASE,
+    r"|corp_?secret)\Z"
 )
+_SECRET_KEY_RE = re.compile(r"(?:^|[._])" + _SECRET_KEY_END, re.IGNORECASE)
+_SECRET_SUFFIX_RE = re.compile(_SECRET_KEY_END, re.IGNORECASE)
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 
 
@@ -40,18 +40,35 @@ def _is_secret_key(key: str) -> bool:
     literal = key.replace("-", "_").lower()
     # Capability predicates describe credentials without containing them.
     # Terminal metadata (apiKeyEnv, apiKeyConfigured, tokenCount) fails the
-    # anchored suffix match below, as do unrelated words ending in "secret".
+    # anchored suffix match below, as do unrelated bare words ending in "secret".
     # Only the final dotted component identifies a namespaced predicate;
     # interior words in credentials such as service_has_token do not.
-    predicates = ("requires_", "has_", "is_", "supports_")
+    field = literal.rsplit(".", 1)[-1]
+    # Predicate separators must be present in the original spelling: camel
+    # splitting can manufacture "has_" from hasH_token or "is_" from isLand_token.
+    # Compact predicates instead require a complete known credential remainder.
+    predicates = ("requires", "has", "is", "supports")
     if any(
-        candidate.rsplit(".", 1)[-1].startswith(predicates) for candidate in (normalized, literal)
+        field.startswith(f"{predicate}_") or (
+            field.startswith(predicate)
+            and _SECRET_KEY_RE.fullmatch(field[len(predicate):]) is not None
+        )
+        for predicate in predicates
     ):
         return False
-    return (
+    if (
         _SECRET_KEY_RE.search(normalized) is not None
         or _SECRET_KEY_RE.search(literal) is not None
-    )
+    ):
+        return True
+    # A real namespace can qualify arbitrary compound credentials (for example,
+    # x-securitytoken). Do not depend on their original casing or enumerate
+    # vendor names. The bounded suffix pattern has no greedy prefix, so
+    # scanning the field (including internal separators) remains linear.
+    # Ambiguous namespaced credential suffixes are conservatively masked; bare
+    # ordinary words still need a credential boundary or a known alias above.
+    separator = max(literal.rfind("."), literal.rfind("_"))
+    return separator > 0 and _SECRET_SUFFIX_RE.search(field) is not None
 
 
 # Common Authorization credential schemes; the scheme word plus its payload is

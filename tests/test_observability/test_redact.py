@@ -41,6 +41,9 @@ def test_complete_secret_assignments_remain_redacted(key: str) -> None:
 @pytest.mark.parametrize("key", [
     "X-AuthToken", "X-AccessToken", "refreshToken", "idToken", "bearerToken",
     "apiToken", "appToken", "clientSecret",
+    "X-CSRFToken", "X-SecurityToken", "X-ProviderApiKey", "X-CustomPassword",
+    "X-CustomSecret", "X-CustomPrivateKey", "Vendor.CustomToken", "定制_CustomToken",
+    "X-CustomPrivate_Key", "X-CustomSecret_Access_Key",
 ])
 @pytest.mark.parametrize("case", ["original", "lower", "upper", "swapcase"])
 def test_compound_credentials_are_case_insensitive(key: str, case: str) -> None:
@@ -58,9 +61,11 @@ def test_compound_credentials_are_case_insensitive(key: str, case: str) -> None:
     "requiresAuthToken", "requires_auth_token", "requiresaccesstoken", "hasAccessToken",
     "authTokenCount", "accessTokenEnv", "refreshTokenConfigured", "idTokenRequired",
     "clientSecretEnv", "notasecret",
+    "X.requiresApiKey", "Vendor.Key.hasToken", "X.securityTokenCount",
+    "X.providerApiKeyEnv",
 ])
 def test_compound_credential_metadata_keeps_case_insensitive_boundaries(key: str) -> None:
-    for spelling in (key, key.lower(), key.upper()):
+    for spelling in (key, key.lower(), key.upper(), key.swapcase()):
         payload = {"metadata": {spelling: [True, False, 3, 1.25, None]}}
         assert scrub_json(payload) == payload
         assert scrub_text(f"{spelling}=true") == f"{spelling}=true"
@@ -69,6 +74,9 @@ def test_compound_credential_metadata_keeps_case_insensitive_boundaries(key: str
 @pytest.mark.parametrize("key", [
     "X.Provider-Token", "Vendor.Key-Api-Key", "定制_api_key", "厂商.Password",
     "corpsecret", "CORPSECRET", "this_is_app_secret", "service_has_token",
+    "island_token", "hash_token", "isLand_token", "hasH_token",
+    "X.isLand_token", "X.hasH_token", "X.IsLandToken",
+    "ISLand_tOKEn", "X.IsLAND_ToKEn",
 ])
 def test_custom_secret_fields_and_aliases_are_masked(key: str) -> None:
     payload = {"headers": [{key: "synthetic-custom-credential"}]}
@@ -76,6 +84,16 @@ def test_custom_secret_fields_and_aliases_are_masked(key: str) -> None:
     assert scrub_json(payload) == expected
     assert scrub_text(f'{key}="synthetic-custom-credential"') == f'{key}="[redacted]"'
     assert scrub_json(expected) == expected
+
+
+@pytest.mark.parametrize("key", ["X-notasecret", "X.notasecret", "X-NOTASECRET"])
+def test_ambiguous_namespaced_secret_suffix_is_conservatively_masked(key: str) -> None:
+    # A custom namespace can qualify arbitrary credentials. An unqualified
+    # ordinary word remains benign, but its namespaced use is ambiguous.
+    assert scrub_json({key: "synthetic-credential", "notasecret": True}) == {
+        key: "[redacted]", "notasecret": True,
+    }
+    assert scrub_text(f"{key}=synthetic-credential") == f"{key}=[redacted]"
 
 
 @pytest.mark.parametrize("key", [
