@@ -4037,7 +4037,7 @@ async def test_ensemble_request_cap_rebinding_preserves_explicit_zero_and_unboun
 
 
 @pytest.mark.asyncio
-async def test_ensemble_request_cap_rebinding_requires_reliable_member_context(
+async def test_ensemble_default_context_rebinds_but_catalog_failure_retains_outer_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _tokenrhythm_budget_registry()
@@ -4065,7 +4065,10 @@ async def test_ensemble_request_cap_rebinding_requires_reliable_member_context(
     ]
 
     calls_by_model = {call["model"]: call["config"] for call in registry.calls}
-    assert calls_by_model["kimi-k2.7-code"].provider_request_max_chars == 555_555
+    # Automatic output follows this deployment's fallback, without borrowing
+    # a different authority's catalog. The member's context is still rebound.
+    assert calls_by_model["kimi-k2.7-code"].max_tokens == 16_000
+    assert calls_by_model["kimi-k2.7-code"].provider_request_max_chars == 880_000
     assert calls_by_model["glm-5.2"].provider_request_max_chars == 555_555
     done = next(event for event in events if isinstance(event, DoneEvent))
     assert done.ensemble_trace is not None
@@ -4075,7 +4078,7 @@ async def test_ensemble_request_cap_rebinding_requires_reliable_member_context(
         if candidate["model"] == "kimi-k2.7-code"
     )
     assert kimi_trace["effective_context_window_source"] == "default"
-    assert kimi_trace["provider_request_max_chars_source"] == "inherited"
+    assert kimi_trace["provider_request_max_chars_source"] == "member_context"
     aggregator_trace = done.ensemble_trace["final_request"]["execution"]
     assert aggregator_trace["effective_context_window_source"] == "error"
     assert aggregator_trace["provider_request_max_chars_source"] == "inherited"
