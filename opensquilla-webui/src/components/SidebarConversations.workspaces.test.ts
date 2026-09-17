@@ -189,6 +189,9 @@ describe('SidebarConversations project workspaces', () => {
     // A row button is reachable without opening the ⋯ menu, which is the
     // affordance a user could not find.
     expect(review?.getAttribute('aria-label')).toBe('View changes')
+    // Unlike its row siblings this entry is not hover-revealed: it is the way
+    // into the changes panel, so it has to be visible on its own.
+    expect(review?.classList.contains('sidebar-project-action')).toBe(true)
     review?.click()
     await nextTick()
 

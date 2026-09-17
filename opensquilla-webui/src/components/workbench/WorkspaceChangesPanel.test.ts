@@ -245,10 +245,38 @@ describe('WorkspaceChangesPanel', () => {
     expect(row('removed')?.textContent).toContain('const a = 1')
     expect(gutters('removed')).toEqual(['11', ''])
     expect(gutters('added')).toEqual(['', '11'])
-    expect(row('added')?.querySelector('.wb-changes__marker')?.textContent).toBe('+')
-    expect(row('removed')?.querySelector('.wb-changes__marker')?.textContent).toBe('-')
-    // File headers are their own row kind so they are not tinted as content.
+    // The +/- lives in the patch text itself, the same rendering the chat uses
+    // for tool-result diffs. (The highlighter needs a real DOM sanitizer, so the
+    // coloured span is verified in the browser, not here.)
+    expect(row('added')?.textContent).toContain('+const a = 2')
+    expect(row('removed')?.textContent).toContain('-const a = 1')
+    // File headers are their own row kind, outside the numbered columns.
     expect(row('meta')?.textContent).toContain('diff --git a/src/a.ts b/src/a.ts')
+    mounted.unmount()
+  })
+
+  it('wraps long patch lines by default and lets the reader turn that off', async () => {
+    const mounted = mountPanel(reader({
+      readDiff: vi.fn(async () => diff({
+        text: `@@ -1 +1 @@\n+${'x'.repeat(400)}\n`,
+      })),
+    }))
+    await settle()
+    clickEntry(mounted.element, 'src/a.ts')
+    await settle()
+
+    const code = mounted.element.querySelector('.wb-changes__code')
+    const toggle = [...mounted.element.querySelectorAll<HTMLButtonElement>('.wb-changes__action')]
+      .find(button => button.textContent?.includes('Wrap lines'))
+    expect(toggle?.getAttribute('aria-pressed')).toBe('true')
+    expect(code?.classList.contains('is-wrapped')).toBe(true)
+
+    toggle?.click()
+    await nextTick()
+
+    expect(toggle?.getAttribute('aria-pressed')).toBe('false')
+    expect(mounted.element.querySelector('.wb-changes__code')?.classList.contains('is-wrapped'))
+      .toBe(false)
     mounted.unmount()
   })
 

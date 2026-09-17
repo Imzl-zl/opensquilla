@@ -1290,6 +1290,13 @@ pre {
   opacity: 1;
 }
 
+/* Workspace review is reached from this button, so it stays visible instead of
+   appearing only on row hover; a hover-only entry is what made the surface hard
+   to find. */
+.sidebar-project-action[data-project-action='changes'] {
+  opacity: 1;
+}
+
 .sidebar-history-row--workspace:hover .sidebar-project-action--new-task:disabled,
 .sidebar-history-row--workspace:focus-within .sidebar-project-action--new-task:disabled {
   opacity: 0.34;

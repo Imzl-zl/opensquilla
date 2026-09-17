@@ -5,6 +5,7 @@
     :modal-blocked="surfaceBlocked"
     :aria-label="t('workbench.title')"
     :empty-label="t('workbench.empty')"
+  :empty-dock-label="t('workbench.emptyDock')"
     :open-items-label="t('workbench.openItems')"
     :collapse-label="t('workbench.collapse')"
     :close-item-label="t('workbench.closeItem')"

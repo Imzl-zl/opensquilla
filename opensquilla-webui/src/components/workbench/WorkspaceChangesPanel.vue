@@ -127,6 +127,16 @@
             <span class="wb-changes__diff-side">
               {{ diff.staged ? t('workbench.changes.staged') : t('workbench.changes.unstaged') }}
             </span>
+            <button
+              type="button"
+              class="wb-changes__action"
+              :aria-pressed="wrapLines"
+              :title="t('workbench.changes.wrapLines')"
+              @click="wrapLines = !wrapLines"
+            >
+              <Icon name="fileText" :size="12" />
+              <span>{{ t('workbench.changes.wrapLines') }}</span>
+            </button>
             <span
               class="wb-changes__diff-lines"
               :title="t('workbench.changes.diffStats', { added: addedLines, removed: removedLines })"
@@ -139,9 +149,9 @@
           <p v-if="diff.truncated" class="wb-changes__note" role="status">
             {{ t('workbench.changes.diffTruncated') }}
           </p>
-          <div class="wb-changes__code">
+          <div class="wb-changes__code" :class="{ 'is-wrapped': wrapLines }">
             <!-- Two number columns are the convention, but they are not
-                 self-explanatory, so the columns are labelled once here. -->
+                 self-explanatory, so the columns are named explicitly. -->
             <div class="wb-changes__line wb-changes__line--head" aria-hidden="true">
               <span class="wb-changes__gutter">{{ t('workbench.changes.oldLineNumber') }}</span>
               <span class="wb-changes__gutter">{{ t('workbench.changes.newLineNumber') }}</span>
@@ -156,9 +166,14 @@
               <template v-if="hasGutters(line)">
                 <span class="wb-changes__gutter" aria-hidden="true">{{ line.oldNumber ?? '' }}</span>
                 <span class="wb-changes__gutter" aria-hidden="true">{{ line.newNumber ?? '' }}</span>
-                <span class="wb-changes__marker" aria-hidden="true">{{ line.marker }}</span>
+                <span class="wb-changes__marker" />
               </template>
-              <code class="wb-changes__line-code">{{ line.content }}</code>
+              <code
+                v-if="line.html"
+                class="hljs wb-changes__line-code"
+                v-html="line.html"
+              />
+              <code v-else class="wb-changes__line-code">{{ line.text }}</code>
             </div>
           </div>
         </template>
@@ -168,6 +183,8 @@
 </template>
 
 <script setup lang="ts">
+import DOMPurify from 'dompurify'
+import hljs from 'highlight.js/lib/common'
 import { computed, inject, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
@@ -189,6 +206,7 @@ const { t } = useI18n()
 const reader = inject<WorkspaceChangesReader | null>(WORKSPACE_CHANGES_KEY, null)
 
 const changes = ref<WorkspaceChanges | null>(null)
+const wrapLines = ref(true)
 const loading = ref(false)
 const errorMessage = ref('')
 const selectedKey = ref('')
@@ -216,8 +234,28 @@ interface DiffLine {
   kind: DiffLineKind
   oldNumber: number | null
   newNumber: number | null
-  marker: string
-  content: string
+  text: string
+  /** Highlighted markup for a content line; empty when highlighting is off. */
+  html: string
+}
+
+// Rendering the patch as highlighted text keeps this panel consistent with the
+// diff the chat already shows for tool results: same highlighter, same tokens.
+const HIGHLIGHT_MAX_CHARS = 30_000
+
+function highlightDiffLine(line: string): string {
+  try {
+    const rendered = hljs.highlight(line, { language: 'diff', ignoreIllegals: true }).value
+    const sanitized = DOMPurify.sanitize(rendered, {
+      ALLOWED_TAGS: ['span'],
+      ALLOWED_ATTR: ['class'],
+    })
+    // A sanitizer that is unavailable (non-DOM test environment) must degrade to
+    // plain text rather than to an undefined template value.
+    return typeof sanitized === 'string' ? sanitized : ''
+  } catch {
+    return ''
+  }
 }
 
 const HUNK_HEADER_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/
@@ -289,6 +327,7 @@ const groups = computed(() => {
 const diffLines = computed<DiffLine[]>(() => {
   const value = diff.value
   if (!value || value.binary || !value.text) return []
+  const highlight = value.text.length <= HIGHLIGHT_MAX_CHARS
   const rows: DiffLine[] = []
   let oldNumber = 0
   let newNumber = 0
@@ -298,12 +337,13 @@ const diffLines = computed<DiffLine[]>(() => {
     oldLine: number | null,
     newLine: number | null,
   ) => {
+    const isContent = kind === 'context' || kind === 'added' || kind === 'removed'
     rows.push({
       kind,
       oldNumber: oldLine,
       newNumber: newLine,
-      marker: kind === 'added' ? '+' : kind === 'removed' ? '-' : text.slice(0, 1) === ' ' ? ' ' : '',
-      content: kind === 'added' || kind === 'removed' ? text.slice(1) : text,
+      text,
+      html: isContent && highlight ? highlightDiffLine(text) : '',
     })
   }
   for (const raw of value.text.split('\n')) {
@@ -770,14 +810,12 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   white-space: pre;
 }
 
-/* The row tint carries add/remove, so the code itself stays in the normal
-   foreground colour (green text on a green tint is the case that fails). */
-.wb-changes__line[data-kind="added"] {
-  background: color-mix(in srgb, var(--syntax-string) 14%, transparent);
-}
-
-.wb-changes__line[data-kind="removed"] {
-  background: color-mix(in srgb, var(--danger) 14%, transparent);
+/* Wrapping is the default because the dock is often narrower than the patch;
+   horizontal scrolling stays available by turning it off. */
+.wb-changes__code.is-wrapped .wb-changes__line,
+.wb-changes__code.is-wrapped .wb-changes__line-code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .wb-changes__line[data-kind="hunk"] {
@@ -804,11 +842,19 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 
 .wb-changes__gutter {
   flex: none;
-  width: 2.125rem;
+  width: 2.375rem;
   padding-right: 0.375rem;
   color: var(--text-muted);
   text-align: right;
   user-select: none;
+}
+
+/* The column labels are words, not digits, so they need to stay on one line
+   and may not inherit the wrapping the patch body uses. */
+.wb-changes__line--head .wb-changes__gutter {
+  font-size: 0.625rem;
+  line-height: 1.6;
+  white-space: nowrap;
 }
 
 .wb-changes__marker {

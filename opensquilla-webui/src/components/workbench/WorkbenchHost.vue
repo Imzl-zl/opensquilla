@@ -100,6 +100,16 @@
       }"
       data-testid="workbench-surface"
     >
+      <div
+        v-if="store.items.length === 0"
+        class="workbench-host__panel-layer"
+        role="tabpanel"
+        data-workbench-empty-dock
+      >
+        <slot name="empty-dock">
+          <div class="workbench-host__empty">{{ emptyDockLabel }}</div>
+        </slot>
+      </div>
       <template v-for="item in store.items" :key="item.id">
         <div
           v-if="
@@ -176,6 +186,7 @@ const props = withDefaults(defineProps<{
   coarseOnly?: boolean
   ariaLabel?: string
   emptyLabel?: string
+  emptyDockLabel?: string
   openItemsLabel?: string
   collapseLabel?: string
   closeItemLabel?: string
@@ -190,6 +201,7 @@ const props = withDefaults(defineProps<{
   coarseOnly: undefined,
   ariaLabel: 'Workbench',
   emptyLabel: 'No preview is available for this item.',
+  emptyDockLabel: 'No panel is open.',
   openItemsLabel: 'Open workbench items',
   collapseLabel: 'Collapse workbench',
   closeItemLabel: 'Close tab',
@@ -252,10 +264,14 @@ const hostStyle = computed(() => ({
   )}px`,
   '--workbench-container-height': `${containerRect.value.height}px`,
 }))
+// An expanded dock renders even with no panel open, so the dock toggle never
+// becomes a dead control after the last panel is closed.
 const shouldRender = computed(() =>
-  props.enabled && props.routeActive && store.expanded && store.activeItem !== null)
+  props.enabled && props.routeActive && store.expanded)
+// Mount for an open panel, or for a dock the user deliberately expanded with
+// nothing in it (its own empty state is a legitimate surface).
 const shouldMount = computed(() =>
-  props.enabled && store.activeItem !== null)
+  props.enabled && (store.activeItem !== null || store.expanded))
 const runtimeAvailable = computed(() =>
   props.enabled
   && props.routeActive

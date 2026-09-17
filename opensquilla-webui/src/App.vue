@@ -805,8 +805,9 @@ const sidebarToggleAriaShortcut = computed(() => ariaShortcut(sidebarToggleBindi
 const workbenchToggleBinding = computed(() => shortcutsStore.effectiveBinding('toggle-workbench'))
 const workbenchToggleHint = computed(() => formatBinding(workbenchToggleBinding.value, isMac))
 const workbenchToggleAriaShortcut = computed(() => ariaShortcut(workbenchToggleBinding.value))
-const workbenchToggleVisible = computed(() =>
-  appStore.features.artifactWorkbench === true && workbenchStore.items.length > 0)
+// A dock toggle stays available while the dock does, even with no panel open:
+// hiding it with the last panel is what made it look like it had vanished.
+const workbenchToggleVisible = computed(() => appStore.features.artifactWorkbench === true)
 const workbenchToggleTitle = computed(() => {
   const label = t('chrome.toggleWorkbench')
   return workbenchToggleHint.value ? `${label} (${workbenchToggleHint.value})` : label

@@ -25,14 +25,15 @@ describe('App workbench dock toggle contract', () => {
     expect(button).toContain("workbenchStore.expanded ? 'panel-right-close' : 'panel-right-open'")
   })
 
-  it('hides the toggle when no panel can be shown', () => {
+  it('keeps the toggle available while the dock exists, not only while a panel is open', () => {
     const computedStart = appSource.indexOf('const workbenchToggleVisible')
     const computedEnd = appSource.indexOf('const workbenchToggleTitle')
     expect(computedEnd).toBeGreaterThan(computedStart)
     const gating = appSource.slice(computedStart, computedEnd)
 
     expect(gating).toContain('appStore.features.artifactWorkbench === true')
-    expect(gating).toContain('workbenchStore.items.length > 0')
+    // Gating on open items is what made the control vanish after a reload.
+    expect(gating).not.toContain('items.length')
   })
 
   it('toggles the same store flag the host renders from', () => {
