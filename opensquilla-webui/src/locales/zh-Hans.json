@@ -161,7 +161,7 @@
     "resize": "调整工作区宽度",
     "pixels": "像素",
     "empty": "此项目没有可用的预览。",
-    "emptyDock": "尚未打开面板。",
+    "emptyDock": "尚未打开面板。可在项目行选择「查看改动」。",
     "itemLimitReached": "已打开 8 个隔离预览。请先关闭一个再继续。",
     "changes": {
       "subtitle": "工作区",

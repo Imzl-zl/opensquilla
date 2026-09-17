@@ -161,7 +161,7 @@
     "resize": "Cambiar el ancho del área de trabajo",
     "pixels": "píxeles",
     "empty": "No hay una vista previa disponible para este elemento.",
-    "emptyDock": "No hay ningún panel abierto.",
+    "emptyDock": "No hay ningún panel abierto. Usa Ver cambios en la fila de un proyecto.",
     "itemLimitReached": "Ya hay ocho vistas previas aisladas abiertas. Cierra una antes de abrir otra.",
     "changes": {
       "subtitle": "Árbol de trabajo",

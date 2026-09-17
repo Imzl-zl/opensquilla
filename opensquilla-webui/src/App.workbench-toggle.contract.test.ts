@@ -36,12 +36,28 @@ describe('App workbench dock toggle contract', () => {
     expect(gating).not.toContain('items.length')
   })
 
-  it('toggles the same store flag the host renders from', () => {
+  it('opens the review surface when the dock is empty, and otherwise toggles it', () => {
     const start = appSource.indexOf('function toggleWorkbench()')
-    const end = appSource.indexOf('}', start)
-    expect(appSource.slice(start, end)).toContain(
-      'workbenchStore.setExpanded(!workbenchStore.expanded)',
-    )
+    const end = appSource.indexOf('\n}', start)
+    expect(end).toBeGreaterThan(start)
+    const body = appSource.slice(start, end)
+
+    // An empty dock opens the surface it exists for here rather than a blank
+    // area, and an empty dock remains the fallback when there is no project.
+    expect(body).toContain('workbenchStore.items.length === 0')
+    expect(body).toContain('reviewableProject.value')
+    expect(body).toContain('requestWorkspaceChangesOpen(reviewableProject.value)')
+    expect(body).toContain('workbenchStore.setExpanded(!workbenchStore.expanded)')
+  })
+
+  it('only guesses a project when exactly one exists', () => {
+    const start = appSource.indexOf('const reviewableProject = computed')
+    const end = appSource.indexOf('function toggleWorkbench()', start)
+    const body = appSource.slice(start, end)
+
+    expect(body).toContain('activeProjectDraftId.value')
+    expect(body).toContain('projects.length === 1')
+    expect(body).toContain('return null')
   })
 
   it('binds the toggle-workbench shortcut to the same function', () => {

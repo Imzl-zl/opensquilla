@@ -228,7 +228,7 @@ const TYPE_LETTER: Record<WorkspaceChangeType, string> = {
   unknown: '·',
 }
 
-type DiffLineKind = 'context' | 'added' | 'removed' | 'hunk' | 'meta'
+type DiffLineKind = 'context' | 'added' | 'removed' | 'hunk' | 'notice'
 
 interface DiffLine {
   kind: DiffLineKind
@@ -259,16 +259,28 @@ function highlightDiffLine(line: string): string {
 }
 
 const HUNK_HEADER_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/
-const FILE_HEADER_PREFIXES = [
+// Patch plumbing the panel already states elsewhere (the file path and status
+// are in its own header). Rendering it as code lines is what made the left edge
+// of the patch jump between three different offsets.
+const SKIPPED_PATCH_PREFIXES = [
   'diff --git ',
   'index ',
-  'new file mode ',
-  'deleted file mode ',
+  '--- ',
+  '+++ ',
   'old mode ',
   'new mode ',
   'similarity index ',
+]
+
+// Lines that carry information the panel header does not, kept as one
+// full-width notice rather than a numbered code line.
+const NOTICE_PATCH_PREFIXES = [
+  'new file mode ',
+  'deleted file mode ',
   'rename from ',
   'rename to ',
+  'copy from ',
+  'copy to ',
   'Binary files ',
   'GIT binary patch',
 ]
@@ -347,6 +359,9 @@ const diffLines = computed<DiffLine[]>(() => {
     })
   }
   for (const raw of value.text.split('\n')) {
+    // A trailing newline leaves one empty tail entry; an empty *context* line in
+    // a patch always carries a leading space, so this cannot drop real content.
+    if (raw === '') continue
     const hunk = HUNK_HEADER_RE.exec(raw)
     if (hunk) {
       oldNumber = Number(hunk[1])
@@ -354,12 +369,9 @@ const diffLines = computed<DiffLine[]>(() => {
       push('hunk', raw, null, null)
       continue
     }
-    if (raw.startsWith('---') || raw.startsWith('+++')) {
-      push('meta', raw, null, null)
-      continue
-    }
-    if (FILE_HEADER_PREFIXES.some(prefix => raw.startsWith(prefix))) {
-      push('meta', raw, null, null)
+    if (SKIPPED_PATCH_PREFIXES.some(prefix => raw.startsWith(prefix))) continue
+    if (NOTICE_PATCH_PREFIXES.some(prefix => raw.startsWith(prefix))) {
+      push('notice', raw, null, null)
       continue
     }
     if (raw.startsWith('+')) {
@@ -375,7 +387,7 @@ const diffLines = computed<DiffLine[]>(() => {
       continue
     }
     // Trailing "\ No newline at end of file" and any other stray line.
-    push('meta', raw, null, null)
+    push('notice', raw, null, null)
   }
   return rows
 })
@@ -826,7 +838,7 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   background: var(--bg-elevated);
 }
 
-.wb-changes__line[data-kind="meta"] {
+.wb-changes__line[data-kind="notice"] {
   color: var(--text-muted);
 }
 

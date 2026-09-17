@@ -216,7 +216,7 @@ describe('WorkspaceChangesPanel', () => {
     mounted.unmount()
   })
 
-  it('renders the patch as tinted rows with line numbers from the hunk header', async () => {
+  it('renders numbered code rows and keeps patch plumbing out of the line flow', async () => {
     const mounted = mountPanel(reader({
       readDiff: vi.fn(async () => diff({
         text: [
@@ -250,8 +250,34 @@ describe('WorkspaceChangesPanel', () => {
     // coloured span is verified in the browser, not here.)
     expect(row('added')?.textContent).toContain('+const a = 2')
     expect(row('removed')?.textContent).toContain('-const a = 1')
-    // File headers are their own row kind, outside the numbered columns.
-    expect(row('meta')?.textContent).toContain('diff --git a/src/a.ts b/src/a.ts')
+    // `diff --git` / `index` / `---` / `+++` duplicate the panel header, and
+    // rendering them here is what left the numbered columns misaligned.
+    expect(mounted.element.textContent).not.toContain('diff --git')
+    expect(mounted.element.textContent).not.toContain('index 1111111')
+    mounted.unmount()
+  })
+
+  it('still shows a rename that carries no hunks', async () => {
+    const mounted = mountPanel(reader({
+      readDiff: vi.fn(async () => diff({
+        text: [
+          'diff --git a/src/a.ts b/src/b.ts',
+          'similarity index 100%',
+          'rename from src/a.ts',
+          'rename to src/b.ts',
+          '',
+        ].join('\n'),
+      })),
+    }))
+    await settle()
+    clickEntry(mounted.element, 'src/a.ts')
+    await settle()
+
+    const notices = [...mounted.element.querySelectorAll('.wb-changes__line[data-kind="notice"]')]
+      .map(node => node.textContent?.trim())
+    expect(notices).toEqual(['rename from src/a.ts', 'rename to src/b.ts'])
+    // The diff block must still render, or a pure rename would look empty.
+    expect(mounted.element.querySelector('.wb-changes__code')).not.toBeNull()
     mounted.unmount()
   })
 

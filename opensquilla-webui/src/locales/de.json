@@ -161,7 +161,7 @@
     "resize": "Arbeitsbereich-Breite ändern",
     "pixels": "Pixel",
     "empty": "Für dieses Element ist keine Vorschau verfügbar.",
-    "emptyDock": "Kein Panel geöffnet.",
+    "emptyDock": "Kein Panel geöffnet. Nutze „Änderungen anzeigen“ in einer Projektzeile.",
     "itemLimitReached": "Es sind bereits acht isolierte Vorschauen geöffnet. Schließe eine, bevor du eine weitere öffnest.",
     "changes": {
       "subtitle": "Arbeitsverzeichnis",

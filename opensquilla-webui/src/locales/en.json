@@ -162,7 +162,7 @@
     "resize": "Resize workbench",
     "pixels": "pixels",
     "empty": "No preview is available for this item.",
-    "emptyDock": "No panel is open.",
+    "emptyDock": "No panel is open. Use View changes on a project row.",
     "itemLimitReached": "Eight isolated previews are already open. Close one before opening another.",
     "changes": {
       "subtitle": "Working tree",

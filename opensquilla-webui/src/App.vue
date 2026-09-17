@@ -813,7 +813,33 @@ const workbenchToggleTitle = computed(() => {
   return workbenchToggleHint.value ? `${label} (${workbenchToggleHint.value})` : label
 })
 
+/** The project the dock should review when it has nothing open yet. */
+const reviewableProject = computed(() => {
+  const selected = activeProjectDraftId.value
+  if (selected) {
+    const workspace = projectWorkspaces.byId.value.get(selected)
+    if (workspace) return { workspaceId: workspace.id, workspaceName: workspace.name }
+  }
+  const projects = projectWorkspaces.workspaces.value
+  // An unambiguous single project is safe to open; several are not guessed.
+  if (projects.length === 1) {
+    return { workspaceId: projects[0].id, workspaceName: projects[0].name }
+  }
+  return null
+})
+
 function toggleWorkbench() {
+  // Opening an empty dock opens the surface the dock exists for here — the
+  // current project's changes — instead of showing a blank area. The empty
+  // state is only what you get when there is no project to review.
+  if (
+    !workbenchStore.expanded
+    && workbenchStore.items.length === 0
+    && reviewableProject.value
+  ) {
+    requestWorkspaceChangesOpen(reviewableProject.value)
+    return
+  }
   workbenchStore.setExpanded(!workbenchStore.expanded)
 }
 
