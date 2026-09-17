@@ -2792,14 +2792,38 @@ async def compact_context_new(request: CompactionRequest) -> CompactionResult:
         if cfg.llm_plan is not None:
             while candidate_index < len(cfg.llm_plan.candidates):
                 deployment = cfg.llm_plan.candidates[candidate_index]
-                candidate_chunk_text = _fit_compaction_input_to_target(
-                    request=request,
-                    target=deployment,
-                    previous_summary=rolling_summary,
-                    chunk=chunk,
-                    identifier_instruction=id_instruction,
-                    custom_instructions=custom_instructions or None,
-                )
+                def fit_chunk(source: list[dict[str, Any]]) -> str | None:
+                    return _fit_compaction_input_to_target(
+                        request=request,
+                        target=deployment,
+                        previous_summary=rolling_summary,
+                        chunk=source,
+                        identifier_instruction=id_instruction,
+                        custom_instructions=custom_instructions or None,
+                    )
+
+                candidate_chunk_text = fit_chunk(chunk)
+                if (
+                    candidate_chunk_text is None
+                    and forced_cut is None
+                    and 1 < chunk_index == len(chunks)
+                ):
+                    # A token-bounded checkpoint can still grow past an
+                    # independent character limit. Use its actual text to
+                    # select a complete final prefix; unread rounds stay raw.
+                    # A caller's forced cut must never be reduced this way.
+                    remaining_chunks = _chunk_entries(
+                        chunk, _compaction_target_input_budget(request, deployment),
+                        request_fits=lambda prefix, _later: fit_chunk(prefix) is not None,
+                    )
+                    if remaining_chunks and len(remaining_chunks[0]) < len(chunk):
+                        candidate_chunk_text = fit_chunk(remaining_chunks[0])
+                        if candidate_chunk_text is not None:
+                            chunk = remaining_chunks[0]
+                            chunks[chunk_index - 1] = chunk
+                            to_compact = [entry for part in chunks for entry in part]
+                            cut = len(to_compact)
+                            kept = entries[cut:]
                 if candidate_chunk_text is None:
                     log.info(
                         "compaction.target_skipped_input_unfit",

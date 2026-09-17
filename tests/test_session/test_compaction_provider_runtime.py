@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -1386,6 +1387,101 @@ async def test_later_chunks_reserve_the_next_checkpoint_before_spending_calls(
             assert proof.proof["fits_char_budget"]
             assert chat_config.max_tokens == 4096
         assert checkpoint.strip() in capture.calls[1][0][-1].content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", ["prefix", "suffix"])
+@pytest.mark.parametrize("case", ["automatic", "forced", "second_failure", "indivisible"])
+async def test_actual_checkpoint_replans_only_a_complete_automatic_final_prefix(
+    monkeypatch: pytest.MonkeyPatch, layout: str, case: str, _compaction_tokenizer: None,
+) -> None:
+    monkeypatch.setenv("OPENSQUILLA_COMPACTION_PROMPT_LAYOUT", layout)
+    checkpoint = " b" * 900
+    capture = _Provider(lambda: _Stream(
+        [ErrorEvent(message="synthetic second summary failure")]
+        if case == "second_failure" and len(capture.calls) == 2
+        else [TextDeltaEvent(text=checkpoint), DoneEvent(stop_reason="stop")]
+    ))
+    provider = OpenAIProvider(api_key="synthetic-key")
+    monkeypatch.setattr(provider, "chat", capture.chat)
+    config = _suffix_config(provider, window=24000)
+    config.protected_recent_messages = 2
+    assert config.llm_plan is not None and config.request_context is not None
+    target = replace(
+        config.llm_plan.primary, provider_request_max_chars=12000,
+        provider_request_max_chars_explicit_cap=12000,
+    )
+    config.llm_plan = replace(config.llm_plan, candidates=(target,))
+    config.request_context = replace(config.request_context, chat_config=(
+        config.request_context.chat_config.model_copy(update={
+            "provider_request_max_chars": 12000,
+            "provider_request_max_chars_explicit_cap": 12000,
+        })
+    ))
+    request = CompactionRequest(
+        session_id="actual-checkpoint-character-budget", entries=[], config=config,
+        context_window_tokens=24000, context_window_chars=12000,
+    )
+
+    def round_entries(index: int, size: int) -> list[dict[str, Any]]:
+        return [
+            {"role": "user", "content": f"Record {index}:" + " b" * size},
+            {"role": "assistant", "content": f"Completed record {index}"},
+        ]
+
+    low, high = 0, 12000
+    while low < high:
+        size = (low + high + 1) // 2
+        if _fit_compaction_input_to_target(
+            request=request, target=target, previous_summary="", chunk=round_entries(0, size),
+        ) is not None:
+            low = size
+        else:
+            high = size - 1
+    first = round_entries(0, low - 100)
+    later = (
+        round_entries(1, low - 300) if case == "indivisible" else
+        round_entries(1, (low - 300) // 2) + round_entries(2, (low - 300) // 2)
+    )
+    # Numeric token reservation alone admits this source, but the actual
+    # serialized checkpoint crosses the independent character limit.
+    assert _fit_compaction_input_to_target(
+        request=request, target=target, previous_summary=" ", chunk=later,
+        input_reserve_tokens=1023,
+    ) is not None
+    assert _fit_compaction_input_to_target(
+        request=request, target=target, previous_summary=checkpoint, chunk=later,
+    ) is None
+    entries = first + later + round_entries(3, 1)
+    request = replace(request, entries=entries, forced_prefix_cut=6 if case == "forced" else None)
+
+    result = await compact_context(request)
+
+    assert len(capture.calls) == (2 if case in {"automatic", "second_failure"} else 1)
+    for messages, tools, chat_config in capture.calls:
+        projection = provider.project_final_request(messages, tools, chat_config)
+        assert projection.fits
+        assert projection.proof["fits_token_budget"]
+        assert projection.proof["fits_char_budget"]
+    if case != "automatic":
+        assert result.removed_count == 0
+        assert result.kept_entries == entries
+        assert result.summary == ""
+        assert result.skip_reason == (
+            "suffix_summary_failed" if layout == "suffix" else "summary_failed"
+        )
+        return
+    assert result.removed_count == result.kept_start_index == 4
+    assert result.chunks_processed == 2
+    assert result.kept_entries == entries[4:]
+    assert result.summary == checkpoint.strip()
+    prompts = "\n".join(json.dumps(
+        provider.project_final_request(messages, tools, chat_config).payload,
+    ) for messages, tools, chat_config in capture.calls)
+    for entry in entries[:4]:
+        assert prompts.count(entry["content"]) == 1
+    for entry in entries[4:]:
+        assert entry["content"] not in prompts
 
 
 @pytest.mark.asyncio
