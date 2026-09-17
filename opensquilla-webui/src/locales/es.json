@@ -3519,6 +3519,8 @@
     "remove": "Quitar",
     "projectFileTarget": "Archivo del proyecto: {path}",
     "importedFileTarget": "Copia importada",
+    "projectFileLiveTarget": "Archivo actual del proyecto: {path}",
+    "importedFileWorkingTarget": "Archivo importado; los cambios usan una copia de trabajo",
     "fileLabel": "Archivo",
     "add": "Añadir",
     "attachFiles": "Adjuntar archivos",

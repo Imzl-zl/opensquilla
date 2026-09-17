@@ -3604,6 +3604,8 @@
     "remove": "Remove",
     "projectFileTarget": "Project file: {path}",
     "importedFileTarget": "Imported copy",
+    "projectFileLiveTarget": "Live project file: {path}",
+    "importedFileWorkingTarget": "Imported file; edits use a working copy",
     "fileLabel": "File",
     "add": "Add",
     "attachFiles": "Attach files",

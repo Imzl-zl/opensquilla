@@ -28,6 +28,7 @@ export interface ScopedDraftHistoryState {
   sessionKey: string
   agentId: string
   projectId: string
+  hasAttachments?: boolean
 }
 
 export interface InitialSessionResolution {
@@ -198,7 +199,7 @@ export function useChatSessionRoute(
         && scopedDraft.agentId === draftAgentId()
         && scopedDraft.projectId === readProjectFromUrl()
         && agentIdFromSessionKey(scopedDraft.sessionKey) === draftAgentId()
-        ? recoverableDraftSessionKey(scopedDraft.sessionKey)
+        ? recoverableDraftSessionKey(scopedDraft.sessionKey, scopedDraft.hasAttachments === true)
         : ''
       const mayRecoverRecentDraft = !readAgentFromUrl()
         && !readProjectFromUrl()

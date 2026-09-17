@@ -17,7 +17,7 @@ type CapturedSend = {
   attachments?: Array<Record<string, unknown>>
 }
 
-type HistoryAttachmentFixture = 'send' | 'html' | 'image' | 'staged'
+type HistoryAttachmentFixture = 'send' | 'html' | 'image' | 'staged' | 'workspace'
 
 type MockRpcOptions = {
   durableDraftIdentity?: boolean
@@ -130,6 +130,11 @@ async function mockRpc(page: Page, capturedSends: CapturedSend[], options: MockR
 
 function historyAttachmentsFromSend(params: CapturedSend, fixture: HistoryAttachmentFixture): Array<Record<string, unknown>> {
   const first = params.attachments?.[0] || {}
+  if (fixture === 'workspace') {
+    return [{ name: 'project-notes.txt', mime: 'text/plain', kind: 'file',
+      workspaceFile: { workspaceId: 'project-fixture', relativePath: 'research/project-notes.txt',
+        name: 'project-notes.txt', mime: 'text/plain' } }]
+  }
   if (fixture === 'html') {
     return [{
       type: 'text/html',
@@ -503,13 +508,21 @@ test.describe('attachment drag upload', () => {
   })
   }
 
-  for (const durableDraftIdentity of [true, false]) {
-    test(`recovers attachment bytes after refresh only with a proven draft identity (${durableDraftIdentity})`, async ({ page }) => {
+  for (const { durableDraftIdentity, newTask } of [
+    { durableDraftIdentity: true, newTask: false },
+    { durableDraftIdentity: false, newTask: false },
+    { durableDraftIdentity: true, newTask: true },
+  ]) {
+    test(`recovers attachment bytes after refresh only with a proven draft identity (${durableDraftIdentity}${newTask ? ', new task' : ''})`, async ({ page }) => {
       const capturedSends: CapturedSend[] = []
       await openMockedChat(page, capturedSends, { durableDraftIdentity },
-        '/control/chat?session=agent%3Amain%3Awebchat%3Afixture-draft-reload')
+        newTask ? CONTROL_URL : '/control/chat?session=agent%3Amain%3Awebchat%3Afixture-draft-reload')
       await dropFiles(page, [{ name: 'draft.txt', type: 'text/plain', text: 'recover these attachment bytes' }])
       await expect(page.locator('.attachment-chip')).toContainText('draft.txt')
+      if (newTask) {
+        await expect(page.locator('.chat-textarea')).toHaveValue('')
+        await expect.poll(() => page.evaluate(() => window.history.state.draftHasAttachments)).toBe(true)
+      }
       await expect(page.locator('.attachment-chip--busy')).toHaveCount(0)
       if (durableDraftIdentity) {
         await expect.poll(() => page.evaluate(async () => {
@@ -546,6 +559,25 @@ test.describe('attachment drag upload', () => {
     })
   }
 
+  test('shows the live project target after history replay without a snapshot download', async ({ page }) => {
+    const capturedSends: CapturedSend[] = []
+    const historyRequests: Array<Record<string, unknown>> = []
+    await openMockedChat(page, capturedSends, { replayHistoryAfterSend: true,
+      historyAttachmentFixture: 'workspace', historyRequests })
+    await page.locator('.chat-textarea').fill('Inspect the current project file')
+    const previousCalls = historyRequests.length
+    await page.locator('.chat-send-btn[aria-label="Send"]').click()
+    await expect.poll(() => historyRequests.length).toBeGreaterThan(previousCalls)
+    const chip = page.locator('.msg-attachments .msg-file-chip')
+    await expect(chip).toContainText('project-notes.txt')
+    await expect(chip).toContainText('Live project file: research/project-notes.txt')
+    await expect(page.locator('.msg-attachments button')).toHaveCount(0)
+    const download = page.waitForEvent('download', { timeout: 400 }).catch(() => null)
+    await chip.click()
+    expect(await download).toBeNull()
+    await expect(page.locator('.msg-file-chip--failed')).toHaveCount(0)
+  })
+
   test('keeps non-image history replay attachments as file chips', async ({ page }) => {
     const capturedSends: CapturedSend[] = []
     const historyRequests: Array<Record<string, unknown>> = []
@@ -567,6 +599,7 @@ test.describe('attachment drag upload', () => {
     await expect.poll(() => historyRequests.length).toBeGreaterThan(historyCallsBeforeSend)
 
     await expect(page.locator('.msg-attachments .msg-file-chip')).toContainText('preview.html')
+    await expect(page.locator('.msg-file-chip__target')).toHaveText('Imported file; edits use a working copy')
     await expect(page.locator('.msg-attachments .msg-thumb')).toHaveCount(0)
 
     const downloadPromise = page.waitForEvent('download')

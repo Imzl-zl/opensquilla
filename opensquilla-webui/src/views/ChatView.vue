@@ -6581,6 +6581,7 @@ function scopedDraftFromHistoryState(
     sessionKey: state.draftSessionKey,
     agentId: state.draftAgentId,
     projectId: state.draftProjectId,
+    hasAttachments: state.draftHasAttachments === true,
   }
 }
 
@@ -6590,16 +6591,19 @@ function persistDraftHistoryState() {
     const state = window.history.state as Record<string, unknown> | null
     const agentId = draftAgentId()
     const projectId = readProjectFromUrl()
+    const hasAttachments = pendingAttachments.value.length > 0
     if (
       state?.draftSessionKey === sessionKey.value
       && state.draftAgentId === agentId
       && state.draftProjectId === projectId
+      && state.draftHasAttachments === hasAttachments
     ) return
     window.history.replaceState({
       ...state,
       draftSessionKey: sessionKey.value,
       draftAgentId: agentId,
       draftProjectId: projectId,
+      draftHasAttachments: hasAttachments,
     }, '')
   } catch { /* ignore */ }
 }
@@ -7212,6 +7216,7 @@ watch(inputText, (value) => {
 
 watch(() => pendingAttachments.value.length, (count) => {
   if (count > 0) markProvisionalDraftUsed()
+  persistDraftHistoryState()
 }, { flush: 'sync' })
 
 watch(() => pendingQueue.value.length, (count) => {

@@ -3519,6 +3519,8 @@
     "remove": "削除",
     "projectFileTarget": "プロジェクトファイル: {path}",
     "importedFileTarget": "読み込みコピー",
+    "projectFileLiveTarget": "現在のプロジェクトファイル: {path}",
+    "importedFileWorkingTarget": "読み込みファイル。編集には作業用コピーを使用",
     "fileLabel": "ファイル",
     "add": "追加",
     "attachFiles": "ファイルを添付",

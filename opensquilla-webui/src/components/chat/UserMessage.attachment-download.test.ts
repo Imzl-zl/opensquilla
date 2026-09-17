@@ -30,6 +30,71 @@ beforeEach(() => {
 })
 
 describe('UserMessage attachment download', () => {
+  it.each(['application/pdf', 'image/png'])('shows the live project target without inventing a download for %s', async mime => {
+    const attachment = { ...message.attachments[0], mime,
+      workspaceFile: { workspaceId: 'project-fixture', relativePath: 'research/report.pdf',
+        name: 'report.pdf', mime },
+    }
+    const downloadAttachment = vi.fn(async () => true)
+    const previewImage = vi.fn()
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const app = createApp(UserMessage, {
+      message: { ...message, attachments: [attachment] },
+      stripTimePrefix: (value: string) => value,
+      copyMessage: async () => true, downloadAttachment, onPreviewImage: previewImage,
+    })
+    app.use(i18n)
+    app.mount(host)
+    await nextTick()
+
+    const chip = host.querySelector<HTMLElement>('.msg-file-chip')!
+    expect(chip.tagName).toBe('SPAN')
+    expect(chip.textContent).toContain('Live project file: research/report.pdf')
+    expect(host.querySelector('.msg-attachments button')).toBeNull()
+    chip.click()
+    expect(downloadAttachment).not.toHaveBeenCalled()
+    expect(previewImage).not.toHaveBeenCalled()
+    expect(chip.textContent).not.toContain('Imported')
+    app.unmount()
+  })
+
+  it('explains an imported input working copy while retaining its original download', async () => {
+    const attachment = { ...message.attachments[0], kind: 'staged' as const,
+      download_url: '/api/v1/attachments/fixture-input' }
+    const downloadAttachment = vi.fn(async () => true)
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const app = createApp(UserMessage, {
+      message: { ...message, attachments: [attachment] },
+      stripTimePrefix: (value: string) => value,
+      copyMessage: async () => true, downloadAttachment,
+    })
+    app.use(i18n)
+    app.mount(host)
+    await nextTick()
+    const chip = host.querySelector<HTMLButtonElement>('.msg-file-chip')!
+    expect(chip.tagName).toBe('BUTTON')
+    expect(chip.getAttribute('aria-label')).toBe('Download report.pdf')
+    expect(chip.textContent).toContain('Imported file; edits use a working copy')
+    chip.click()
+    expect(downloadAttachment).toHaveBeenCalledExactlyOnceWith(attachment)
+    app.unmount()
+  })
+
+  it('does not infer a working-copy target from generic file metadata', async () => {
+    const host = document.createElement('div')
+    const app = createApp(UserMessage, { message,
+      stripTimePrefix: (value: string) => value, copyMessage: async () => true,
+      downloadAttachment: async () => true,
+    })
+    app.use(i18n)
+    app.mount(host)
+    await nextTick()
+    expect(host.querySelector('.msg-file-chip__target')).toBeNull()
+    app.unmount()
+  })
+
   it('shows concise Office labels, sizes, and a localized unknown-file label', async () => {
     await loadLocaleMessages('zh-Hans')
     i18n.global.locale.value = 'zh-Hans'

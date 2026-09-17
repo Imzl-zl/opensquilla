@@ -28,7 +28,11 @@ export function useAttachmentDraftPersistence(options: {
     failureReported = true
     options.onError(error instanceof Error ? error.message : 'Attachment draft recovery is unavailable')
   }
-  function save(target = scope, attachments = options.attachments.value): void {
+  function save(
+    target = scope,
+    attachments = options.attachments.value,
+    retireSource?: AttachmentDraftScope,
+  ): void {
     if (!target) return
     if (!store) { if (attachments.length) report(new Error('Attachment draft recovery is unavailable in this browser')); return }
     const snapshot = attachments.map(attachment => ({ ...attachment,
@@ -42,6 +46,15 @@ export function useAttachmentDraftPersistence(options: {
       if (latestWrite.get(key) !== version) return
       await store.save(target, snapshot)
       if (latestWrite.get(key) === version) latestWrite.delete(key)
+      if (retireSource) {
+        const previousKey = attachmentDraftKey(retireSource)
+        // Destination storage must acknowledge ownership before the source is
+        // removed. A quota failure retains the old durable draft for recovery.
+        // A return to the source or a newer source write also keeps it alive.
+        if (scopeKey !== previousKey && !latestWrite.has(previousKey)) {
+          await store.save(retireSource, [])
+        }
+      }
     }).catch(report)
   }
   const stopAttachments = watch(options.attachments, () => {
@@ -70,8 +83,7 @@ export function useAttachmentDraftPersistence(options: {
     // A newly authenticated identity must not overwrite files the operator just
     // selected while its proof was arriving.
     if (options.attachments.value.length) {
-      save()
-      if (preserveHandoff && previousScope) save(previousScope, [])
+      save(scope, options.attachments.value, preserveHandoff && previousScope ? previousScope : undefined)
       restoring.value = false
       return
     }

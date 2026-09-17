@@ -67,6 +67,45 @@ describe('attachment draft ownership', () => {
     f.persistence.dispose()
   })
 
+  it('retains the source when a same-owner destination save fails', async () => {
+    const f = fixture()
+    await ready(f.persistence)
+    f.attachments.value = [item]
+    await f.persistence.flush()
+    // The source checkpoint precedes the destination write, so fail only B.
+    vi.mocked(f.store.save).mockImplementation(async (scope, attachments) => {
+      if (scope.sessionKey === 'session-B') throw new Error('Destination quota exceeded')
+      f.data.set(JSON.stringify(scope), [...attachments])
+    })
+    f.scope.value = { ...initial, sessionKey: 'session-B' }
+    await f.persistence.flush()
+    expect(f.data.get(JSON.stringify(initial))).toEqual([item])
+    expect(f.data.has(JSON.stringify(f.scope.value))).toBe(false)
+    expect(f.attachments.value).toEqual([item])
+    expect(f.onError).toHaveBeenCalledOnce()
+    f.persistence.dispose()
+  })
+
+  it('removes the handoff source only after the destination acknowledges its save', async () => {
+    const f = fixture()
+    await ready(f.persistence)
+    f.attachments.value = [item]
+    await f.persistence.flush()
+    const destination = deferred<void>()
+    vi.mocked(f.store.save).mockImplementation(async (scope, attachments) => {
+      if (scope.sessionKey === 'session-B') await destination.promise
+      f.data.set(JSON.stringify(scope), [...attachments])
+    })
+    f.scope.value = { ...initial, sessionKey: 'session-B' }
+    await vi.waitFor(() => expect(f.store.save).toHaveBeenCalledWith(f.scope.value, [item]))
+    expect(f.data.get(JSON.stringify(initial))).toEqual([item])
+    destination.resolve()
+    await f.persistence.flush()
+    expect(f.data.get(JSON.stringify(initial))).toEqual([])
+    expect(f.data.get(JSON.stringify(f.scope.value))).toEqual([item])
+    f.persistence.dispose()
+  })
+
   it('gateway/account changes never restore late source files into the new composer', async () => {
     const oldLoad = deferred<Attachment[]>()
     const f = fixture({ load: vi.fn().mockImplementationOnce(() => oldLoad.promise).mockResolvedValue([]) })
