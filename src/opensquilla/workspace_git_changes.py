@@ -24,11 +24,12 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
 from opensquilla.git_runtime import (
+    GitRunResult,
     GitRunState,
     harden_read_only_git_args,
     run_git,
@@ -36,6 +37,7 @@ from opensquilla.git_runtime import (
 
 STATUS_TIMEOUT_SECONDS = 10.0
 DIFF_TIMEOUT_SECONDS = 15.0
+WRITE_TIMEOUT_SECONDS = 20.0
 DEFAULT_MAX_ENTRIES = 500
 DEFAULT_MAX_DIFF_BYTES = 512 * 1024
 
@@ -81,10 +83,20 @@ class WorkspacePathError(ValueError):
 
 
 class WorkspaceGitUnavailableError(RuntimeError):
-    """Git could not produce the requested read-only result."""
+    """Git could not produce the requested result.
 
-    def __init__(self, reason: AvailabilityReason) -> None:
+    ``result`` carries Git's own output when the command ran and failed, so a
+    caller can report what Git said instead of a generic failure.
+    """
+
+    def __init__(
+        self,
+        reason: AvailabilityReason,
+        *,
+        result: GitRunResult | None = None,
+    ) -> None:
         self.reason = reason
+        self.result = result
         super().__init__(reason)
 
 
@@ -147,6 +159,58 @@ class _StatusHeader:
     upstream: str | None = None
     ahead: int = 0
     behind: int = 0
+
+
+def _write_availability_reason(result: GitRunResult) -> AvailabilityReason:
+    return _availability_reason(result.state) or "failed"
+
+
+def stage_paths(
+    workspace_path: str,
+    paths: Sequence[str],
+    *,
+    staged: bool = True,
+    timeout: float = WRITE_TIMEOUT_SECONDS,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """Stage or unstage *paths* in the workspace index.
+
+    This is the first operation in this module that writes, so it is worth
+    being explicit about the two things that make it safe to expose:
+
+    * Only the **index** is touched. ``git restore --staged`` and ``git add``
+      never rewrite worktree content, so staging a path by mistake costs the
+      user nothing but a second call with the opposite ``staged`` value.
+    * The read-only hardening is deliberately *not* applied here. It exists to
+      stop a repository from executing helpers during a read
+      (``--no-optional-locks``, ``core.fsmonitor=false``); a write is the one
+      case that legitimately takes the index lock, so reusing it would break
+      the operation it is meant to protect.
+
+    The returned tuple is the caller's paths as they were applied, so the
+    confirmation the operator sees is the same string set Git acted on.
+    """
+
+    repo_paths = tuple(normalize_repo_path(path) for path in paths)
+    if not repo_paths:
+        raise WorkspacePathError("at least one path is required")
+    args = (
+        ("add", "--", *repo_paths)
+        if staged
+        else ("restore", "--staged", "--", *repo_paths)
+    )
+    result = run_git(
+        args,
+        cwd=workspace_path,
+        timeout=timeout,
+        environment=environment,
+    )
+    if result.state is not GitRunState.OK:
+        raise WorkspaceGitUnavailableError(
+            _write_availability_reason(result),
+            result=result,
+        )
+    return repo_paths
 
 
 def normalize_repo_path(value: object) -> str:
@@ -548,7 +612,8 @@ def read_workspace_diff(
     )
     if not succeeded:
         raise WorkspaceGitUnavailableError(
-            _availability_reason(result.state) or "failed"
+            _availability_reason(result.state) or "failed",
+            result=result,
         )
     text = result.stdout_text
     binary = _BINARY_DIFF_RE.search(text) is not None
@@ -581,4 +646,6 @@ __all__ = [
     "parse_porcelain_status",
     "read_workspace_changes",
     "read_workspace_diff",
+    "stage_paths",
+    "WRITE_TIMEOUT_SECONDS",
 ]

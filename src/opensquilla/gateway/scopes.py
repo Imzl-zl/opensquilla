@@ -147,6 +147,7 @@ METHOD_SCOPES: dict[str, str] = {
     "workspaces.list": READ_SCOPE,  # OpenSquilla-only; owner-guarded local paths.
     "workspaces.git.status": READ_SCOPE,  # Read-only working-tree inspection.
     "workspaces.git.diff": READ_SCOPE,  # Read-only working-tree inspection.
+    "workspaces.git.stage": WRITE_SCOPE,  # Mutates the workspace index only.
     "sessions.messages.snapshot": READ_SCOPE,
     "sessions.messages.snapshot.read": READ_SCOPE,
     "transport.flow.update": READ_SCOPE,

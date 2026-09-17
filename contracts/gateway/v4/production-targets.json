@@ -1354,6 +1354,14 @@
     },
     {
       "kind": "method",
+      "wireName": "workspaces.git.stage",
+      "roles": [
+        "params",
+        "result"
+      ]
+    },
+    {
+      "kind": "method",
       "wireName": "workspaces.git.status",
       "roles": [
         "result"

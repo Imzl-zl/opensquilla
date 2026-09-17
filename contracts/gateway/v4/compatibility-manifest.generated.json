@@ -1431,6 +1431,12 @@
     },
     {
       "lifecycle": "stable",
+      "name": "workspaces.git.stage",
+      "schema": "workspaces/workspaces-git-stage.schema.json",
+      "schemaSha256": "424f138ff64db45888eee3478ee745dfe5c145ed938c1b091ddfb27553ec79b9"
+    },
+    {
+      "lifecycle": "stable",
       "name": "workspaces.git.status",
       "schema": "workspaces/workspaces-git-status.schema.json",
       "schemaSha256": "0aa786c679293de05e9be2f5f568bc2214e4154f1aea683458ca8d0174a6594c"
@@ -1475,10 +1481,10 @@
   "protocol": "opensquilla-websocket-json",
   "source": {
     "eventFamilyCount": 10,
-    "generatorSha256": "dff249871f7d15f32fa4cb3803a4edaf3ee41cefc5bb0a40fe1f4602bb7e3211",
-    "methodCount": 217,
-    "schemaCount": 227,
-    "schemaTreeSha256": "755e18c5c4c79b03b965fe0575cc1f775efe89f60d1b290db37c1df0ef6194ff"
+    "generatorSha256": "505fc772e8627c1bb8a5e1da903329a66394b984d0edcbef99f98ea948a2b31e",
+    "methodCount": 218,
+    "schemaCount": 228,
+    "schemaTreeSha256": "f98be43563a71462c9744bd0dd2bf3e1bc31ca4a24d3c293618a3de68b57d0ef"
   },
   "wireVersion": 4
 }

@@ -44,6 +44,7 @@ EXPECTED_METHOD_METADATA = {
 RESPONSE_VALIDATED_METHODS = (
     "onboarding.llmProfile.upsertAndActivate",
     "sandbox.path.list",
+    "workspaces.git.stage",
     "workspaces.open",
     "workspaces.update",
     "workspaces.pin",
@@ -72,6 +73,15 @@ EXPECTED_ACCURATE_ERROR_CODES = {
         "OWNER_REQUIRED",
         "INVALID_PARAMS",
         "WORKSPACE_NOT_FOUND",
+        "UNAVAILABLE",
+        "INTERNAL_ERROR",
+    ),
+    "workspaces.git.stage": (
+        "OWNER_REQUIRED",
+        "WORKSPACE_NOT_FOUND",
+        "INVALID_PARAMS",
+        "INVALID_PATH",
+        "GIT_FAILED",
         "UNAVAILABLE",
         "INTERNAL_ERROR",
     ),
@@ -234,9 +244,9 @@ def _specs_by_wire_name():
 def test_contract_inventory_freezes_all_webui_reachable_wire_names() -> None:
     specs = discover_contracts()
 
-    assert len(specs) == 227
+    assert len(specs) == 228
     assert Counter(spec.contract_type for spec in specs) == {
-        "method": 217,
+        "method": 218,
         "event": 10,
     }
     assert EXPECTED_METHOD_METADATA.keys() <= {spec.wire_name for spec in specs}
@@ -249,6 +259,7 @@ def test_contract_inventory_freezes_all_webui_reachable_wire_names() -> None:
         "transport.flow.dirty",
         "workspaces.git.status",
         "workspaces.git.diff",
+        "workspaces.git.stage",
     } <= {spec.wire_name for spec in specs}
 
 

@@ -28,6 +28,7 @@ from opensquilla.workspace_git_changes import (
     parse_porcelain_status,
     read_workspace_changes,
     read_workspace_diff,
+    stage_paths,
 )
 
 # Captured from `git status --porcelain=v2 --branch --untracked-files=all -z`
@@ -485,17 +486,140 @@ def test_read_only_reads_apply_the_shared_git_hardening(
     read_workspace_changes(".")           # status + numstat
     read_workspace_diff(".", "file.txt")
     is_untracked_path(".", "file.txt")
-
-    for args in captured:
-        assert args[:3] == ("--no-optional-locks", "-c", "core.fsmonitor=false"), args
+    stage_paths(".", ("file.txt",), staged=True)
+    stage_paths(".", ("file.txt",), staged=False)
 
     def find(marker: str) -> tuple[str, ...]:
         return next(args for args in captured if marker in args)
 
-    # Both diff-shaped reads must disable repository-controlled helpers.
+    # Every read disables repository-controlled helpers...
+    for args in captured:
+        if args[0] in {"add", "restore"}:
+            continue
+        assert args[:3] == ("--no-optional-locks", "-c", "core.fsmonitor=false"), args
+
+    # ...and both diff-shaped reads go further still.
     for marker in ("--numstat", "--unified=3"):
         args = find(marker)
         assert args[3:5] == ("diff", "--no-ext-diff"), args
         assert "--no-textconv" in args
     assert "ls-files" in find("ls-files")
     assert "status" in find("status")
+
+    # A write is the one invocation that legitimately takes the index lock, so
+    # the read-only flags must not be smuggled into its argv.
+    stage_args = next(args for args in captured if args[0] == "add")
+    unstage_args = next(args for args in captured if args[0] == "restore")
+    assert stage_args == ("add", "--", "file.txt"), stage_args
+    assert unstage_args == ("restore", "--staged", "--", "file.txt"), unstage_args
+
+
+def test_stage_paths_stages_an_untracked_file_and_leaves_it_on_disk(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    _commit_all(repository, git_environment)
+    (repository / "new.txt").write_text("fresh\n", encoding="utf-8")
+
+    applied = stage_paths(str(repository), ("new.txt",), staged=True, environment=git_environment)
+
+    assert applied == ("new.txt",)
+    assert (repository / "new.txt").read_text(encoding="utf-8") == "fresh\n"
+    changes = read_workspace_changes(str(repository), environment=git_environment)
+    assert [(entry.path, entry.staged) for entry in changes.entries] == [("new.txt", True)]
+
+
+def test_unstage_restores_the_index_only_and_keeps_the_edit(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    """The safety property that makes this method publishable.
+
+    A reviewer who unstages a file must still have the edit afterwards; only
+    the index may move.  This asserts the worktree bytes, not just the status
+    line, because a status-only assertion would still pass if the content had
+    been reverted.
+    """
+
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    (repository / "tracked.txt").write_text("original\n", encoding="utf-8")
+    _commit_all(repository, git_environment)
+    (repository / "tracked.txt").write_text("edited\n", encoding="utf-8")
+    stage_paths(str(repository), ("tracked.txt",), staged=True, environment=git_environment)
+
+    stage_paths(str(repository), ("tracked.txt",), staged=False, environment=git_environment)
+
+    assert (repository / "tracked.txt").read_text(encoding="utf-8") == "edited\n"
+    changes = read_workspace_changes(str(repository), environment=git_environment)
+    assert [(entry.path, entry.staged, entry.unstaged) for entry in changes.entries] == [
+        ("tracked.txt", False, True)
+    ]
+
+
+def test_stage_paths_is_idempotent(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    (repository / "tracked.txt").write_text("original\n", encoding="utf-8")
+    _commit_all(repository, git_environment)
+    (repository / "tracked.txt").write_text("edited\n", encoding="utf-8")
+
+    first = stage_paths(str(repository), ("tracked.txt",), environment=git_environment)
+    after_first = read_workspace_changes(str(repository), environment=git_environment)
+    second = stage_paths(str(repository), ("tracked.txt",), environment=git_environment)
+    after_second = read_workspace_changes(str(repository), environment=git_environment)
+
+    assert first == second == ("tracked.txt",)
+    assert [entry.staged for entry in after_first.entries] == [True]
+    assert [entry.staged for entry in after_second.entries] == [True]
+
+
+def test_stage_paths_rejects_escaping_paths_before_running_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _unexpected(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Git must not run for a path outside the workspace")
+
+    monkeypatch.setattr(workspace_git_changes, "run_git", _unexpected)
+
+    with pytest.raises(WorkspacePathError):
+        stage_paths(".", ("../outside.txt",))
+
+
+def test_stage_paths_requires_at_least_one_path() -> None:
+    with pytest.raises(WorkspacePathError):
+        stage_paths(".", ())
+
+
+def test_stage_paths_reports_gits_own_output_on_failure(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    """An index-only operation that does not apply must say why.
+
+    Unstaging a path with no index entry is the realistic failure (the caller's
+    view is stale), and the message has to come from Git rather than a generic
+    "failed", or the panel cannot explain what happened.
+    """
+
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    _commit_all(repository, git_environment)
+    (repository / "untracked.txt").write_text("never staged\n", encoding="utf-8")
+
+    with pytest.raises(WorkspaceGitUnavailableError) as raised:
+        stage_paths(str(repository), ("untracked.txt",), staged=False, environment=git_environment)
+
+    assert raised.value.reason == "failed"
+    assert raised.value.result is not None
+    assert "untracked.txt" in raised.value.result.stderr_text
+    # Nothing was staged as a side effect of the failed call.
+    changes = read_workspace_changes(str(repository), environment=git_environment)
+    assert [(entry.path, entry.change_type) for entry in changes.entries] == [
+        ("untracked.txt", "untracked")
+    ]

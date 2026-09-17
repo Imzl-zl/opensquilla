@@ -12,9 +12,19 @@ import {
   type WorkspacesGitStatusResult,
 } from '@/contracts/generated/v4/workspacesGitStatus'
 import { validateWorkspacesGitStatusResult } from '@/contracts/generated/v4/workspacesGitStatusValidators.mjs'
+import {
+  WORKSPACES_GIT_STAGE_METHOD,
+  type WorkspacesGitStageParams,
+  type WorkspacesGitStageResult,
+} from '@/contracts/generated/v4/workspacesGitStage'
+import {
+  validateWorkspacesGitStageParams,
+  validateWorkspacesGitStageResult,
+} from '@/contracts/generated/v4/workspacesGitStageValidators.mjs'
 import type {
   WorkspaceChanges,
   WorkspaceChangesReader,
+  WorkspaceIndexChange,
 } from '@/modules/workspaceChanges'
 
 function optionsFor(signal?: AbortSignal): RpcCallOptions | undefined {
@@ -23,6 +33,13 @@ function optionsFor(signal?: AbortSignal): RpcCallOptions | undefined {
 
 function requireResult<T>(value: unknown, valid: (candidate: unknown) => boolean, method: string): T {
   if (!valid(value)) throw new Error(`${method} returned an invalid response`)
+  return value as T
+}
+
+/** The outgoing direction is validated too: a request that cannot satisfy its
+ * Contract (an empty path list, say) should not reach the Gateway at all. */
+function requireParams<T>(value: unknown, valid: (candidate: unknown) => boolean, method: string): T {
+  if (!valid(value)) throw new Error(`${method} received params that violate its contract`)
   return value as T
 }
 
@@ -93,6 +110,31 @@ export function createV4WorkspaceChanges(
         text: result.text,
         truncated: result.truncated,
         binary: result.binary,
+      }
+    },
+
+    async stagePaths(request, options): Promise<WorkspaceIndexChange> {
+      const params = requireParams<WorkspacesGitStageParams>(
+        {
+          workspaceId: request.workspaceId,
+          staged: request.staged,
+          paths: [...request.paths],
+        },
+        validateWorkspacesGitStageParams,
+        WORKSPACES_GIT_STAGE_METHOD,
+      )
+      const result = requireResult<WorkspacesGitStageResult>(
+        await transport.request(
+          WORKSPACES_GIT_STAGE_METHOD,
+          params as unknown as Record<string, unknown>,
+          optionsFor(options?.signal),
+        ),
+        validateWorkspacesGitStageResult,
+        WORKSPACES_GIT_STAGE_METHOD,
+      )
+      return {
+        staged: result.staged,
+        affectedPaths: result.affectedPaths,
       }
     },
   }

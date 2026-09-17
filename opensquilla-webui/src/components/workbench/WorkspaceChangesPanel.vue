@@ -20,7 +20,7 @@
       <div class="wb-changes__bar-actions">
         <button
           type="button"
-          class="wb-changes__action wb-changes__action--icon"
+          class="wb-changes__icon-button"
           :aria-pressed="wrapLines"
           :aria-label="t('workbench.changes.wrapLines')"
           :title="t('workbench.changes.wrapLines')"
@@ -31,12 +31,14 @@
         </button>
         <button
           type="button"
-          class="wb-changes__action"
+          class="wb-changes__icon-button"
           :disabled="loading"
+          :aria-label="t('workbench.changes.refresh')"
+          :title="t('workbench.changes.refresh')"
+          data-testid="changes-refresh"
           @click="reload()"
         >
-          <Icon name="refresh" :size="13" />
-          <span>{{ t('workbench.changes.refresh') }}</span>
+          <Icon name="refresh" :size="12" />
         </button>
       </div>
     </header>
@@ -88,13 +90,33 @@
             <Icon :name="group.icon" :size="12" />
             <span>{{ group.label }}</span>
             <span class="wb-changes__group-count">{{ group.entries.length }}</span>
+            <!-- The whole-set action belongs to the group it applies to, so there
+                 is no separate "stage everything" concept to explain. -->
+            <button
+              type="button"
+              class="wb-changes__icon-button wb-changes__group-action"
+              :disabled="indexBusy"
+              :aria-busy="indexBusy"
+              :aria-label="t(`workbench.changes.${group.indexAction}All`)"
+              :title="t(`workbench.changes.${group.indexAction}All`)"
+              data-testid="changes-group-index-action"
+              :data-index-action="group.indexAction"
+              @click="applyGroupIndexChange(group)"
+            >
+              <Icon :name="group.indexAction === 'stage' ? 'plus' : 'minus'" :size="12" />
+            </button>
           </h4>
-          <button
+          <!-- The row is a container so the selectable area and the index action
+               can be siblings: a button cannot contain another button. -->
+          <div
             v-for="entry in group.entries"
             :key="entryKey(entry)"
+            class="wb-changes__row"
+            :class="{ 'is-selected': entryKey(entry) === selectedKey }"
+          >
+          <button
             type="button"
             class="wb-changes__entry"
-            :class="{ 'is-selected': entryKey(entry) === selectedKey }"
             :aria-pressed="entryKey(entry) === selectedKey"
             :data-entry-key="entryKey(entry)"
             @click="select(entry)"
@@ -122,6 +144,23 @@
             </span>
             <Icon v-else-if="entry.staged" name="check" :size="12" class="wb-changes__check" />
           </button>
+          <!-- One icon per row, the way a source-control list does it, so a row
+               stays a single line however many actions it grows. -->
+          <button
+            type="button"
+            class="wb-changes__icon-button wb-changes__row-action"
+            :disabled="indexBusy"
+            :aria-busy="indexBusy"
+            :aria-label="t(`workbench.changes.${indexAction(entry)}`)"
+            :title="t(`workbench.changes.${indexAction(entry)}`)"
+            data-testid="changes-index-action"
+            :data-index-action="indexAction(entry)"
+            :data-entry-key="entryKey(entry)"
+            @click="applyIndexChange(entry)"
+          >
+            <Icon :name="indexAction(entry) === 'stage' ? 'plus' : 'minus'" :size="12" />
+          </button>
+          </div>
         </section>
       </div>
 
@@ -174,6 +213,15 @@
             {{ t('workbench.changes.selectPrompt') }}
           </span>
         </div>
+        <div
+          v-if="indexError"
+          class="wb-changes__note wb-changes__note--error"
+          role="alert"
+          data-testid="changes-index-error"
+        >
+          <span>{{ indexError }}</span>
+        </div>
+
         <p v-if="diffLoading" class="wb-changes__note" role="status">
           {{ t('workbench.changes.diffLoading') }}
         </p>
@@ -300,6 +348,8 @@ function resetSplitter() {
   listHeight.value = null
 }
 const errorMessage = ref('')
+const indexBusy = ref(false)
+const indexError = ref('')
 const selectedKey = ref('')
 const diff = ref<WorkspaceFileDiff | null>(null)
 const diffLoading = ref(false)
@@ -391,9 +441,27 @@ const groups = computed(() => {
     else unstaged.push(entry)
   }
   return [
-    { key: 'staged', icon: 'check' as const, label: t('workbench.changes.groupStaged'), entries: staged },
-    { key: 'unstaged', icon: 'pencil' as const, label: t('workbench.changes.groupUnstaged'), entries: unstaged },
-    { key: 'untracked', icon: 'plus' as const, label: t('workbench.changes.groupUntracked'), entries: untracked },
+    {
+      key: 'staged',
+      icon: 'check' as const,
+      label: t('workbench.changes.groupStaged'),
+      indexAction: 'unstage' as const,
+      entries: staged,
+    },
+    {
+      key: 'unstaged',
+      icon: 'pencil' as const,
+      label: t('workbench.changes.groupUnstaged'),
+      indexAction: 'stage' as const,
+      entries: unstaged,
+    },
+    {
+      key: 'untracked',
+      icon: 'plus' as const,
+      label: t('workbench.changes.groupUntracked'),
+      indexAction: 'stage' as const,
+      entries: untracked,
+    },
   ].filter(group => group.entries.length > 0)
 })
 
@@ -547,6 +615,76 @@ async function reload(preserveSelection = false) {
   }
 }
 
+/**
+ * Which index action a row offers.
+ *
+ * The group a row sits in is the state it is showing, so the action is the
+ * inverse of that group: a worktree change is offered "stage", a staged entry
+ * is offered "unstage".
+ */
+function indexAction(entry: WorkspaceChangeEntry): 'stage' | 'unstage' {
+  return entry.staged ? 'unstage' : 'stage'
+}
+
+interface WorkspaceChangeGroup {
+  key: string
+  icon: 'check' | 'pencil' | 'plus'
+  label: string
+  indexAction: 'stage' | 'unstage'
+  entries: WorkspaceChangeEntry[]
+}
+
+/**
+ * Move a set of paths between the worktree and the index.
+ *
+ * One row and a whole group are the same operation with a different path list,
+ * so they share this. The write is acknowledged with an index-only result, so
+ * the list is re-read rather than patched from the response. Rows move between
+ * groups, and the open file is re-selected by *path* because its key (path plus
+ * half) is expected to move with it.
+ */
+async function runIndexChange(paths: readonly string[], staged: boolean) {
+  const activeReader = reader
+  if (!activeReader || indexBusy.value || paths.length === 0) return
+  const selectedPath = selectedEntry.value?.path
+  indexBusy.value = true
+  indexError.value = ''
+  try {
+    await activeReader.stagePaths({
+      workspaceId: props.workspaceId,
+      paths: [...paths],
+      staged,
+    })
+    await reload(true)
+    const refreshed = selectedPath
+      ? changes.value?.entries.find(candidate => candidate.path === selectedPath)
+      : undefined
+    if (refreshed) {
+      await select(refreshed)
+    } else if (selectedPath) {
+      selectedKey.value = ''
+      diff.value = null
+    }
+  } catch (error) {
+    indexError.value = error instanceof Error
+      ? error.message
+      : t('workbench.changes.indexFailed')
+  } finally {
+    indexBusy.value = false
+  }
+}
+
+function applyIndexChange(entry: WorkspaceChangeEntry) {
+  return runIndexChange([entry.path], indexAction(entry) === 'stage')
+}
+
+function applyGroupIndexChange(group: WorkspaceChangeGroup) {
+  return runIndexChange(
+    group.entries.map(entry => entry.path),
+    group.indexAction === 'stage',
+  )
+}
+
 async function select(entry: WorkspaceChangeEntry) {
   const activeReader = reader
   const key = entryKey(entry)
@@ -597,6 +735,10 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 .wb-changes__bar {
   display: flex;
   flex: none;
+  /* The list below scrolls, so its content stops one scrollbar, one border and
+     one row inset short of this row. Compensating here is what puts the icon
+     controls of both rows on one right edge instead of two nearby ones. */
+  padding-inline-end: calc(var(--scrollbar-width) + 1px + 0.5rem);
   /* The dock is narrow and the bar carries the whole panel's controls. When
      they no longer fit beside the branch and the totals, the controls move to
      their own row instead of squeezing the text into a clipped box. */
@@ -639,12 +781,13 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   margin-inline-start: auto;
 }
 
-.wb-changes__action {
+.wb-changes__action,
+.wb-changes__icon-button {
   display: inline-flex;
   flex: none;
   gap: 0.25rem;
   align-items: center;
-  padding: 0.125rem 0.5rem;
+  justify-content: center;
   color: var(--text-muted);
   font: inherit;
   background: var(--bg-elevated);
@@ -653,22 +796,37 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   cursor: pointer;
 }
 
-.wb-changes__action:disabled {
+.wb-changes__action {
+  padding: 0.125rem 0.5rem;
+}
+
+/* One square for every icon-only control — the bar, a group header and a row —
+   so the glyphs read as one set instead of three sizes. */
+.wb-changes__icon-button {
+  width: 1.375rem;
+  height: 1.375rem;
+  padding: 0;
+}
+
+.wb-changes__action:disabled,
+.wb-changes__icon-button:disabled {
   cursor: default;
   opacity: 0.6;
 }
 
-/* An icon-only action keeps the square hit area of the labelled ones. */
-.wb-changes__action--icon {
-  justify-content: center;
-  min-width: 1.5rem;
-  padding: 0.125rem 0.25rem;
-}
-
 .wb-changes__action:focus-visible,
+.wb-changes__icon-button:focus-visible,
 .wb-changes__entry:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
+}
+
+/* The group header keeps the heading type but lets a control sit on its line. */
+.wb-changes__group-action {
+  flex: none;
+  margin-left: 0.375rem;
+  color: var(--text);
+  text-transform: none;
 }
 
 .wb-changes__note {
@@ -752,34 +910,82 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 
 .wb-changes__group-count {
   margin-left: auto;
+  flex: none;
   padding: 0 0.3125rem;
   font-weight: 500;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
 }
 
+.wb-changes__row {
+  display: flex;
+  position: relative;
+  align-items: center;
+  border-left: 2px solid transparent;
+}
+
+.wb-changes__row:hover {
+  background: var(--bg-elevated);
+}
+
+.wb-changes__row.is-selected {
+  background: var(--bg-elevated);
+  border-left-color: var(--accent);
+}
+
 .wb-changes__entry {
   display: flex;
   gap: 0.5rem;
   align-items: center;
-  width: 100%;
+  min-width: 0;
+  flex: 1;
   padding: 0.25rem 0.5rem;
   color: var(--text);
   font: inherit;
   text-align: left;
   background: none;
   border: 0;
-  border-left: 2px solid transparent;
   cursor: pointer;
 }
 
-.wb-changes__entry:hover {
+/* The action shares the row's trailing column with the line counts: at rest the
+   column shows the numbers, and on hover or selection the action takes their
+   place. It is drawn in the same column rather than taking layout space,
+   because reserving it measured as 79 of 91 rows wrapping to a second line in a
+   narrow dock. Opaque and on the row's own background, so the swap is clean. */
+.wb-changes__row-action {
+  position: absolute;
+  top: 50%;
+  /* Matches the row's own trailing padding, which is where the counts end. */
+  right: 0.5rem;
+  transform: translateY(-50%);
+  /* An action, not a label: the muted tier is for metadata, so the glyph keeps
+     the normal foreground and only its chip changes on hover. */
+  color: var(--text);
   background: var(--bg-elevated);
+  border-color: transparent;
+  opacity: 0;
 }
 
-.wb-changes__entry.is-selected {
-  background: var(--bg-elevated);
-  border-left-color: var(--accent);
+.wb-changes__row:hover .wb-changes__row-action,
+.wb-changes__row:focus-within .wb-changes__row-action,
+.wb-changes__row.is-selected .wb-changes__row-action {
+  opacity: 1;
+}
+
+.wb-changes__row-action:hover:not(:disabled) {
+  border-color: var(--border);
+}
+
+.wb-changes__row-action:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.wb-changes__row-action:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .wb-changes__type {
@@ -883,6 +1089,7 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
    and the patch body. A path long enough to need wrapping is long in whichever
    column shows it, and a header that truncates what the body wraps is one more
    inconsistency to decode. */
+.wb-changes.is-wrapped .wb-changes__row,
 .wb-changes.is-wrapped .wb-changes__entry {
   align-items: flex-start;
 }

@@ -65,6 +65,7 @@ EXPECTED_WORKSPACE_METHODS = (
     "workspaces.list",
     "workspaces.git.status",
     "workspaces.git.diff",
+    "workspaces.git.stage",
     "workspaces.open",
     "workspaces.update",
     "workspaces.pin",
@@ -207,6 +208,10 @@ _VALID_REGISTRATION_RESULTS: dict[str, dict[str, Any]] = {
         "addedLines": 0,
         "removedLines": 0,
         "entries": [],
+    },
+    "workspaces.git.stage": {
+        "staged": True,
+        "affectedPaths": ["file.txt"],
     },
     "workspaces.git.diff": {
         "path": "file.txt",

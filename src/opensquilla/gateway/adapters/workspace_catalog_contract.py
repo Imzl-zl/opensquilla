@@ -19,6 +19,7 @@ WORKSPACE_CATALOG_CONTRACT_METHODS: Final = (
     "workspaces.list",
     "workspaces.git.status",
     "workspaces.git.diff",
+    "workspaces.git.stage",
     "workspaces.open",
     "workspaces.update",
     "workspaces.pin",

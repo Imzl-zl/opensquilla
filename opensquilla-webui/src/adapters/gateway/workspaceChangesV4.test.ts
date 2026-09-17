@@ -152,6 +152,48 @@ describe('createV4WorkspaceChanges', () => {
       .rejects.toThrow('workspaces.git.diff returned an invalid response')
   })
 
+  it('sends a stage request and returns the validated acknowledgement', async () => {
+    const { request } = transport({ staged: true, affectedPaths: ['src/a.ts'] })
+    const changes = createV4WorkspaceChanges({ request })
+
+    await expect(changes.stagePaths({
+      workspaceId: 'workspace-1',
+      paths: ['src/a.ts'],
+      staged: true,
+    })).resolves.toEqual({ staged: true, affectedPaths: ['src/a.ts'] })
+
+    expect(request).toHaveBeenCalledWith(
+      'workspaces.git.stage',
+      { workspaceId: 'workspace-1', staged: true, paths: ['src/a.ts'] },
+      undefined,
+    )
+  })
+
+  it('refuses to send a stage request that cannot satisfy its Contract', async () => {
+    const { request } = transport({ staged: true, affectedPaths: [] })
+    const changes = createV4WorkspaceChanges({ request })
+
+    // An empty path list is a caller bug, and the Contract's `minItems: 1`
+    // rejects it here rather than at the Gateway.
+    await expect(changes.stagePaths({
+      workspaceId: 'workspace-1',
+      paths: [],
+      staged: true,
+    })).rejects.toThrow('workspaces.git.stage received params that violate its contract')
+    expect(request).not.toHaveBeenCalled()
+  })
+
+  it('rejects an invalid stage acknowledgement', async () => {
+    const { request } = transport({ staged: true })
+    const changes = createV4WorkspaceChanges({ request })
+
+    await expect(changes.stagePaths({
+      workspaceId: 'workspace-1',
+      paths: ['src/a.ts'],
+      staged: true,
+    })).rejects.toThrow('workspaces.git.stage returned an invalid response')
+  })
+
   it('forwards the abort signal as a rejecting call option', async () => {
     const { request } = transport(statusResult())
     const changes = createV4WorkspaceChanges({ request })

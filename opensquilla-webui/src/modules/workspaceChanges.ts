@@ -61,6 +61,24 @@ export interface WorkspaceFileDiff {
   readonly binary: boolean
 }
 
+export interface WorkspaceIndexChangeRequest {
+  readonly workspaceId: string
+  /** Repository-relative paths exactly as `WorkspaceChanges.entries` reported them. */
+  readonly paths: readonly string[]
+  /** True stages; false unstages. Worktree content is never modified. */
+  readonly staged: boolean
+}
+
+/**
+ * The index-only acknowledgement. It deliberately does not echo the refreshed
+ * change list: the caller re-reads `readChanges` so the list it renders always
+ * comes from one source rather than from a write response that could drift.
+ */
+export interface WorkspaceIndexChange {
+  readonly staged: boolean
+  readonly affectedPaths: readonly string[]
+}
+
 export interface WorkspaceChangesReader {
   readChanges(
     workspaceId: string,
@@ -70,6 +88,10 @@ export interface WorkspaceChangesReader {
     request: { workspaceId: string; path: string; staged?: boolean },
     options?: { signal?: AbortSignal },
   ): Promise<WorkspaceFileDiff>
+  stagePaths(
+    request: WorkspaceIndexChangeRequest,
+    options?: { signal?: AbortSignal },
+  ): Promise<WorkspaceIndexChange>
 }
 
 export const WORKSPACE_CHANGES_KEY: InjectionKey<WorkspaceChangesReader> = Symbol('WorkspaceChanges')

@@ -71,6 +71,10 @@ function reader(overrides: Partial<WorkspaceChangesReader> = {}): WorkspaceChang
   return {
     readChanges: vi.fn(async () => changes()),
     readDiff: vi.fn(async () => diff()),
+    stagePaths: vi.fn(async request => ({
+      staged: request.staged,
+      affectedPaths: [...request.paths],
+    })),
     ...overrides,
   }
 }
@@ -109,6 +113,16 @@ function clickEntry(element: HTMLElement, path: string) {
     .find(candidate => candidate.textContent?.includes(path))
   if (!button) throw new Error(`no entry button for ${path}`)
   button.click()
+}
+
+/** The index action belongs to a row, so a lookup has to be row-scoped. */
+function rowAction(element: HTMLElement, path: string): HTMLButtonElement {
+  const row = [...element.querySelectorAll<HTMLElement>('.wb-changes__row')]
+    .find(candidate => candidate.textContent?.includes(path))
+  if (!row) throw new Error(`no row for ${path}`)
+  const action = row.querySelector<HTMLButtonElement>('[data-testid="changes-index-action"]')
+  if (!action) throw new Error(`no index action in the row for ${path}`)
+  return action
 }
 
 afterEach(() => {
@@ -443,6 +457,213 @@ describe('WorkspaceChangesPanel', () => {
     expect(mounted.element.textContent)
       .toContain('This diff was truncated to keep the panel responsive.')
     expect(mounted.element.querySelector('.wb-changes__code')).not.toBeNull()
+    mounted.unmount()
+  })
+
+  it('offers one icon action per row, labelled but not spelled out', async () => {
+    const mounted = mountPanel(reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [
+          entry({ path: 'src/a.ts', staged: false, unstaged: true }),
+          entry({ path: 'src/b.ts', changeType: 'added', staged: true, unstaged: false }),
+        ],
+      })),
+    }))
+    await settle()
+
+    const unstagedRow = rowAction(mounted.element, 'src/a.ts')
+    const stagedRow = rowAction(mounted.element, 'src/b.ts')
+
+    // The action is the inverse of the group the row sits in.
+    expect(unstagedRow.dataset.indexAction).toBe('stage')
+    expect(stagedRow.dataset.indexAction).toBe('unstage')
+    // Icon only, so the row stays one line: the name lives in the accessible
+    // label rather than in the row's text.
+    expect(unstagedRow.textContent?.trim()).toBe('')
+    expect(unstagedRow.getAttribute('aria-label')).toBe('Stage')
+    expect(stagedRow.getAttribute('aria-label')).toBe('Unstage')
+    expect(unstagedRow.querySelector('svg')).not.toBeNull()
+    mounted.unmount()
+  })
+
+  it('offers one icon size for every icon-only control', async () => {
+    const mounted = mountPanel(reader())
+    await settle()
+
+    // The bar, the group header and the row share one square: three sizes for
+    // the same kind of control is what made the glyphs look unrelated.
+    const controls = [
+      mounted.element.querySelector('[data-testid="changes-wrap-lines"]'),
+      mounted.element.querySelector('[data-testid="changes-refresh"]'),
+      mounted.element.querySelector('[data-testid="changes-group-index-action"]'),
+      mounted.element.querySelector('[data-testid="changes-index-action"]'),
+    ]
+    for (const control of controls) {
+      expect(control?.classList.contains('wb-changes__icon-button')).toBe(true)
+      expect(control?.querySelector('svg')?.getAttribute('width')).toBe('12')
+    }
+    mounted.unmount()
+  })
+
+  it('stages the whole group from its header', async () => {
+    const port = reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [
+          entry({ path: 'src/a.ts', staged: false, unstaged: true }),
+          entry({ path: 'src/b.ts', staged: false, unstaged: true }),
+        ],
+        totalCount: 2,
+      })),
+    })
+    const mounted = mountPanel(port)
+    await settle()
+
+    const groupAction = mounted.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-group-index-action"]',
+    )
+    expect(groupAction?.dataset.indexAction).toBe('stage')
+    expect(groupAction?.getAttribute('aria-label')).toBe('Stage all')
+
+    groupAction?.click()
+    await settle()
+
+    // One request for the set, not one per row.
+    expect(port.stagePaths).toHaveBeenCalledTimes(1)
+    expect(port.stagePaths).toHaveBeenCalledWith({
+      workspaceId: 'workspace-1',
+      paths: ['src/a.ts', 'src/b.ts'],
+      staged: true,
+    })
+    expect(port.readChanges).toHaveBeenCalledTimes(2)
+    mounted.unmount()
+  })
+
+  it('unstages the whole staged group from its header', async () => {
+    const port = reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [
+          entry({ path: 'src/a.ts', changeType: 'added', staged: true, unstaged: false }),
+          entry({ path: 'src/b.ts', changeType: 'added', staged: true, unstaged: false }),
+        ],
+        totalCount: 2,
+      })),
+    })
+    const mounted = mountPanel(port)
+    await settle()
+
+    const groupAction = mounted.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-group-index-action"]',
+    )
+    expect(groupAction?.dataset.indexAction).toBe('unstage')
+    groupAction?.click()
+    await settle()
+
+    expect(port.stagePaths).toHaveBeenCalledWith({
+      workspaceId: 'workspace-1',
+      paths: ['src/a.ts', 'src/b.ts'],
+      staged: false,
+    })
+    mounted.unmount()
+  })
+
+  it('stages a row without moving the selection, then re-reads the list', async () => {
+    const port = reader({
+      readChanges: vi.fn()
+        // The write is acknowledged with an index-only result, so the panel must
+        // re-read the list rather than trust the write response.
+        .mockResolvedValueOnce(changes({
+          entries: [entry({ path: 'src/a.ts', staged: false, unstaged: true })],
+        }))
+        .mockResolvedValueOnce(changes({
+          entries: [entry({ path: 'src/a.ts', changeType: 'added', staged: true, unstaged: false })],
+        })),
+    })
+    const mounted = mountPanel(port)
+    await settle()
+
+    rowAction(mounted.element, 'src/a.ts').click()
+    await settle()
+
+    expect(port.stagePaths).toHaveBeenCalledWith({
+      workspaceId: 'workspace-1',
+      paths: ['src/a.ts'],
+      staged: true,
+    })
+    expect(port.readChanges).toHaveBeenCalledTimes(2)
+    // Acting on a row must not open its diff: the row moved groups, so the
+    // action flipped to the inverse, and the reader stayed where it was.
+    expect(rowAction(mounted.element, 'src/a.ts').dataset.indexAction).toBe('unstage')
+    expect(port.readDiff).not.toHaveBeenCalled()
+    mounted.unmount()
+  })
+
+  it('keeps the diff open on the same file when its row is staged', async () => {
+    const port = reader({
+      readChanges: vi.fn()
+        .mockResolvedValueOnce(changes({
+          entries: [entry({ path: 'src/a.ts', staged: false, unstaged: true })],
+        }))
+        .mockResolvedValueOnce(changes({
+          entries: [entry({ path: 'src/a.ts', changeType: 'added', staged: true, unstaged: false })],
+        })),
+    })
+    const mounted = mountPanel(port)
+    await settle()
+    clickEntry(mounted.element, 'src/a.ts')
+    await settle()
+
+    rowAction(mounted.element, 'src/a.ts').click()
+    await settle()
+
+    // The selection key (path + half) is expected to move with the row, so the
+    // panel re-selects by path and the diff follows the half that is now shown.
+    expect(mounted.element.querySelector('.wb-changes__diff-head')?.textContent)
+      .toContain('src/a.ts')
+    expect(port.readDiff).toHaveBeenLastCalledWith({
+      workspaceId: 'workspace-1',
+      path: 'src/a.ts',
+      staged: true,
+    })
+    mounted.unmount()
+  })
+
+  it('unstages a staged-only row', async () => {
+    const port = reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [entry({ path: 'src/a.ts', changeType: 'added', staged: true, unstaged: false })],
+      })),
+    })
+    const mounted = mountPanel(port)
+    await settle()
+
+    rowAction(mounted.element, 'src/a.ts').click()
+    await settle()
+
+    expect(port.stagePaths).toHaveBeenCalledWith({
+      workspaceId: 'workspace-1',
+      paths: ['src/a.ts'],
+      staged: false,
+    })
+    mounted.unmount()
+  })
+
+  it('reports why the index did not move instead of failing silently', async () => {
+    const port = reader({
+      stagePaths: vi.fn(async () => {
+        throw new Error("Git rejected the operation: pathspec 'src/a.ts' did not match")
+      }),
+    })
+    const mounted = mountPanel(port)
+    await settle()
+
+    rowAction(mounted.element, 'src/a.ts').click()
+    await settle()
+
+    const alert = mounted.element.querySelector('[data-testid="changes-index-error"]')
+    expect(alert?.getAttribute('role')).toBe('alert')
+    expect(alert?.textContent).toContain('did not match')
+    // A failed write must not pretend the list refreshed.
+    expect(port.readChanges).toHaveBeenCalledTimes(1)
     mounted.unmount()
   })
 
