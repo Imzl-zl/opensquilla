@@ -892,7 +892,9 @@ def _requires_isolated_core_wheel(root: Path, files: tuple[str, ...]) -> bool:
 
     for relative in files:
         path = root / relative
-        parsed = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        # Let Python honor UTF-8 BOMs and source coding cookies during prescan,
+        # exactly as it does when pytest imports the selected test module.
+        parsed = ast.parse(path.read_bytes(), filename=str(path))
         if any(
             isinstance(node, ast.arg) and node.arg == _CORE_WHEEL_FIXTURE
             for node in ast.walk(parsed)

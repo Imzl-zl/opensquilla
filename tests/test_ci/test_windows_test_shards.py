@@ -405,15 +405,50 @@ def test_split_phase_exit_codes_allow_one_empty_successful_phase(
     )
 
 
-def test_only_fixture_consuming_shards_prebuild_the_core_wheel() -> None:
+@pytest.mark.parametrize("shard_names", [SHARD_NAMES, WINDOWS_SHARD_NAMES])
+def test_only_fixture_consuming_shards_prebuild_the_core_wheel(
+    shard_names: tuple[str, ...],
+) -> None:
     root = Path.cwd()
     consumers = {
-        shard
-        for shard in SHARD_NAMES
+        shard_family(shard)
+        for shard in shard_names
         if requires_isolated_core_wheel(root, files_for_shard(root, shard))
     }
 
     assert consumers == {"core", "desktop-installer-contracts"}
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "latin-1"])
+@pytest.mark.parametrize("consumes_wheel", [False, True])
+def test_core_wheel_prescan_honors_python_source_encodings(
+    tmp_path: Path, encoding: str, consumes_wheel: bool,
+) -> None:
+    path = tmp_path / "test_encoded.py"
+    cookie = "# coding: latin-1\n" if encoding == "latin-1" else ""
+    argument = "isolated_core_wheel" if consumes_wheel else ""
+    source = f"{cookie}# caf\u00e9\ndef test_encoded({argument}):\n    pass\n"
+    path.write_bytes(source.encode(encoding))
+
+    assert requires_isolated_core_wheel(tmp_path, (path.name,)) is consumes_wheel
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        b"\xef\xbb\xbfdef test_invalid(:\n    pass\n",
+        b"# coding: unknown-source-codec\ndef test_invalid():\n    pass\n",
+        b"\xef\xbb\xbf# coding: latin-1\ndef test_invalid():\n    pass\n",
+    ],
+)
+def test_core_wheel_prescan_keeps_invalid_python_sources_fail_closed(
+    tmp_path: Path, source: bytes,
+) -> None:
+    path = tmp_path / "test_invalid.py"
+    path.write_bytes(source)
+
+    with pytest.raises(SyntaxError):
+        requires_isolated_core_wheel(tmp_path, (path.name,))
 
 
 def _function_decorators(path: Path, function_name: str) -> set[str]:
@@ -1391,7 +1426,7 @@ def test_windows_physical_runner_selects_partition_and_preserves_both_phases(
         "@pytest.mark.ci_serial\n"
         "def test_serial():\n"
         "    assert 'PYTEST_XDIST_WORKER' not in os.environ\n",
-        encoding="utf-8",
+        encoding="utf-8-sig",
     )
     unselected_path = next(
         f"tests/test_partition_other_{index}.py"
