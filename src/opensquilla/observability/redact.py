@@ -14,14 +14,17 @@ from typing import Any
 _REDACTED = "[redacted]"
 
 # key=value / key: value / "key": "value" where the key looks secret-shaped.
-# Include prefixed credential names only at identifier-component boundaries.
+# Match credential suffixes only at component boundaries and the complete key
+# end. Prefixes may contain punctuation or Unicode in custom config/header
+# names; restricting them to ASCII would weaken existing config redaction.
 # No blanket `_key` suffix: benign identifiers like `session_key` must stay
 # readable in diagnostics.
 _SECRET_KEY_RE = re.compile(
-    r"(?:[a-z0-9_]*_)?"
+    r"(?:^|[._])"
     r"(?:api_?key|token|secret_?access_?key|secret_?key|secret|password"
     r"|authorization|signing[_-]?secret|private[_-]?key"
-    r"|app[_-]?secret|verification[_-]?token|encrypt[_-]?key|encoding[_-]?aes[_-]?key)",
+    r"|app[_-]?secret|verification[_-]?token|encrypt[_-]?key|encoding[_-]?aes[_-]?key"
+    r"|corp_?secret)\Z",
     re.IGNORECASE,
 )
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
@@ -34,13 +37,17 @@ def _is_secret_key(key: str) -> bool:
     literal = key.replace("-", "_").lower()
     # Capability predicates describe credentials without containing them.
     # Terminal metadata (apiKeyEnv, apiKeyConfigured, tokenCount) fails the
-    # whole-key match below, as do unrelated words ending in "secret".
+    # anchored suffix match below, as do unrelated words ending in "secret".
+    # Only the final dotted component identifies a namespaced predicate;
+    # interior words in credentials such as service_has_token do not.
     predicates = ("requires_", "has_", "is_", "supports_")
-    if normalized.startswith(predicates) or literal.startswith(predicates):
+    if any(
+        candidate.rsplit(".", 1)[-1].startswith(predicates) for candidate in (normalized, literal)
+    ):
         return False
     return (
-        _SECRET_KEY_RE.fullmatch(normalized) is not None
-        or _SECRET_KEY_RE.fullmatch(literal) is not None
+        _SECRET_KEY_RE.search(normalized) is not None
+        or _SECRET_KEY_RE.search(literal) is not None
     )
 
 
@@ -51,11 +58,12 @@ _AUTH_SCHEME = r"(?:bearer|basic|token|digest)"
 # (message="api_key=...") must not consume the nested secret assignment. A
 # matched credential value is consumed once, without recursive text scrubbing.
 # The left boundary prevents retrying an identifier at each character, keeping
-# long unbroken log runs linear.
+# long unbroken log runs linear. Consume optional CLI dashes before classifying
+# the complete key, so flags remain reachable without matching inside names.
 _ASSIGNMENT_RE = re.compile(
     r"""(?ix)
-    (?<![\w-])
-    ["']?(?P<key>[a-z0-9_][a-z0-9_-]*)["']?[ \t]*[=:][ \t]*
+    (?<![\w.-])
+    ["']?(?:--?)?(?P<key>[\w.][\w.-]*)["']?[ \t]*[=:][ \t]*
     """,
 )
 # Notes on value shape:

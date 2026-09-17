@@ -37,6 +37,60 @@ def test_complete_secret_assignments_remain_redacted(key: str) -> None:
     assert scrub_text(f'{key}="synthetic credential"') == f'{key}="[redacted]"'
     assert scrub_json({key: "synthetic credential"}) == {key: "[redacted]"}
 
+
+@pytest.mark.parametrize("key", [
+    "X.Provider-Token", "Vendor.Key-Api-Key", "定制_api_key", "厂商.Password",
+    "corpsecret", "CORPSECRET", "this_is_app_secret", "service_has_token",
+])
+def test_custom_secret_fields_and_aliases_are_masked(key: str) -> None:
+    payload = {"headers": [{key: "synthetic-custom-credential"}]}
+    expected = {"headers": [{key: "[redacted]"}]}
+    assert scrub_json(payload) == expected
+    assert scrub_text(f'{key}="synthetic-custom-credential"') == f'{key}="[redacted]"'
+    assert scrub_json(expected) == expected
+
+
+@pytest.mark.parametrize("key", [
+    "api-key", "password", "token", "client-secret", "X.Provider-Token", "定制_api_key",
+])
+@pytest.mark.parametrize("prefix", ["-", "--"])
+@pytest.mark.parametrize("value, redacted", [
+    ("synthetic-cli-credential", "[redacted]"),
+    ('"synthetic cli credential"', '"[redacted]"'),
+])
+def test_cli_credential_assignments_are_masked(
+    key: str, prefix: str, value: str, redacted: str,
+) -> None:
+    text = f"helper {prefix}{key}={value} --attempts=2"
+    expected = f"helper {prefix}{key}={redacted} --attempts=2"
+    assert scrub_text(text) == expected
+    assert scrub_text(expected) == expected
+
+
+@pytest.mark.parametrize("key", [
+    "requires-api-key", "apiKeyConfigured", "api-key-env", "notasecret", "token-count",
+    "X.requiresApiKey", "Vendor.Key.apiKeyConfigured", "厂商.requires_api_key",
+])
+def test_cli_and_namespaced_metadata_stays_readable(key: str) -> None:
+    text = f"helper --{key}=true {key}=false"
+    assert scrub_text(text) == text
+    assert scrub_json({key: True}) == {key: True}
+
+
+def test_query_credential_alias_is_masked() -> None:
+    text = "GET https://example.invalid/cgi-bin/gettoken?corpid=dummy&corpsecret=synthetic-query"
+    expected = "GET https://example.invalid/cgi-bin/gettoken?corpid=dummy&corpsecret=[redacted]"
+    assert scrub_text(text) == expected
+    assert scrub_text(expected) == expected
+
+
+@pytest.mark.parametrize("prefix", [".", "..", "$.provider."])
+def test_dotted_path_assignments_keep_secret_and_metadata_boundaries(prefix: str) -> None:
+    assert scrub_text(f"{prefix}api_key=synthetic-credential") == f"{prefix}api_key=[redacted]"
+    metadata = f"{prefix}requiresApiKey=true {prefix}apiKeyConfigured=false"
+    assert scrub_text(metadata) == metadata
+
+
 # Synthetic bare tokens (no key=value structure around them), as they appear
 # verbatim inside provider/channel error messages.
 FAKE_OPENAI = "sk-FAKEabc123def456ghi789"
@@ -263,6 +317,19 @@ def test_long_assignment_runs_and_nested_labels() -> None:
     labels = "message=" * 2_000
     assert scrub_text(ordinary) == ordinary
     assert scrub_text(labels + "api_key=" + ordinary) == labels + "api_key=[redacted]"
+
+
+@pytest.mark.parametrize("segment", ["a_", "a.", "定制_", "a-"])
+def test_long_component_runs_keep_complete_assignment_boundaries(segment: str) -> None:
+    prefix = segment * 20_000
+    benign_key = prefix + "apiKeyConfigured"
+    text = f"--{benign_key}=true"
+    assert scrub_text(text) == text
+    assert scrub_json({benign_key: True}) == {benign_key: True}
+
+    secret_key = prefix + "api_key"
+    assert scrub_text(f"--{secret_key}=synthetic-long-credential") == f"--{secret_key}=[redacted]"
+    assert scrub_json({secret_key: "synthetic-long-credential"}) == {secret_key: "[redacted]"}
 
 
 def test_scrub_json_copies_nested_values_and_retains_metadata_types() -> None:

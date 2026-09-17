@@ -202,6 +202,55 @@ def test_malformed_content_jsonl_is_omitted_with_line_error(tmp_path) -> None:
     assert "synthetic" not in error["error"]
 
 
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_content_jsonl_preserves_unicode_inside_string_values(tmp_path, separator, newline) -> None:
+    from opensquilla.observability.turn_call_log import TurnCallLogger
+
+    home, log_dir = _make_home(tmp_path)
+    logger = TurnCallLogger(
+        turn_id="synthetic-turn", session_key="agent:synthetic", agent_id="synthetic",
+        provider="synthetic", model="synthetic", log_dir=log_dir,
+    )
+    message = f"synthetic{separator}message"
+    path = logger.write("llm_request", {"message": message, "api_key": "dummy credential"})
+    assert path is not None
+    path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", newline.encode()))
+    dest = tmp_path / "bundle.zip"
+
+    result = collect_bundle(dest, home_dir=home, log_dir=log_dir, include_content=True)
+
+    entry_name = f"content/{path.name}"
+    assert not result.manifest["collection_errors"]
+    data = _read_zip(dest)[entry_name]
+    records = [json.loads(line) for line in data.split(b"\n") if line]
+    assert len(records) == 2
+    assert records[1]["payload"] == {"message": message, "api_key": "[redacted]"}
+
+
+@pytest.mark.parametrize("suffix", ["", "\n", "\r\n"])
+def test_jsonl_write_validation_uses_lf_record_boundaries(tmp_path, suffix) -> None:
+    from opensquilla.observability.bundle import _write_entry
+
+    text = json.dumps(
+        {"message": "synthetic\u0085\u2028\u2029message"}, ensure_ascii=False,
+    ) + suffix
+    dest = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(dest, "w") as archive:
+        _write_entry(archive, "content/synthetic.jsonl", text)
+    assert _read_zip(dest)["content/synthetic.jsonl"].decode("utf-8") == text
+
+
+@pytest.mark.parametrize("text", ['{}\n\n', '{}\n\n{}', '{}\r{}'])
+def test_invalid_jsonl_record_boundaries_still_fail(tmp_path, text) -> None:
+    from opensquilla.observability.bundle import _write_entry
+
+    with zipfile.ZipFile(tmp_path / "bundle.zip", "w") as archive:
+        with pytest.raises(ValueError, match="Invalid JSONL"):
+            _write_entry(archive, "content/synthetic.jsonl", text)
+        assert not archive.namelist()
+
+
 def test_offline_doctor_uses_the_structured_json_boundary(tmp_path, monkeypatch) -> None:
     payload = {"checks": [{"requiresApiKey": True, "apiKey": "synthetic credential"}]}
     monkeypatch.setattr(
@@ -230,6 +279,41 @@ def test_config_secret_and_metadata_fields_use_bundle_policy(tmp_path, _hermetic
         "api_key": "[redacted]",
         "encrypt_key": "[redacted]",
     }}
+
+
+def test_bundle_masks_custom_header_and_cli_credentials(tmp_path, _hermetic_config) -> None:
+    _hermetic_config.write_text(
+        '[memory.embedding.remote.headers]\n'
+        '"X.Provider-Token" = "synthetic-header-credential"\n'
+        '"定制_api_key" = "synthetic-unicode-credential"\n'
+        '"apiKeyEnv" = "SYNTHETIC_API_KEY"\n',
+        encoding="utf-8",
+    )
+    home, log_dir = _make_home(tmp_path)
+    dest = tmp_path / "bundle.zip"
+    result = collect_bundle(
+        dest, home_dir=home, log_dir=log_dir,
+        extra={"diagnostics": {
+            "headers": {"Vendor.Key-Api-Key": "synthetic-live-credential"},
+            "message": 'helper --api-key="synthetic-command-credential"',
+            "requiresApiKey": True,
+        }},
+    )
+    entries = _read_zip(dest)
+    assert not result.manifest["collection_errors"]
+    assert json.loads(entries["config.redacted.json"])["memory"]["embedding"]["remote"] == {
+        "headers": {
+            "X.Provider-Token": "[redacted]",
+            "定制_api_key": "[redacted]",
+            "apiKeyEnv": "SYNTHETIC_API_KEY",
+        },
+    }
+    assert json.loads(entries["live/diagnostics.json"]) == {
+        "headers": {"Vendor.Key-Api-Key": "[redacted]"},
+        "message": 'helper --api-key="[redacted]"',
+        "requiresApiKey": True,
+    }
+    assert b"-credential" not in b"".join(entries.values())
 
 
 def test_manifest_encoding_failure_fails_the_bundle(tmp_path, monkeypatch) -> None:

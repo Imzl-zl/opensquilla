@@ -91,6 +91,15 @@ def _json_text(value: Any, *, indent: int | None = None) -> str:
         ) from None
 
 
+def _jsonl_lines(text: str) -> list[str]:
+    """Split LF records without treating Unicode string content as delimiters.
+
+    A final LF terminates the last record; other empty records remain invalid.
+    CR in a CRLF terminator is accepted by the JSON parser as trailing whitespace.
+    """
+    return text.removesuffix("\n").split("\n") if text else []
+
+
 def _write_entry(archive: zipfile.ZipFile, entry_name: str, text: str) -> None:
     """Final boundary: validate declared JSON before any bytes enter the ZIP."""
     if _is_excluded(entry_name):
@@ -98,7 +107,7 @@ def _write_entry(archive: zipfile.ZipFile, entry_name: str, text: str) -> None:
     if entry_name.endswith(".json"):
         _parse_json(text)
     elif entry_name.endswith(".jsonl"):
-        for number, line in enumerate(text.splitlines(), start=1):
+        for number, line in enumerate(_jsonl_lines(text), start=1):
             try:
                 _parse_json(line)
             except ValueError as exc:
@@ -121,7 +130,7 @@ def _write_text(archive: zipfile.ZipFile, entry_name: str, text: str) -> None:
         return
     if entry_name.endswith(".jsonl"):
         lines: list[str] = []
-        for number, line in enumerate(text.splitlines(), start=1):
+        for number, line in enumerate(_jsonl_lines(text), start=1):
             try:
                 lines.append(_json_text(_parse_json(line)))
             except ValueError as exc:
