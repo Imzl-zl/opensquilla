@@ -358,6 +358,30 @@ describe('WorkspaceChangesPanel', () => {
     mounted.unmount()
   })
 
+  it('resizes the list/diff split and returns to the automatic one', async () => {
+    const mounted = mountPanel(reader())
+    await settle()
+
+    const splitter = mounted.element.querySelector<HTMLElement>('[data-testid="changes-splitter"]')
+    const body = mounted.element.querySelector<HTMLElement>('.wb-changes__body')
+    expect(splitter?.getAttribute('role')).toBe('separator')
+    expect(splitter?.getAttribute('aria-orientation')).toBe('horizontal')
+    expect(body?.style.getPropertyValue('--wb-changes-list-height')).toBe('auto')
+
+    splitter?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+    await nextTick()
+    expect(Number.parseInt(
+      body?.style.getPropertyValue('--wb-changes-list-height') ?? '',
+      10,
+    )).toBeGreaterThan(0)
+
+    // Double-click restores the split that fits the content.
+    splitter?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))
+    await nextTick()
+    expect(body?.style.getPropertyValue('--wb-changes-list-height')).toBe('auto')
+    mounted.unmount()
+  })
+
   it('moves between files with the arrow keys', async () => {
     const mounted = mountPanel(reader({
       readChanges: vi.fn(async () => changes({

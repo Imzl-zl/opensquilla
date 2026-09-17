@@ -178,6 +178,8 @@
       "empty": "Aucune modification dans cet espace de travail.",
       "truncated": "Affichage de {count} fichiers modifiés sur {total}.",
       "listLabel": "Fichiers modifiés",
+      "hunkHeaderHint": "En-tête de bloc : ligne,nombre du fichier ancien → ligne,nombre du nouveau",
+      "resizeSplitter": "Ajuster la hauteur de la liste et du diff",
       "diffLabel": "Diff du fichier",
       "wrapLines": "Retour à la ligne",
       "oldLineNumber": "Ligne ancienne",

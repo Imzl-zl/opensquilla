@@ -178,6 +178,8 @@
       "empty": "このワークスペースに変更はありません。",
       "truncated": "{total} 件中 {count} 件の変更を表示しています。",
       "listLabel": "変更されたファイル",
+      "hunkHeaderHint": "ハンクヘッダー：旧ファイルの開始行,行数 → 新ファイルの開始行,行数",
+      "resizeSplitter": "ファイル一覧と差分の高さを調整",
       "diffLabel": "ファイルの差分",
       "wrapLines": "折り返し",
       "oldLineNumber": "旧行番号",

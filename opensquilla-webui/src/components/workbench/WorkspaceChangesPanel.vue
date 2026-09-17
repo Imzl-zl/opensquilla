@@ -59,8 +59,17 @@
       }) }}
     </p>
 
-    <div v-if="changes && changes.entries.length > 0" class="wb-changes__body">
-      <div class="wb-changes__list" role="list" :aria-label="t('workbench.changes.listLabel')">
+    <div
+      v-if="changes && changes.entries.length > 0"
+      class="wb-changes__body"
+      :style="{ '--wb-changes-list-height': listHeight === null ? 'auto' : `${listHeight}px` }"
+    >
+      <div
+        class="wb-changes__list"
+        :class="{ 'is-sized': listHeight !== null }"
+        role="list"
+        :aria-label="t('workbench.changes.listLabel')"
+      >
         <section v-for="group in groups" :key="group.key" class="wb-changes__group">
           <h4 class="wb-changes__group-head">
             <Icon :name="group.icon" :size="12" />
@@ -101,6 +110,30 @@
             <Icon v-else-if="entry.staged" name="check" :size="12" class="wb-changes__check" />
           </button>
         </section>
+      </div>
+
+      <!-- The two panes are adjustable, like every other list/detail split. -->
+      <div
+        ref="splitterRef"
+        class="wb-changes__splitter"
+        :class="{ 'is-dragging': splitterDragging }"
+        role="separator"
+        tabindex="0"
+        aria-orientation="horizontal"
+        :aria-label="t('workbench.changes.resizeSplitter')"
+        :aria-valuemin="SPLITTER_MIN_HEIGHT"
+        :aria-valuemax="splitterMaxHeight"
+        :aria-valuenow="Math.round(listHeight ?? measuredListHeight)"
+        data-testid="changes-splitter"
+        @pointerdown="onSplitterPointerDown"
+        @pointermove="onSplitterPointerMove"
+        @pointerup="onSplitterPointerUp"
+        @pointercancel="onSplitterPointerUp"
+        @lostpointercapture="onSplitterPointerUp"
+        @dblclick="resetSplitter"
+        @keydown="onSplitterKeydown"
+      >
+        <span class="wb-changes__splitter-grip" aria-hidden="true" />
       </div>
 
       <section
@@ -155,6 +188,7 @@
               :key="index"
               class="wb-changes__line"
               :data-kind="line.kind"
+              :title="line.kind === 'hunk' ? t('workbench.changes.hunkHeaderHint') : undefined"
             >
               <template v-if="hasGutters(line)">
                 <span class="wb-changes__gutter" aria-hidden="true">{{ line.oldNumber ?? '' }}</span>
@@ -193,6 +227,70 @@ const reader = inject<WorkspaceChangesReader | null>(WORKSPACE_CHANGES_KEY, null
 const changes = ref<WorkspaceChanges | null>(null)
 const wrapLines = ref(true)
 const loading = ref(false)
+
+// Pane split. `null` keeps the automatic split; a number is a dragged height.
+const SPLITTER_MIN_HEIGHT = 72
+const SPLITTER_KEYBOARD_STEP = 24
+const listHeight = ref<number | null>(null)
+const measuredListHeight = ref(0)
+const splitterDragging = ref(false)
+const splitterRef = ref<HTMLElement | null>(null)
+let splitterStartY = 0
+let splitterStartHeight = 0
+
+const splitterMaxHeight = computed(() => {
+  const pane = splitterRef.value?.parentElement
+  return pane ? Math.max(SPLITTER_MIN_HEIGHT, Math.round(pane.clientHeight * 0.8)) : 400
+})
+
+function currentListHeight(): number {
+  const list = splitterRef.value?.previousElementSibling
+  return list instanceof HTMLElement ? list.getBoundingClientRect().height : 0
+}
+
+function onSplitterPointerDown(event: PointerEvent) {
+  const handle = splitterRef.value
+  if (!handle) return
+  splitterDragging.value = true
+  splitterStartY = event.clientY
+  splitterStartHeight = currentListHeight()
+  measuredListHeight.value = Math.round(splitterStartHeight)
+  handle.setPointerCapture(event.pointerId)
+  event.preventDefault()
+}
+
+function onSplitterPointerMove(event: PointerEvent) {
+  if (!splitterDragging.value) return
+  const next = splitterStartHeight + (event.clientY - splitterStartY)
+  listHeight.value = Math.min(
+    splitterMaxHeight.value,
+    Math.max(SPLITTER_MIN_HEIGHT, Math.round(next)),
+  )
+}
+
+function onSplitterPointerUp(event: PointerEvent) {
+  if (!splitterDragging.value) return
+  splitterDragging.value = false
+  const handle = splitterRef.value
+  if (handle?.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId)
+}
+
+function onSplitterKeydown(event: KeyboardEvent) {
+  const step = event.key === 'ArrowUp' ? -SPLITTER_KEYBOARD_STEP
+    : event.key === 'ArrowDown' ? SPLITTER_KEYBOARD_STEP
+      : 0
+  if (step === 0) return
+  event.preventDefault()
+  const base = listHeight.value ?? Math.round(currentListHeight())
+  listHeight.value = Math.min(
+    splitterMaxHeight.value,
+    Math.max(SPLITTER_MIN_HEIGHT, base + step),
+  )
+}
+
+function resetSplitter() {
+  listHeight.value = null
+}
 const errorMessage = ref('')
 const selectedKey = ref('')
 const diff = ref<WorkspaceFileDiff | null>(null)
@@ -577,11 +675,36 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 .wb-changes__body {
   display: grid;
   flex: 1;
-  gap: 0.625rem;
-  /* The list takes the height it needs (bounded), so a short change set does
-     not reserve a fixed share of the panel and leave it empty. */
-  grid-template-rows: minmax(0, auto) minmax(0, 1fr);
+  /* The list takes the height it needs (bounded, and draggable) instead of
+     reserving a fixed share of the panel. */
+  grid-template-rows: var(--wb-changes-list-height, auto) 0.375rem minmax(0, 1fr);
   min-height: 0;
+}
+
+.wb-changes__splitter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.wb-changes__splitter-grip {
+  width: 2.5rem;
+  height: 2px;
+  background: var(--border);
+  border-radius: var(--radius-full);
+}
+
+.wb-changes__splitter:hover .wb-changes__splitter-grip,
+.wb-changes__splitter.is-dragging .wb-changes__splitter-grip {
+  background: var(--accent);
+}
+
+.wb-changes__splitter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
 }
 
 .wb-changes__list {
@@ -590,6 +713,10 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-surface);
+}
+
+.wb-changes__list.is-sized {
+  max-height: none;
 }
 
 .wb-changes__group-head {
@@ -797,12 +924,12 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
    stays in the normal foreground, because coloured text on a tint of the same
    colour is the pairing that drops below the contrast floor. */
 .wb-changes__line[data-kind="added"] {
-  background: color-mix(in srgb, var(--syntax-string) 12%, transparent);
+  background: color-mix(in srgb, var(--syntax-string) 26%, transparent);
   border-left: 2px solid var(--syntax-string);
 }
 
 .wb-changes__line[data-kind="removed"] {
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  background: color-mix(in srgb, var(--danger) 26%, transparent);
   border-left: 2px solid var(--danger);
 }
 
@@ -823,13 +950,19 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   color: var(--text-muted);
 }
 
+/* Sized to the digits, not to a fixed box: the two numbers belong next to each
+   other, and a fixed 2.375rem column left a wide gap between them. */
 .wb-changes__gutter {
   flex: none;
-  width: 2.375rem;
-  padding-right: 0.375rem;
+  width: 2.75ch;
   color: var(--text-muted);
   text-align: right;
   user-select: none;
+}
+
+.wb-changes__gutter + .wb-changes__gutter {
+  margin-left: 0.5rem;
+  margin-right: 0.625rem;
 }
 
 /* The marker keeps the row's own colour instead of an add/remove accent: a

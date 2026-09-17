@@ -179,6 +179,8 @@
       "empty": "No changes in this workspace.",
       "truncated": "Showing {count} of {total} changed files.",
       "listLabel": "Changed files",
+      "hunkHeaderHint": "Hunk header: old file line,count → new file line,count",
+      "resizeSplitter": "Resize the file list and diff",
       "diffLabel": "File diff",
       "wrapLines": "Wrap lines",
       "oldLineNumber": "Old line",

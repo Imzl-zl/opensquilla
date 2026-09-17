@@ -178,6 +178,8 @@
       "empty": "Keine Änderungen in diesem Arbeitsbereich.",
       "truncated": "{count} von {total} geänderten Dateien werden angezeigt.",
       "listLabel": "Geänderte Dateien",
+      "hunkHeaderHint": "Hunk-Kopf: alte Datei Zeile,Anzahl → neue Datei Zeile,Anzahl",
+      "resizeSplitter": "Höhe von Liste und Diff anpassen",
       "diffLabel": "Dateidiff",
       "wrapLines": "Zeilen umbrechen",
       "oldLineNumber": "Alte Zeile",
