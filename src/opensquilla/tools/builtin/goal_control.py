@@ -151,11 +151,12 @@ async def update_goal_progress(
         max_chars=1000,
     )
     try:
-        snapshot = await service.update_progress(
-            context,
-            explanation=normalized_explanation,
-            steps=steps,
-        )
+        ctx = current_tool_context.get()
+        callback = getattr(ctx, "update_progress", None)
+        if not callable(callback):
+            raise SafeToolError("Task progress is unavailable in this turn.")
+        await callback(steps=steps, explanation=normalized_explanation)
+        snapshot = await service.progress_updated(context)
     except Exception as exc:  # The service exposes only sanitized contract errors.
         raise SafeToolError(str(exc)) from exc
     return json.dumps(

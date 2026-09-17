@@ -1057,7 +1057,12 @@ test('Goal mode continues through a real Gateway, refresh, and deterministic pro
       { timeout: 15_000 },
     ).toEqual([1, 2, 3])
     const completedCalls = await gateway.readProviderCalls()
-    expect(completedCalls[2]?.toolNames).toEqual([])
+    // Completion uses the same ordinary Agent tool surface as the preceding
+    // continuation, including tools needed to inspect and verify its result.
+    expect(completedCalls[2]?.toolNames).toEqual(completedCalls[1]?.toolNames)
+    expect(completedCalls[2]?.toolNames).toEqual(expect.arrayContaining([
+      'read_file', 'exec_command', 'update_plan', 'update_goal',
+    ]))
     if (gateway.flowEnabled) expect(sentRpcMethods).toContain('transport.flow.update')
   } finally {
     await gateway.stop()
@@ -1599,10 +1604,13 @@ isolatedGatewayTest.describe('Goal silent-reply normalization through an isolate
     const completedCalls = await isolatedRealGateway.readProviderCalls()
     expect(completedCalls[5]).toMatchObject({
       callNumber: 6,
-      toolNames: [],
+      toolNames: completedCalls[4]?.toolNames,
       historyHasSilentSentinel: false,
       silentVisibleBodyInAssistantHistory: true,
     })
+    expect(completedCalls[5]?.toolNames).toEqual(expect.arrayContaining([
+      'read_file', 'exec_command', 'update_plan', 'update_goal',
+    ]))
 
     // Terminal refresh exercises the persisted fallback Goal outcome as well
     // as the sanitized transcript one final time.

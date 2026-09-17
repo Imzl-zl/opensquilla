@@ -539,6 +539,7 @@ def _reusable_route_envelope(envelope: RouteEnvelope) -> RouteEnvelope:
         ):
             metadata.pop(key, None)
     runtime_services = dict(envelope.runtime_services)
+    runtime_services.pop("update_progress", None)
     return replace(
         envelope,
         metadata=metadata,
@@ -4690,8 +4691,35 @@ class TaskRuntime:
                 raise RuntimeError("Invalid required collaboration revision")
             metadata["collaboration_revision"] = required_revision
         metadata["task_id"] = task.task_id
+        async def update_progress(
+            steps: list[dict[str, Any]], explanation: str | None = None,
+        ) -> dict[str, Any]:
+            progress = await self._storage.update_task_progress(
+                task.task_id, session_key=task.envelope.session_key,
+                session_id=task.envelope.session_id,
+                session_epoch=task.envelope.session_epoch,
+                steps=steps, explanation=explanation,
+            )
+            task.envelope.metadata["progress"] = progress
+            try:
+                await self._emit(task.envelope.session_key, "session.event.progress", {
+                    "session_key": task.envelope.session_key,
+                    "sessionKey": task.envelope.session_key,
+                    "epoch": task.envelope.session_epoch,
+                    "task_id": task.task_id, "progress": progress,
+                })
+                run_id = str(task.envelope.metadata.get("plan_run_id") or "")
+                if run_id:
+                    run = await self._storage.get_plan_run(run_id)
+                    if run is not None:
+                        await self._emit_plan_run(task.envelope.session_key, run)
+            except Exception:
+                log.warning("task_runtime.progress_projection_failed", task_id=task.task_id)
+            return cast(dict[str, Any], progress)
+
         runtime_services = {
             **task.envelope.runtime_services,
+            "update_progress": update_progress,
             "plan_storage": self._storage,
             "plan_event_emitter": self._emit,
         }
@@ -4835,7 +4863,7 @@ class TaskRuntime:
         return updated
 
     async def _settle_attached_plan_run(self, task: _RuntimeTask) -> None:
-        """Pause an unfinished manual run when its single turn terminates."""
+        """Project the ordinary task outcome onto its attached plan run."""
 
         run_id = str(task.envelope.metadata.get("plan_run_id") or "").strip()
         if not run_id:
@@ -4860,20 +4888,8 @@ class TaskRuntime:
                 )
             elif status == "running" and callable(pause):
                 driver_kind = str(getattr(current, "driver_kind", "manual"))
-                step_states = list(getattr(current, "step_states", []) or [])
-                delivery_ready = (
-                    getattr(current, "current_step_id", None) is None
-                    and bool(step_states)
-                    and all(
-                        isinstance(state, dict)
-                        and str(state.get("status") or "")
-                        in {"completed", "skipped"}
-                        for state in step_states
-                    )
-                )
                 if (
                     task.status == AgentTaskStatus.SUCCEEDED
-                    and delivery_ready
                     and callable(complete)
                 ):
                     updated = await complete(
@@ -4929,40 +4945,43 @@ class TaskRuntime:
         )
 
     async def _emit_plan_revision_if_changed(self, task: _RuntimeTask) -> None:
+        # A normal successful answer in Plan mode may be discussion. Persist
+        # that distinction without making submit_plan a completion gate.
+        task.envelope.metadata.pop("plan_result", None)
+        if (
+            task.run_kind == "subagent"
+            or task.envelope.metadata.get("collaboration_mode") != "plan"
+        ):
+            return
         getter = getattr(self._storage, "get_session", None)
         get_revision = getattr(self._storage, "get_plan_revision", None)
         if not callable(getter) or not callable(get_revision):
             return
         try:
             node_candidate = getter(task.envelope.session_key)
-            node = (
-                await node_candidate
-                if inspect.isawaitable(node_candidate)
-                else node_candidate
-            )
-            if getattr(node, "active_plan_revision_id", None) is not None and not isinstance(
-                getattr(node, "active_plan_revision_id", None),
-                str,
-            ):
+            node = await node_candidate if inspect.isawaitable(node_candidate) else node_candidate
+            current_id = getattr(node, "active_plan_revision_id", None)
+            if current_id is not None and not isinstance(current_id, str):
                 return
-            current_id = (
-                str(getattr(node, "active_plan_revision_id", "") or "")
-                if node is not None
-                else ""
+            starting_id = str(task.envelope.metadata.get("active_plan_revision_id") or "")
+            revision = None
+            if current_id and current_id != starting_id:
+                candidate = get_revision(current_id)
+                revision = await candidate if inspect.isawaitable(candidate) else candidate
+            submitted = (
+                revision is not None
+                and revision.source_turn_id == task.task_id
+                and revision.source_session_id == getattr(node, "session_id", None)
+                and revision.source_epoch == getattr(node, "epoch", None)
             )
-            starting_id = str(
-                task.envelope.metadata.get("active_plan_revision_id") or ""
-            )
-            if not current_id or current_id == starting_id:
+            task.envelope.metadata["plan_result"] = {
+                "status": "submitted" if submitted else "discussion",
+                "previousRevisionId": starting_id or None,
+                "revisionId": current_id or None,
+            }
+            if not submitted:
                 return
-            revision_candidate = get_revision(current_id)
-            revision = (
-                await revision_candidate
-                if inspect.isawaitable(revision_candidate)
-                else revision_candidate
-            )
-            if revision is None:
-                return
+            assert revision is not None
             from opensquilla.session.plans import plan_revision_snapshot
 
             await self._emit(
@@ -6461,6 +6480,9 @@ class TaskRuntime:
                     user_message_id=task.persisted_user_message_id,
                 ),
             }
+            plan_result = task.envelope.metadata.get("plan_result")
+            if status == AgentTaskStatus.SUCCEEDED and isinstance(plan_result, dict):
+                payload["plan_result"] = dict(plan_result)
             if status != AgentTaskStatus.SUCCEEDED:
                 payload["terminal_message"] = append_error_ref(
                     build_terminal_reply(terminal_payload), safe_error_id(error_id)
@@ -6999,6 +7021,13 @@ class TaskRuntime:
         existing = await self._storage.get_agent_task(task.task_id)
         current_details = getattr(existing, "details", None)
         details = dict(current_details) if isinstance(current_details, dict) else {}
+        metadata = dict(details.get("metadata") or {})
+        metadata.pop("plan_result", None)
+        plan_result = task.envelope.metadata.get("plan_result")
+        if status == AgentTaskStatus.SUCCEEDED and isinstance(plan_result, dict):
+            metadata["plan_result"] = dict(plan_result)
+        if metadata or "metadata" in details:
+            details["metadata"] = metadata
         durable_activity_snapshot: dict[str, Any] | None = None
         try:
             from opensquilla.gateway.session_streams import get_session_streams

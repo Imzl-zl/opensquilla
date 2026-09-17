@@ -93,7 +93,7 @@ from opensquilla.session.plans import (
     PlanConflictError,
     PlanRunConflictError,
     PlanValidationError,
-    checkpoint_plan_step_states,
+    checkpoint_plan_progress,
     prepare_plan_revision,
     prepare_plan_run,
 )
@@ -7019,27 +7019,6 @@ class SessionStorage:
                 raise PlanRunConflictError("plan run is owned by another task")
             states = [dict(state) for state in run.step_states]
             current_step_id = run.current_step_id
-            if current_step_id is None:
-                current_step_id = next(
-                    (
-                        str(state["step_id"])
-                        for state in states
-                        if state.get("status") not in {"completed", "skipped"}
-                    ),
-                    None,
-                )
-            delivery_ready = bool(states) and all(
-                state.get("status") in {"completed", "skipped"}
-                for state in states
-            )
-            if current_step_id is None and not delivery_ready:
-                raise PlanRunConflictError("plan run has no resumable execution step")
-            if current_step_id is not None:
-                for state in states:
-                    if state.get("step_id") == current_step_id:
-                        state["status"] = "in_progress"
-                        state.pop("reason", None)
-                        break
             timestamp = _now_ms()
             async with conn.execute(
                 """
@@ -7083,66 +7062,55 @@ class SessionStorage:
         expected_active_task_id: str | None = None,
         reason: str | None = None,
     ) -> PlanRunRecord:
-        """Compare-and-set one step checkpoint and derive the run lifecycle."""
+        """Translate a legacy checkpoint into descriptive task progress atomically.
 
+        The version and owner fences remain authoritative. A checkpoint cannot
+        advance execution, release task ownership, block work or finish a run.
+        """
         async with self._write_transaction("checkpoint_plan_run") as conn:
             run = await self._load_plan_run_for_cas(
-                conn,
-                run_id=run_id,
-                expected_state_revision=expected_state_revision,
+                conn, run_id=run_id, expected_state_revision=expected_state_revision,
             )
-            if run.status != PlanRunStatus.RUNNING.value:
-                raise PlanRunConflictError(
-                    f"cannot checkpoint a {run.status} plan run"
-                )
+            if run.status != PlanRunStatus.RUNNING.value or not run.active_task_id:
+                raise PlanRunConflictError(f"cannot checkpoint a {run.status} plan run")
             if (
                 expected_active_task_id is not None
                 and run.active_task_id != expected_active_task_id
             ):
                 raise PlanRunConflictError("plan run is owned by another task")
-            if run.current_step_id != step_id:
-                raise PlanRunConflictError(
-                    "only the current plan step may be checkpointed"
-                )
-            states, current_step_id, status = checkpoint_plan_step_states(
-                run.step_states,
-                step_id=step_id,
-                step_status=step_status,
-                next_step_id=next_step_id,
-                reason=reason,
-            )
-            timestamp = _now_ms()
-            blocked = status == PlanRunStatus.BLOCKED.value
             async with conn.execute(
-                """
-                UPDATE plan_runs
-                SET status = ?,
-                    step_states = ?,
-                    current_step_id = ?,
-                    state_revision = state_revision + 1,
-                    active_task_id = ?,
-                    pause_reason = ?,
-                    terminal_reason = ?,
-                    updated_at = ?,
-                    finished_at = ?
-                WHERE run_id = ? AND state_revision = ?
-                """,
-                (
-                    status,
-                    _serialize(states),
-                    current_step_id,
-                    None if blocked else run.active_task_id,
-                    reason if blocked else None,
-                    None,
-                    timestamp,
-                    None,
-                    run_id,
-                    expected_state_revision,
-                ),
+                "SELECT * FROM agent_tasks WHERE task_id = ? AND session_key = ?",
+                (run.active_task_id, run.session_key),
             ) as cur:
-                changed = cur.rowcount or 0
-            if changed == 0:
-                raise PlanRunConflictError("plan run state changed before the update")
+                row = await cur.fetchone()
+            if row is None or row["status"] != AgentTaskStatus.RUNNING.value:
+                raise PlanRunConflictError("Checkpoint requires the current running task")
+            task = AgentTaskRecord(**_deserialize_row(dict(row)))
+            metadata = (task.details or {}).get("metadata") or {}
+            if metadata.get("plan_run_id") != run_id:
+                raise PlanRunConflictError("plan run is not attached to its owning task")
+            revision = await self._select_plan_revision_on_conn(conn, run.plan_revision_id)
+            if revision is None:
+                raise PlanRunConflictError("The proposed plan revision no longer exists")
+            previous = metadata.get("progress") or {}
+            prior_steps = previous.get("steps")
+            if prior_steps is None:
+                prior_steps = [
+                    {"step": state["title"], "status": (
+                        state["status"] if state["status"] in {"completed", "in_progress"}
+                        else "pending"
+                    )}
+                    for state in run.step_states
+                ]
+            steps = checkpoint_plan_progress(
+                revision.steps, prior_steps, step_id=step_id, step_status=step_status,
+                next_step_id=next_step_id, reason=reason,
+            )
+            await self._update_task_progress_on_conn(
+                conn, run.active_task_id, session_key=run.session_key,
+                session_id=run.session_id, session_epoch=run.session_epoch,
+                steps=steps, explanation=reason,
+            )
             updated = await self._select_plan_run_on_conn(conn, run_id)
             assert updated is not None
             return updated
@@ -7154,7 +7122,7 @@ class SessionStorage:
         expected_state_revision: int,
         expected_active_task_id: str,
     ) -> PlanRunRecord:
-        """Finalize a fully checkpointed run after its owning task succeeds."""
+        """Project the successful owning task without inventing step completion."""
 
         if not expected_active_task_id:
             raise PlanValidationError("expected_active_task_id is required")
@@ -7170,18 +7138,6 @@ class SessionStorage:
                 )
             if run.active_task_id != expected_active_task_id:
                 raise PlanRunConflictError("plan run is owned by another task")
-            if run.current_step_id is not None:
-                raise PlanRunConflictError(
-                    "plan run cannot complete before its final checkpoint"
-                )
-            if not run.step_states or any(
-                state.get("status") not in {"completed", "skipped"}
-                for state in run.step_states
-            ):
-                raise PlanRunConflictError(
-                    "plan run cannot complete with unfinished steps"
-                )
-
             timestamp = _now_ms()
             async with conn.execute(
                 """
@@ -7196,7 +7152,6 @@ class SessionStorage:
                 WHERE run_id = ?
                   AND state_revision = ?
                   AND status = 'running'
-                  AND current_step_id IS NULL
                   AND active_task_id = ?
                 """,
                 (
@@ -7661,22 +7616,6 @@ class SessionStorage:
                 "Goal execution cannot start while Plan mode is active",
                 current=goal,
             )
-        async with conn.execute(
-            """
-            SELECT 1 FROM plan_runs
-            WHERE session_key = ?
-              AND driver_kind = 'manual'
-              AND status IN ('queued', 'running', 'paused', 'blocked')
-            LIMIT 1
-            """,
-            (goal.session_key,),
-        ) as cur:
-            if await cur.fetchone() is not None:
-                raise GoalConflictError(
-                    "PLAN_RUN_ACTIVE",
-                    "A manual Plan run is active for this session",
-                    current=goal,
-                )
 
     @staticmethod
     async def _require_idle_goal_session_on_conn(
@@ -8481,7 +8420,6 @@ class SessionStorage:
                 if exc.code in {
                     "SESSION_GENERATION_CHANGED",
                     "PLAN_MODE_ACTIVE",
-                    "PLAN_RUN_ACTIVE",
                 }:
                     return None
                 raise
@@ -8683,59 +8621,25 @@ class SessionStorage:
         steps: object,
         now_ms: int | None = None,
     ) -> GoalRecord:
-        """Replace progress for the exact owning Goal objective."""
-
+        """Compatibility adapter to the single ordinary task progress authority."""
+        goal = await self.get_goal_by_id(context.goal_id)
+        if goal is None:
+            raise GoalConflictError("GOAL_NOT_FOUND", "The Goal no longer exists")
         progress = normalize_goal_progress(explanation=explanation, steps=steps)
-        timestamp = _now_ms() if now_ms is None else now_ms
-        async with self._write_transaction("update_goal_progress") as conn:
-            goal = await self._select_goal_on_conn(conn, goal_id=context.goal_id)
-            if goal is None:
-                raise GoalConflictError("GOAL_NOT_FOUND", "The Goal no longer exists")
-            if (
-                goal.session_id != context.session_id
-                or goal.session_epoch != context.epoch
-                or goal.objective_revision != context.objective_revision
-                or goal.active_task_id != context.task_id
-                or goal.status
-                not in {GoalStatus.ACTIVE.value, GoalStatus.PAUSED.value}
-            ):
-                raise GoalConflictError(
-                    "STALE_GOAL",
-                    "The task no longer owns this Goal objective",
-                    current=goal,
-                )
-            await self._require_persisted_goal_context_on_conn(
-                conn,
-                context=context,
-                expected_session_key=goal.session_key,
-                current=goal,
-            )
-            await conn.execute(
-                """
-                UPDATE session_goals
-                SET progress_json = ?,
-                    progress_revision = progress_revision + 1,
-                    updated_at_ms = ?
-                WHERE goal_id = ?
-                  AND objective_revision = ?
-                  AND active_task_id = ?
-                """,
-                (
-                    json.dumps(
-                        progress,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ),
-                    timestamp,
-                    context.goal_id,
-                    context.objective_revision,
-                    context.task_id,
-                ),
-            )
-            updated = await self._select_goal_on_conn(conn, goal_id=context.goal_id)
-            assert updated is not None
-            return updated
+        await self.update_task_progress(
+            context.task_id,
+            session_key=goal.session_key,
+            session_id=context.session_id,
+            session_epoch=context.epoch,
+            steps=progress["steps"],
+            explanation=progress["explanation"],
+            goal_context=context,
+            now_ms=now_ms,
+        )
+        updated = await self.get_goal_by_id(context.goal_id)
+        if updated is None:
+            raise GoalConflictError("GOAL_NOT_FOUND", "The Goal no longer exists")
+        return updated
 
     @staticmethod
     async def _turn_usage_totals_on_conn(
@@ -9302,6 +9206,136 @@ class SessionStorage:
                 row = await cur.fetchone()
             result = AgentTaskRecord(**_deserialize_row(dict(row))) if row is not None else None
         return result
+
+    async def update_task_progress(
+        self,
+        task_id: str,
+        *,
+        session_key: str,
+        session_id: str,
+        session_epoch: int,
+        steps: list[dict[str, Any]],
+        explanation: str | None = None,
+        goal_context: GoalTurnContext | None = None,
+        now_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Replace descriptive progress on the live owning task, never its lifecycle."""
+        async with self._write_transaction("update_task_progress") as conn:
+            return await self._update_task_progress_on_conn(
+                conn, task_id, session_key=session_key, session_id=session_id,
+                session_epoch=session_epoch, steps=steps, explanation=explanation,
+                goal_context=goal_context, now_ms=now_ms,
+            )
+
+
+    async def _update_task_progress_on_conn(
+        self,
+        conn: Any,
+        task_id: str,
+        *,
+        session_key: str,
+        session_id: str,
+        session_epoch: int,
+        steps: list[dict[str, Any]],
+        explanation: str | None = None,
+        goal_context: GoalTurnContext | None = None,
+        now_ms: int | None = None,
+    ) -> dict[str, Any]:
+        """Shared transaction body for current and compatibility progress controls."""
+        progress = normalize_goal_progress(steps=steps, explanation=explanation)
+        timestamp = _now_ms() if now_ms is None else now_ms
+        if goal_context is not None:
+            goal = await self._select_goal_on_conn(conn, goal_id=goal_context.goal_id)
+            if goal is None:
+                raise GoalConflictError("GOAL_NOT_FOUND", "The Goal no longer exists")
+            if (
+                goal.session_id != goal_context.session_id
+                or goal.session_epoch != goal_context.epoch
+                or goal.objective_revision != goal_context.objective_revision
+                or goal.active_task_id != task_id
+                or goal.status not in {GoalStatus.ACTIVE.value, GoalStatus.PAUSED.value}
+            ):
+                raise GoalConflictError(
+                    "STALE_GOAL", "The task no longer owns this Goal objective", current=goal
+                )
+            await self._require_persisted_goal_context_on_conn(
+                conn,
+                context=goal_context,
+                expected_session_key=session_key,
+                current=goal,
+            )
+        if not await _matches_session_owner_on_conn(
+            conn,
+            session_key=session_key,
+            session_id=session_id,
+            session_epoch=session_epoch,
+        ):
+            raise StaleEpochError("Progress session generation changed")
+        async with conn.execute(
+            "SELECT * FROM agent_tasks WHERE task_id = ? AND session_key = ?",
+            (task_id, session_key),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None or row["status"] != AgentTaskStatus.RUNNING.value:
+            raise ValueError("Progress requires the current running task")
+        task = AgentTaskRecord(**_deserialize_row(dict(row)))
+        details = dict(task.details or {})
+        metadata = dict(details.get("metadata") or {})
+        previous = metadata.get("progress") or {}
+        progress["revision"] = int(previous.get("revision", 0)) + 1
+        metadata["progress"] = progress
+        details["metadata"] = metadata
+        await conn.execute(
+            "UPDATE agent_tasks SET details = ?, updated_at = ? WHERE task_id = ?",
+            (_serialize(details), timestamp, task_id),
+        )
+        # These rows are compatibility projections of the task metadata.
+        # They must never advance, pause or complete an execution.
+        plan_run_id = str(metadata.get("plan_run_id") or "")
+        if plan_run_id:
+            projected = [
+                {
+                    "step_id": f"progress-{index + 1}",
+                    "title": item["step"],
+                    "status": item["status"],
+                }
+                for index, item in enumerate(progress["steps"])
+            ]
+            current_step = next(
+                (item["step_id"] for item in projected if item["status"] == "in_progress"),
+                None,
+            )
+            await conn.execute(
+                "UPDATE plan_runs SET step_states = ?, current_step_id = ?, "
+                "state_revision = state_revision + 1, updated_at = ? "
+                "WHERE run_id = ? AND active_task_id = ? AND status = 'running'",
+                (_serialize(projected), current_step, timestamp, plan_run_id, task_id),
+            )
+        from opensquilla.session.goals import effective_goal_turn_context
+
+        goal_context = effective_goal_turn_context(details)
+        goal_id = goal_context.goal_id if goal_context is not None else None
+        if goal_id:
+            await conn.execute(
+                "UPDATE session_goals SET progress_json = ?, "
+                "progress_revision = progress_revision + 1, "
+                "updated_at_ms = ? "
+                "WHERE goal_id = ? AND session_key = ? AND active_task_id = ?",
+                (
+                    json.dumps(
+                        {key: value for key, value in progress.items() if key != "revision"},
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    timestamp,
+                    goal_id,
+                    session_key,
+                    task_id,
+                ),
+            )
+        return progress
+
 
     async def update_agent_task(self, task_id: str, **fields: Any) -> AgentTaskRecord:
         if not fields:
@@ -10023,26 +10057,7 @@ class SessionStorage:
                     plan_run_reconciliation["cancelled"] += 1
                     continue
 
-                step_states_raw = _deserialize_row(
-                    {"step_states": row["step_states"]}
-                ).get("step_states")
-                step_states = (
-                    step_states_raw if isinstance(step_states_raw, list) else []
-                )
-                delivery_ready = (
-                    row["current_step_id"] is None
-                    and bool(step_states)
-                    and all(
-                        isinstance(state, dict)
-                        and str(state.get("status") or "")
-                        in {"completed", "skipped"}
-                        for state in step_states
-                    )
-                )
-                if (
-                    owner_status == AgentTaskStatus.SUCCEEDED.value
-                    and delivery_ready
-                ):
+                if owner_status == AgentTaskStatus.SUCCEEDED.value:
                     await conn.execute(
                         """
                         UPDATE plan_runs
@@ -10056,7 +10071,6 @@ class SessionStorage:
                         WHERE run_id = ?
                           AND state_revision = ?
                           AND status = 'running'
-                          AND current_step_id IS NULL
                           AND active_task_id = ?
                         """,
                         (ts, ts, run_id, state_revision, active_task_id),
@@ -13334,22 +13348,10 @@ class SessionStorage:
                         ),
                     ) as busy_cur:
                         has_existing_task = await busy_cur.fetchone() is not None
-                    async with conn.execute(
-                        """
-                        SELECT 1 FROM plan_runs
-                        WHERE session_key = ?
-                          AND driver_kind = 'manual'
-                          AND status IN ('queued', 'running', 'paused', 'blocked')
-                        LIMIT 1
-                        """,
-                        (entry.session_key,),
-                    ) as plan_cur:
-                        has_manual_plan_run = await plan_cur.fetchone() is not None
                     can_claim_now = (
                         mode_is_default
                         and current.active_task_id is None
                         and not has_existing_task
-                        and not has_manual_plan_run
                         and not merge_into_task
                     )
                     task_details = dict(task_record.details or {})

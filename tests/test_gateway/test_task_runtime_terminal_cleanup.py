@@ -15,6 +15,7 @@ import gc
 import inspect
 import json
 import tracemalloc
+import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
@@ -405,21 +406,22 @@ async def test_plan_run_is_running_only_during_its_execution_turn() -> None:
     running = await storage.get_plan_run(run.run_id)
     assert running is not None
     assert running.status == "running"
-    assert running.current_step_id == "inspect"
-    assert running.step_states[0]["status"] == "in_progress"
+    assert running.current_step_id is None
+    assert all(step["status"] == "pending" for step in running.step_states)
     assert observed_statuses == ["running"]
 
     release.set()
     await rt.wait(handle.task_id, timeout=2.0)
-    paused = await storage.get_plan_run(run.run_id)
-    assert paused is not None
-    assert paused.status == "paused"
-    assert paused.active_task_id is None
+    completed = await storage.get_plan_run(run.run_id)
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.active_task_id is None
+    assert all(step["status"] == "pending" for step in completed.step_states)
     assert [
         payload["plan_run"]["status"]
         for _session, name, payload in events
         if name == "session.event.plan_run"
-    ] == ["running", "paused"]
+    ] == ["running", "completed"]
     await storage.close()
 
 
@@ -538,7 +540,7 @@ async def test_failed_delivery_after_final_checkpoint_remains_resumable() -> Non
 
 
 @pytest.mark.asyncio
-async def test_goal_owned_plan_run_yields_for_later_driver_attempt() -> None:
+async def test_goal_owned_plan_run_projects_success_without_checkpoint() -> None:
     session_key = "agent-1::goal-plan-runtime"
     task_id = "task-goal-plan-runtime"
     storage, run = await _make_durable_plan_run(
@@ -568,15 +570,15 @@ async def test_goal_owned_plan_run_yields_for_later_driver_attempt() -> None:
     )
 
     task = await runtime.wait(handle.task_id, timeout=2.0)
-    paused = await storage.get_plan_run(run.run_id)
+    completed = await storage.get_plan_run(run.run_id)
 
     assert str(task.status) == "succeeded"
-    assert paused is not None
-    assert paused.status == "paused"
-    assert paused.driver_kind == "goal"
-    assert paused.driver_id == "goal-1"
-    assert paused.pause_reason == "goal_turn_finished"
-    assert paused.active_task_id is None
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.driver_kind == "goal"
+    assert completed.driver_id == "goal-1"
+    assert completed.pause_reason is None
+    assert completed.active_task_id is None
     await storage.close()
 
 
@@ -590,6 +592,12 @@ async def test_resumed_plan_run_progress_is_injected_into_provider_prompt() -> N
         run_id="run-plan-resume",
         task_id=first_task_id,
     )
+    await storage.create_agent_task(AgentTaskRecord(
+        task_id=first_task_id,
+        session_key=session_key,
+        status=AgentTaskStatus.RUNNING,
+        details={"metadata": {"plan_run_id": run.run_id}},
+    ))
     running = await storage.mark_plan_run_running(
         run.run_id,
         expected_state_revision=run.state_revision,
@@ -635,14 +643,14 @@ async def test_resumed_plan_run_progress_is_injected_into_provider_prompt() -> N
     )
     await runtime.wait(handle.task_id, timeout=2.0)
 
-    progress = captured_context["PlanRun Progress"]
-    payload = json.loads(progress[progress.index("{") :])
+    progress = captured_context["Previous Plan Progress"]
+    reference = ET.fromstring(progress)
+    assert reference.tag == "untrusted"
+    assert reference.attrib == {"source": "plan_progress"}
+    payload = json.loads(reference.text or "")
     assert payload["runId"] == run.run_id
-    assert payload["currentStepId"] == "implement"
-    assert payload["steps"] == [
-        {"stepId": "inspect", "status": "completed"},
-        {"stepId": "implement", "status": "in_progress"},
-    ]
+    assert payload["currentStepId"] is None
+    assert [step["status"] for step in payload["steps"]] == ["completed", "pending"]
     await storage.close()
 
 

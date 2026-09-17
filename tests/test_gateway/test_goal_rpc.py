@@ -1211,19 +1211,22 @@ async def test_resume_reuses_an_unsettled_goal_owner_without_duplicate_task(
 async def test_edit_reactivates_complete_goal_and_returns_new_continuity(
     tmp_path: Path,
 ) -> None:
+    async def handler(run: TaskRun) -> None:
+        assert run.goal_context is not None
+        await stack.service.update_progress(
+            run.goal_context,
+            explanation="The original objective was delivered.",
+            steps=[{"step": "Deliver it", "status": "completed"}],
+        )
+
     async with _open_goal_rpc_stack(
-        tmp_path / "goal-edit-complete.sqlite",
+        tmp_path / "goal-edit-complete.sqlite", handler=handler,
     ) as stack:
         created = await _handle_goals_set(_set_params(), stack.context)
         task = await stack.runtime.wait(created["taskId"], timeout=2.0)
         assert task.details is not None
         context = GoalTurnContext.from_task_detail(task.details.get("goal_context"))
         assert context is not None
-        await stack.service.update_progress(
-            context.as_task_detail(),
-            explanation="The original objective was delivered.",
-            steps=[{"step": "Deliver it", "status": "completed"}],
-        )
         await stack.service.commit_model_status(
             context.as_task_detail(),
             status="complete",
@@ -4289,17 +4292,18 @@ async def test_goal_artifact_loop_commits_and_settles_durable_terminal_state(
             timeout=3.0,
         )
 
-        # The terminal Goal write is authoritative. A failure in the optional
-        # explanatory summary degrades to deterministic terminal text instead
-        # of turning the already-complete task into a System Error.
-        assert task.status == AgentTaskStatus.SUCCEEDED
+        # Goal completion is durable, while subsequent provider calls retain
+        # the ordinary task lifecycle and report their actual failure.
+        expected_task_status = (
+            AgentTaskStatus.SUCCEEDED if final_summary_failure is None else AgentTaskStatus.FAILED
+        )
+        assert task.status == expected_task_status
         assert provider.calls == 3
         assert all(
             {"publish_artifact", "update_goal", "update_goal_progress"}
             <= set(tool_names)
-            for tool_names in provider.tool_names_seen[:2]
+            for tool_names in provider.tool_names_seen
         )
-        assert provider.tool_names_seen[2] == []
         assert publish_calls == ["report.html"]
         assert goal.terminal_task_id == created["taskId"]
         assert goal.terminal_reason == "model_complete"
@@ -4334,7 +4338,10 @@ async def test_goal_artifact_loop_commits_and_settles_durable_terminal_state(
                 if isinstance(artifact, dict) and artifact.get("id")
             )
         assert persisted_artifact_ids == ["art-goal-e2e"]
-        assert persisted_assistant_text[-1] == "The Goal is complete."
+        if final_summary_failure is None:
+            assert persisted_assistant_text[-1] == "The Goal is complete."
+        else:
+            assert "The Goal is complete." not in persisted_assistant_text
 
 
 class _DurableGoalContinuationProvider:
@@ -4397,7 +4404,7 @@ class _DurableGoalContinuationProvider:
             )
             self.second_task_provider_started.set()
         elif call == 3:
-            assert tool_names == []
+            assert goal_tools <= set(tool_names)
         else:
             raise AssertionError("The Goal continuation made an extra provider call")
 
@@ -4618,9 +4625,8 @@ async def test_real_turn_runner_continuation_reuses_durable_goal_context_and_com
         assert provider.calls == 3
         assert all(
             {"update_goal", "update_goal_progress"} <= set(tool_names)
-            for tool_names in provider.tool_names_seen[:2]
+            for tool_names in provider.tool_names_seen
         )
-        assert provider.tool_names_seen[2] == []
         assert goal.status == "complete"
         assert goal.terminal_task_id == second_task_id
         assert goal.terminal_reason == "model_complete"
@@ -4717,7 +4723,7 @@ class _RunningGoalEditProvider:
         elif call == 3:
             assert goal_tools <= set(tool_names)
         elif call == 4:
-            assert tool_names == []
+            assert goal_tools <= set(tool_names)
         else:
             raise AssertionError("Running Goal edit made an extra provider call")
         if call >= 2:
@@ -4920,7 +4926,7 @@ async def test_running_goal_edit_adopts_revision_in_same_task_without_transcript
         assert [run.task_id for run in runs] == [created["taskId"]]
         assert provider.calls == 4
         assert provider.partial_text in provider.request_texts[1]
-        assert provider.tool_names_seen[3] == []
+        assert {"update_goal", "update_goal_progress"} <= set(provider.tool_names_seen[3])
         assert goal.objective_revision == 2
         assert goal.objective == provider.edited_objective
         assert goal.terminal_task_id == created["taskId"]

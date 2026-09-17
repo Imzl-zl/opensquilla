@@ -375,9 +375,6 @@ class StreamConsumerStageInput:
     input_provenance: dict[str, Any] | None = None
     # In-process pending submitted-line provider for mid-turn injection.
     pending_input_provider: PendingInputProvider | None = None
-    # Live delivery-ready authorization resolved on the event loop before the
-    # blocking omitted-artifact publish enters its worker thread.
-    attached_plan_run_ready: bool | None = None
     # Frozen durable prefix used by in-turn compaction persistence. The storage
     # adapter compares it atomically and preserves later append-only queue rows.
     compaction_source_entries: tuple[Any, ...] | None = None
@@ -1063,7 +1060,6 @@ class _DoneHandler:
         return auto_publish_omitted_workspace_artifacts(
             inp.tool_context,
             final_text=accumulated_text,
-            attached_plan_run_ready=inp.attached_plan_run_ready,
         )
 
     def record_publish_result(
@@ -2142,20 +2138,10 @@ class StreamConsumerStage:
                 # the ArtifactStore -- yielding a torn transcript or an
                 # artifact persisted without a transcript record.
                 pre = self._done_handler.pre_publish(event, inp, state)
-                from opensquilla.engine.artifact_delivery import (
-                    attached_plan_run_ready_for_auto_publish,
-                )
-
-                publish_inp = replace(
-                    inp,
-                    attached_plan_run_ready=(
-                        await attached_plan_run_ready_for_auto_publish(inp.tool_context)
-                    ),
-                )
                 publish_task = asyncio.ensure_future(
                     asyncio.to_thread(
                         self._done_handler.run_publish,
-                        publish_inp,
+                        inp,
                         pre.accumulated_text,
                     )
                 )

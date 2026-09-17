@@ -1458,29 +1458,45 @@ class GoalService:
         explanation: str | None,
         steps: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        """Compatibility entry point into the ordinary task progress store."""
         context = GoalTurnContext.from_task_detail(context_value)
         if context is None:
             raise GoalConflictError("STALE_GOAL", "Invalid Goal turn context")
         goal = await self._storage.get_goal_by_id(context.goal_id)
-        key = goal.session_key if goal is not None else ""
-        async with self._lock(key):
-            updated = await self._storage.update_goal_progress(
-                context,
-                explanation=explanation,
-                steps=steps,
-            )
-            await self._emit_goal(
-                updated,
-                event_type="updated",
-                session_key=updated.session_key,
-                session_id=updated.session_id,
-                epoch=updated.session_epoch,
-                state_revision=updated.state_revision,
-                progress_revision=updated.progress_revision,
-            )
+        if goal is None or goal.active_task_id != context.task_id:
+            raise GoalConflictError("STALE_GOAL", "The task no longer owns this Goal")
+        await self._storage.update_task_progress(
+            context.task_id,
+            session_key=goal.session_key,
+            session_id=context.session_id,
+            session_epoch=context.epoch,
+            goal_context=context,
+            explanation=explanation,
+            steps=steps,
+        )
+        return await self.progress_updated(context_value)
+
+    async def progress_updated(self, context_value: Mapping[str, Any]) -> dict[str, Any]:
+        """Publish the Goal projection after ordinary task progress changes."""
+        context = GoalTurnContext.from_task_detail(context_value)
+        if context is None:
+            raise GoalConflictError("STALE_GOAL", "Invalid Goal turn context")
+        updated = await self._storage.get_goal_by_id(context.goal_id)
+        if updated is None:
+            raise GoalConflictError("GOAL_NOT_FOUND", "The Goal no longer exists")
+        await self._emit_goal(
+            updated,
+            event_type="updated",
+            session_key=updated.session_key,
+            session_id=updated.session_id,
+            epoch=updated.session_epoch,
+            state_revision=updated.state_revision,
+            progress_revision=updated.progress_revision,
+        )
         snapshot = await self.snapshot(updated)
         assert snapshot is not None
         return snapshot
+
 
     async def build_prompt_context(
         self,

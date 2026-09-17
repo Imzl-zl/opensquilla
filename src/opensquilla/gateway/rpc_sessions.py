@@ -70,6 +70,7 @@ from opensquilla.application.turn_acceptance_ports import (
 from opensquilla.application.turn_admission import (
     AdmitTurn,
     AdmitTurnResult,
+    CancelTurn,
     TurnAdmission,
 )
 from opensquilla.application.turn_cancellation import (
@@ -1704,6 +1705,22 @@ def _task_summary(row: Any) -> dict[str, Any]:
             value = details.get(field)
             if isinstance(value, str) and value:
                 summary[field] = value
+        metadata = details.get("metadata")
+        if isinstance(metadata, dict) and isinstance(metadata.get("progress"), dict):
+            summary["progress"] = dict(metadata["progress"])
+        plan_result = metadata.get("plan_result") if isinstance(metadata, dict) else None
+        if isinstance(plan_result, dict) and plan_result.get("status") in {
+            "submitted", "discussion",
+        }:
+            summary["plan_result"] = {
+                "status": plan_result["status"],
+                **{
+                    key: plan_result[key]
+                    for key in ("previousRevisionId", "revisionId")
+                    if key in plan_result
+                    if plan_result[key] is None or isinstance(plan_result[key], str)
+                },
+            }
         turn_outcome = details.get("turn_outcome")
         if isinstance(turn_outcome, dict):
             summary["turn_outcome"] = dict(turn_outcome)
@@ -4886,7 +4903,7 @@ async def _handle_plans_implement(
     explicit_message = _optional_string_param(params, "message")
     message = explicit_message or (
         f"Implement the approved plan “{revision_title}”. "
-        "Work through its ordered steps and record truthful checkpoints."
+        "Verify existing work, adapt the approach as needed, and report actual progress."
     )
     send_params = {
         "key": key,
@@ -5240,12 +5257,17 @@ async def _handle_plans_cancel_run(params: dict | None, ctx: RpcContext) -> dict
                 raise RpcUnavailableError(
                     "Task runtime is unavailable; the implementation was not cancelled"
                 )
-            cancelled_count = await _cancel_task_runtime(
-                task_runtime,
-                session_key=key,
-                task_id=active_task_id,
-                source="plans.cancelRun",
-                reason="cancelled_by_user",
+            # Ordinary tools may delegate or start task-owned processes. Use
+            # the public exact-task cleanup so Stop also fences late child
+            # completion delivery and cancels this task's descendants.
+            cancellation = await build_turn_admission_application(ctx).cancel(
+                CancelTurn(
+                    session_key=key,
+                    surface="webchat",
+                    task_id=active_task_id,
+                    task_scoped=True,
+                    source="plans.cancelRun",
+                )
             )
             try:
                 terminal_task = await runtime_wait(active_task_id, timeout=10.0)
@@ -5269,7 +5291,7 @@ async def _handle_plans_cancel_run(params: dict | None, ctx: RpcContext) -> dict
                     "The implementation task did not acknowledge cancellation.",
                     details={
                         "taskId": active_task_id,
-                        "cancelledCount": cancelled_count,
+                        "cancelledCount": int(bool(cancellation.get("aborted"))),
                     },
                     retryable=True,
                     accepted=False,

@@ -531,6 +531,13 @@
     </Transition>
     <!-- Long-running goal progress lives in the same dock as plan execution so
          the active objective stays visible above the composer across turns. -->
+    <div
+      v-if="ordinaryTaskProgress && !executionDockRun && !activeGoalRun"
+      class="task-progress-dock"
+      :data-task-progress-id="taskProgress.taskId.value"
+    >
+      <ExecutionProgress :progress="ordinaryTaskProgress" />
+    </div>
     <Transition name="goal-run-dock">
       <div v-if="activeGoalRun" ref="goalRunDockRef" class="goal-run-dock">
         <GoalRibbon
@@ -824,6 +831,8 @@ import MetaPreflightCard from '@/components/chat/MetaPreflightCard.vue'
 import MetaRibbon from '@/components/chat/MetaRibbon.vue'
 import MetaSkillSetupCard from '@/components/chat/MetaSkillSetupCard.vue'
 import GoalRibbon from '@/components/chat/GoalRibbon.vue'
+import ExecutionProgress from '@/components/chat/ExecutionProgress.vue'
+import { useChatTaskProgress } from '@/composables/chat/useChatTaskProgress'
 import GoalOutcomeNotice from '@/components/chat/GoalOutcomeNotice.vue'
 import PendingQueue from '@/components/chat/PendingQueue.vue'
 import PlanCard from '@/components/chat/PlanCard.vue'
@@ -1680,6 +1689,10 @@ const activeStreamSessionKey = ref<string>('')
 const acceptanceStopPending = ref(false)
 const acceptanceRecoveryPending = ref(false)
 const taskOwnership = useChatTaskOwnership()
+const taskProgress = useChatTaskProgress({
+  sessionKey, currentEpoch, activeTaskId: taskOwnership.stopTargetTaskId,
+})
+const ordinaryTaskProgress = taskProgress.progress
 const isStopPending = computed(() => (
   Boolean(taskOwnership.stopRequestedTaskId.value)
   || acceptanceStopPending.value
@@ -2649,6 +2662,7 @@ const chatSessionSubscription = useChatSessionSubscription({
   onSnapshot: snapshot => {
     chatSessionRouting.applyBootstrap(snapshot)
     chatPlans.applyBootstrap(snapshot)
+    taskProgress.applySnapshot(snapshot)
     applyGoalSnapshot(snapshot)
     applyPendingUserInputSnapshot(snapshot)
   },
@@ -3943,7 +3957,11 @@ function onPlanQuestionnaireTouchEnd() {
 
 const rpcEventHandlers = useChatRpcEventHandlers({
   onRecoveryRequired: () => { void recoverCurrentSession() },
-  onTaskSettled: (taskId, epoch) => chatPlans.noteTaskSettled(taskId, epoch),
+  onTaskProgress: taskProgress.applyEvent,
+  onTaskSettled: (taskId, epoch) => {
+    chatPlans.noteTaskSettled(taskId, epoch)
+    taskProgress.noteTaskSettled(taskId, epoch)
+  },
   conversationRuntime,
   sessionKey,
   currentEpoch,
@@ -7335,6 +7353,12 @@ watch(
 <style scoped src="../styles/chat-view.css"></style>
 
 <style scoped>
+.task-progress-dock {
+  width: var(--chat-col, min(calc(100% - 48px), 980px));
+  margin: var(--sp-2) auto;
+  font-size: var(--fs-xs);
+}
+
 /* No shared sr-only utility exists in this repo (each component scopes its
    own), so the completion announcer's clip-out lives here: zero visual
    footprint, still exposed to assistive tech. */

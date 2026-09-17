@@ -52,6 +52,9 @@ def _tool_context(**overrides: object) -> ToolContext:
         "run_mode": "full",
         "workspace_dir": "/workspace/.opensquilla/workspace",
         "collaboration_mode": "default",
+        "is_owner": True,
+        "goal_service": object(),
+        "task_id": "task-1",
     }
     values.update(overrides)
     return ToolContext(**values)  # type: ignore[arg-type]
@@ -92,7 +95,7 @@ def test_goal_turn_renders_frozen_objective_and_structured_progress() -> None:
     assert "Keep the full objective intact across turns" in block
     assert "redefine success around completed work" in block
     assert "current worktree and external state as authoritative" in block
-    assert "update_goal_progress is optional" in block
+    assert "update_plan is optional" in block
     assert "must not define fixed phases or turn boundaries" in block
     assert "substitute for doing the work" in block
     assert "Before claiming that the Goal is complete, delivered, or ready" in block
@@ -108,7 +111,7 @@ def test_goal_turn_renders_frozen_objective_and_structured_progress() -> None:
     assert "instruction to stop after publication" not in block
     assert "continue any remaining work through the normal tools and turns" in block
     assert "do not publish the unchanged file again" in block
-    assert "call no more tools; give one concise final summary" in block
+    assert "Finish the current turn normally" in block
     assert "[goal:continue]" not in block
     assert "[goal:complete]" not in block
     assert "Approved Plan Execution" not in extra
@@ -390,5 +393,6 @@ def test_manual_plan_context_remains_independent_from_goal_context() -> None:
     extra = TurnRunner._extra_context_for_tool_context(ctx)
 
     assert "Active Goal" not in extra
-    assert "Approved Plan Execution" in extra
-    assert "PlanRun Progress" in extra
+    assert "Approved Plan Proposal" in extra
+    assert "<untrusted source='plan_revision'>" in extra["Approved Plan Proposal"]
+    assert "Previous Plan Progress" in extra

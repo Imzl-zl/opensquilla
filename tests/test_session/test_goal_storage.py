@@ -745,6 +745,9 @@ async def test_progress_race_respects_state_and_progress_revision_domains(
         progress_storage,
     ):
         accepted = await _set_goal(command_storage)
+        await command_storage.update_agent_task(
+            "task-1", status=AgentTaskStatus.RUNNING, started_at=200,
+        )
         assert accepted.goal is not None and accepted.goal_context is not None
         expected = _expected(accepted.goal)
         command = _command(
@@ -928,6 +931,7 @@ async def test_edit_invalidates_old_objective_tools_but_old_task_still_settles(
     storage: SessionStorage,
 ) -> None:
     accepted = await _set_goal(storage)
+    await storage.update_agent_task("task-1", status=AgentTaskStatus.RUNNING, started_at=200)
     assert accepted.goal is not None and accepted.goal_context is not None
     progressed = await storage.update_goal_progress(
         accepted.goal_context,
@@ -990,6 +994,7 @@ async def test_running_edit_adoption_switches_tool_authority_only_after_apply(
     storage: SessionStorage,
 ) -> None:
     accepted = await _set_goal(storage)
+    await storage.update_agent_task("task-1", status=AgentTaskStatus.RUNNING, started_at=200)
     assert accepted.goal is not None and accepted.goal_context is not None
     original_context = accepted.goal_context
     await storage.update_agent_task(
@@ -1162,6 +1167,7 @@ async def test_newer_running_edit_supersedes_claimed_but_unapplied_revision(
     storage: SessionStorage,
 ) -> None:
     accepted = await _set_goal(storage)
+    await storage.update_agent_task("task-1", status=AgentTaskStatus.RUNNING, started_at=200)
     assert accepted.goal is not None and accepted.goal_context is not None
     original_context = accepted.goal_context
     await storage.update_agent_task(
@@ -1311,6 +1317,7 @@ async def test_clear_after_claim_rejects_late_apply_without_advancing_authority(
     storage: SessionStorage,
 ) -> None:
     accepted = await _set_goal(storage)
+    await storage.update_agent_task("task-1", status=AgentTaskStatus.RUNNING, started_at=200)
     assert accepted.goal is not None and accepted.goal_context is not None
     original_context = accepted.goal_context
     await storage.update_agent_task(
@@ -1527,6 +1534,7 @@ async def test_goal_tool_writes_require_exact_durable_task_context(
     storage: SessionStorage,
 ) -> None:
     accepted = await _set_goal(storage)
+    await storage.update_agent_task("task-1", status=AgentTaskStatus.RUNNING, started_at=200)
     assert accepted.goal_context is not None
     forged = replace(
         accepted.goal_context,
@@ -1847,6 +1855,7 @@ async def test_edit_reactivates_only_a_settled_complete_goal(
     storage: SessionStorage,
 ) -> None:
     accepted = await _set_goal(storage)
+    await storage.update_agent_task("task-1", status=AgentTaskStatus.RUNNING, started_at=200)
     assert accepted.goal is not None and accepted.goal_context is not None
     progressed = await storage.update_goal_progress(
         accepted.goal_context,
