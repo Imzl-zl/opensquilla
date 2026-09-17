@@ -280,6 +280,67 @@ def test_material_cleanup_missing_directory_race_is_idempotent(
     assert logs == []
 
 
+@pytest.mark.parametrize("child_kind", ["file", "directory"])
+def test_material_cleanup_continues_when_child_disappears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, child_kind: str,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    disappearing = target / "disappearing"
+    if child_kind == "file":
+        disappearing.write_text("attachment removed concurrently")
+    else:
+        disappearing.mkdir()
+    (target / "remaining.txt").write_text("attachment still to clean")
+    operation = "unlink" if child_kind == "file" else "rmdir"
+    original_remove = getattr(os, operation)
+    race_injected = False
+
+    def remove_with_disappearing_child(path, *args, **kwargs):
+        nonlocal race_injected
+        original_remove(path, *args, **kwargs)
+        if Path(path).name == disappearing.name:
+            # The child was enumerated, but another actor removed it before
+            # rmtree could do so. Exercise rmtree's real per-item error path.
+            race_injected = True
+            raise FileNotFoundError(str(path))
+
+    monkeypatch.setattr(os, operation, remove_with_disappearing_child)
+    with capture_logs() as logs:
+        rmtree_scoped(target, expected_name="target")
+
+    assert race_injected
+    assert not target.exists()
+    assert logs == []
+
+
+def test_material_cleanup_child_permission_failure_is_logged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    blocked = target / "blocked.txt"
+    blocked.write_text("locked attachment")
+    original_unlink = os.unlink
+
+    def deny_child(path, *args, **kwargs):
+        if Path(path).name == blocked.name:
+            raise PermissionError("injected child deletion failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", deny_child)
+    with capture_logs() as logs:
+        rmtree_scoped(target, expected_name="target")
+
+    assert blocked.read_text() == "locked attachment"
+    assert any(
+        entry["event"] == "session_material_cleanup.remove_failed"
+        and entry["target"] == str(target)
+        and entry["error_type"] == "PermissionError"
+        for entry in logs
+    )
+
+
 @pytest.mark.parametrize("root_kind", ["managed", "configured", "legacy", "project"])
 @pytest.mark.parametrize("operation", ["delete", "prune"])
 async def test_delete_captures_effective_material_root(
