@@ -1030,6 +1030,42 @@ class GoalService:
             ctx=ctx,
         )
 
+    @asynccontextmanager
+    async def _turn_goal_authority(
+        self, envelope: RouteEnvelope, goal: GoalRecord,
+    ) -> AsyncIterator[tuple[RpcContext, str]]:
+        """Recheck the live owner inside the task gate and Goal transition lock."""
+        from opensquilla.gateway.rpc import RpcContext
+        from opensquilla.gateway.scopes import operator_scope_satisfies
+        from opensquilla.gateway.websocket import get_registry
+
+        self._require_execution_available()
+        conn_id = str(envelope.metadata.get("conn_id") or "")
+        if not conn_id and envelope.source_kind == "cli":
+            channel_id = str(envelope.channel_id or "")
+            if channel_id.startswith("cli:"):
+                conn_id = channel_id.removeprefix("cli:")
+        connection = get_registry().get(conn_id)
+        if connection is None or not operator_scope_satisfies(
+            "operator.write", connection.principal.scopes
+        ):
+            raise GoalConflictError(
+                "GOAL_AUTHORITY_UNAVAILABLE", "A live authenticated Goal owner is required"
+            )
+        ctx = RpcContext(conn_id=conn_id, principal=connection.principal)
+        source_kind = "cli" if envelope.source_kind == "cli" else "web"
+        key = goal.session_key
+        previous_lease = self._leases.get(key)
+        previous_grant = self._continuity_grants.get(key)
+        installed = self._install_lease(ctx, goal=goal, source_kind=source_kind)
+        try:
+            yield ctx, source_kind
+        except BaseException:
+            self._restore_authority(
+                key, lease=previous_lease, grant=previous_grant, installed=installed
+            )
+            raise
+
     async def create_from_turn(
         self,
         tool_context: Any,
@@ -1056,22 +1092,12 @@ class GoalService:
             token_budget=token_budget,
         )
 
-        async def persist(ctx: Any, source_kind: str) -> dict[str, Any]:
+        async def persist(envelope: RouteEnvelope) -> dict[str, Any]:
             async with self._lock(key):
-                self._require_execution_available()
-                self._require_subscription(ctx, key)
-                previous_lease = self._leases.get(key)
-                previous_grant = self._continuity_grants.get(key)
-                installed = self._install_lease(ctx, goal=goal, source_kind=source_kind)
-                try:
+                async with self._turn_goal_authority(envelope, goal):
                     created = await self._storage.create_goal_for_running_task(
                         goal, task_id=task_id
                     )
-                except BaseException:
-                    self._restore_authority(
-                        key, lease=previous_lease, grant=previous_grant, installed=installed
-                    )
-                    raise
                 context = goal_turn_context(
                     created, task_id=task_id, automatic=False
                 ).as_task_detail()
@@ -1105,10 +1131,8 @@ class GoalService:
         key = canonicalize_session_key(tool_context.session_key)
         task_id = str(tool_context.task_id or "")
 
-        async def persist(ctx: Any, source_kind: str) -> dict[str, Any]:
+        async def persist(envelope: RouteEnvelope) -> dict[str, Any]:
             async with self._lock(key):
-                self._require_execution_available()
-                self._require_subscription(ctx, key)
                 goal = await self._storage.get_goal(key)
                 if (
                     goal is None
@@ -1119,23 +1143,20 @@ class GoalService:
                 next_objective = (
                     normalize_goal_objective(objective) if objective is not None else goal.objective
                 )
-                command = self._command(
-                    action="edit",
-                    session_key=key,
-                    client_request_id=str(uuid.uuid4()),
-                    source_scope=self.source_scope(ctx, source_kind=source_kind),
-                    business_params={
-                        "objective": next_objective,
-                        "resume": resume,
-                        "pause": pause,
-                        "taskId": task_id,
-                        **(settings or {}),
-                    },
-                )
-                previous_lease = self._leases.get(key)
-                previous_grant = self._continuity_grants.get(key)
-                installed = self._install_lease(ctx, goal=goal, source_kind=source_kind)
-                try:
+                async with self._turn_goal_authority(envelope, goal) as (ctx, source_kind):
+                    command = self._command(
+                        action="edit",
+                        session_key=key,
+                        client_request_id=str(uuid.uuid4()),
+                        source_scope=self.source_scope(ctx, source_kind=source_kind),
+                        business_params={
+                            "objective": next_objective,
+                            "resume": resume,
+                            "pause": pause,
+                            "taskId": task_id,
+                            **(settings or {}),
+                        },
+                    )
                     result = await self._storage.edit_goal(
                         session_key=key,
                         expected=ExpectedGoal(
@@ -1148,11 +1169,6 @@ class GoalService:
                         resume_requested=resume,
                         pause_requested=pause,
                     )
-                except BaseException:
-                    self._restore_authority(
-                        key, lease=previous_lease, grant=previous_grant, installed=installed
-                    )
-                    raise
                 assert result.goal is not None
                 context = goal_turn_context(
                     result.goal, task_id=task_id, automatic=False
@@ -1758,26 +1774,37 @@ class GoalService:
             explanation=explanation,
             steps=steps,
         )
-        return await self.progress_updated(context_value)
+        return await self.progress_updated(context_value, session_key=goal.session_key)
 
-    async def progress_updated(self, context_value: Mapping[str, Any]) -> dict[str, Any]:
-        """Publish the Goal projection after ordinary task progress changes."""
+    async def progress_updated(
+        self, context_value: Mapping[str, Any], *, session_key: str, publish: bool = True,
+    ) -> dict[str, Any]:
+        """Read the owning Goal projection, optionally publishing the committed update."""
         context = GoalTurnContext.from_task_detail(context_value)
         if context is None:
             raise GoalConflictError("STALE_GOAL", "Invalid Goal turn context")
-        updated = await self._storage.get_goal_by_id(context.goal_id)
-        if updated is None:
-            raise GoalConflictError("GOAL_NOT_FOUND", "The Goal no longer exists")
-        await self._emit_goal(
-            updated,
-            event_type="updated",
-            session_key=updated.session_key,
-            session_id=updated.session_id,
-            epoch=updated.session_epoch,
-            state_revision=updated.state_revision,
-            progress_revision=updated.progress_revision,
-        )
-        snapshot = await self.snapshot(updated)
+        async with self._lock(session_key):
+            updated = await self._storage.get_goal(session_key)
+            if (
+                updated is None
+                or updated.goal_id != context.goal_id
+                or updated.session_id != context.session_id
+                or updated.session_epoch != context.epoch
+                or updated.objective_revision != context.objective_revision
+                or updated.active_task_id != context.task_id
+            ):
+                raise GoalConflictError("STALE_GOAL", "The task no longer owns this Goal")
+            if publish:
+                await self._emit_goal(
+                    updated,
+                    event_type="updated",
+                    session_key=updated.session_key,
+                    session_id=updated.session_id,
+                    epoch=updated.session_epoch,
+                    state_revision=updated.state_revision,
+                    progress_revision=updated.progress_revision,
+                )
+            snapshot = await self.snapshot(updated, include_runtime_defer=False)
         assert snapshot is not None
         return snapshot
 
