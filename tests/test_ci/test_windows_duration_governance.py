@@ -40,16 +40,20 @@ def _write_run(
     image_versions: dict[str, str] | None = None,
     duplicate_core_node_in: str | None = None,
     partitioned: bool = False,
+    previous_layout: bool = False,
 ) -> Path:
     run_dir = root / f"run-{run_id}"
     shard_names = DURATION_MODULE["WINDOWS_SHARD_NAMES"] if partitioned else SHARD_NAMES
+    if previous_layout:
+        shard_names = DURATION_MODULE["PREVIOUS_WINDOWS_SHARD_NAMES"]
     for shard in shard_names:
         family = shard.rsplit("-", 1)[0] if partitioned else shard
         attempt = (attempts or {}).get(shard, 1)
         shard_dir = run_dir / f"windows-high-risk-{shard}-attempt-{attempt}"
         shard_dir.mkdir(parents=True)
         base_path = FILES_BY_SHARD[family]
-        path = base_path.replace(".py", "_second.py") if shard.endswith("-2") else base_path
+        index = shard.rsplit("-", 1)[-1] if partitioned else "1"
+        path = base_path.replace(".py", f"_{index}.py") if index != "1" else base_path
         metadata = {
             "schema_version": 1,
             "platform": "windows",
@@ -75,6 +79,8 @@ def _write_run(
         }
         if partitioned:
             metadata["partition_sha256"] = "e" * 64
+            if not previous_layout:
+                metadata["partition_counts"] = DURATION_MODULE["SHARD_PARTITION_COUNTS"]
         (shard_dir / "windows-shard-metadata.json").write_text(
             json.dumps(metadata), encoding="utf-8"
         )
@@ -282,19 +288,19 @@ def _partitioned_observations(tmp_path: Path) -> list[Any]:
     ]
 
 
-def test_duration_builder_requires_all_eight_execution_shards(tmp_path: Path) -> None:
+def test_duration_builder_requires_all_ten_execution_shards(tmp_path: Path) -> None:
     observations = _partitioned_observations(tmp_path)
     payload = build_duration_payload(
         observations, expected_assignment_sha256="b" * 64,
         expected_partition_sha256="e" * 64,
     )
-    assert len(payload["weights_seconds"]) == 8
+    assert len(payload["weights_seconds"]) == 10
     assert all(value == {"parallel": 2.0, "serial": 0.0}
                for value in payload["phase_weights_seconds"].values())
-    assert len(payload["source_runs"][0]["execution"]) == 8
+    assert len(payload["source_runs"][0]["execution"]) == 10
     metadata_path = next((tmp_path / "run-500").rglob("windows-shard-metadata.json"))
     metadata_path.unlink()
-    with pytest.raises(ValueError, match="expected 8 Windows shard metadata"):
+    with pytest.raises(ValueError, match="expected 10 Windows shard metadata"):
         load_run_directory(tmp_path / "run-500")
 
 
@@ -306,6 +312,56 @@ def test_duration_builder_rejects_worker_count_drift(tmp_path: Path) -> None:
             observations, expected_assignment_sha256="b" * 64,
             expected_partition_sha256="e" * 64,
         )
+
+
+def test_duration_builder_preserves_old_eight_shard_observations(tmp_path: Path) -> None:
+    observations = [
+        load_run_directory(_write_run(
+            tmp_path, run_id=600 + index, sha="a" * 40, assignment_sha256="b" * 64,
+            seconds={path: float(index + 1) for path in FILES_BY_SHARD.values()},
+            partitioned=True, previous_layout=True,
+        ))
+        for index in range(3)
+    ]
+    payload = build_duration_payload(
+        observations, expected_assignment_sha256="b" * 64,
+        expected_partition_sha256="e" * 64,
+    )
+    assert len(payload["weights_seconds"]) == 8
+    assert len(payload["source_runs"][0]["execution"]) == 8
+    observations[2] = _partitioned_observations(tmp_path)[0]
+    with pytest.raises(ValueError, match="execution configuration differs"):
+        build_duration_payload(
+            observations, expected_assignment_sha256="b" * 64,
+            expected_partition_sha256="e" * 64,
+        )
+
+
+def test_duration_builder_cannot_mistake_incomplete_ten_shards_for_old_eight(
+    tmp_path: Path,
+) -> None:
+    _partitioned_observations(tmp_path)
+    run = tmp_path / "run-500"
+    for index in (3, 4):
+        (run / f"windows-high-risk-gateway-sqlite-{index}-attempt-1"
+         / "windows-shard-metadata.json").unlink()
+    with pytest.raises(ValueError, match="expected 10 Windows shard metadata"):
+        load_run_directory(run)
+
+
+def test_phase_partition_allocator_balances_serial_and_indivisible_parallel_files() -> None:
+    allocate = DURATION_MODULE["allocate_family_partitions"]
+    estimate = DURATION_MODULE["partition_phase_estimate"]
+    weights = {
+        **{f"serial-{index}": {"parallel": 0.0, "serial": 20.0} for index in range(4)},
+        **{f"parallel-{index}": {"parallel": 60.0, "serial": 0.0} for index in range(12)},
+    }
+    files = list(weights)
+    partitions = allocate(files, weights, workers=3, count=4)
+    assert allocate(list(reversed(files)), weights, workers=3, count=4) == partitions
+    assert len(partitions) == 4
+    assert sorted(path for paths in partitions for path in paths) == sorted(files)
+    assert [estimate(paths, weights, workers=3)[0] for paths in partitions] == [80.0] * 4
 
 
 def test_duration_builder_rejects_stale_partition_evidence(tmp_path: Path) -> None:

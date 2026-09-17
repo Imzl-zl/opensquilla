@@ -1586,6 +1586,8 @@ jobs:
     # Every matrix cell gets a fresh hosted runner.  Keep ownership and the
     # heavier workbench cell separate on both Windows and macOS so process,
     # native-focus, and local-socket state cannot leak across those domains.
+    # Windows profile data and lifecycle flows also use separate runners;
+    # each runner executes its Electron cases sequentially.
     name: Desktop recovery E2E (${{ matrix.os }}, ${{ matrix.shard }})
     needs: [plan-ci, frontend-artifact]
     if: ${{ !cancelled() && needs.plan-ci.result == 'success' && needs.frontend-artifact.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'desktop-recovery-e2e') }}
@@ -1693,14 +1695,14 @@ jobs:
           key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('desktop/electron/package-lock.json') }}
 
       - name: Install WebUI recovery dependencies
-        if: ${{ ((runner.os == 'Windows' || runner.os == 'macOS') && matrix.shard == 'profiles') || (runner.os == 'Windows' && (matrix.shard == 'ownership' || matrix.shard == 'ownership-workbench' || matrix.shard == 'all')) }}
+        if: ${{ (runner.os == 'macOS' && matrix.shard == 'profiles') || (runner.os == 'Windows' && (matrix.shard == 'profiles-lifecycle' || matrix.shard == 'ownership' || matrix.shard == 'ownership-workbench' || matrix.shard == 'all')) }}
         working-directory: opensquilla-webui
         shell: bash
         run: npm ci
 
       - name: Resolve Playwright browser revision
         id: playwright-browser
-        if: ${{ (runner.os == 'Windows' || runner.os == 'macOS') && matrix.shard == 'profiles' }}
+        if: ${{ (runner.os == 'macOS' && matrix.shard == 'profiles') || (runner.os == 'Windows' && matrix.shard == 'profiles-lifecycle') }}
         shell: bash
         run: |
           revision="$(node -e "const b=require('./opensquilla-webui/node_modules/playwright-core/browsers.json').browsers.find((item)=>item.name==='chromium'); if(!b)process.exit(2); process.stdout.write(b.revision)")"
@@ -1708,14 +1710,14 @@ jobs:
 
       - name: Restore Playwright browser
         id: playwright-cache
-        if: ${{ (runner.os == 'Windows' || runner.os == 'macOS') && matrix.shard == 'profiles' }}
+        if: ${{ (runner.os == 'macOS' && matrix.shard == 'profiles') || (runner.os == 'Windows' && matrix.shard == 'profiles-lifecycle') }}
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
           key: playwright-chromium-${{ runner.os }}-${{ runner.arch }}-${{ steps.playwright-browser.outputs.revision }}
 
       - name: Install WebUI recovery browser
-        if: ${{ (runner.os == 'Windows' || runner.os == 'macOS') && matrix.shard == 'profiles' }}
+        if: ${{ (runner.os == 'macOS' && matrix.shard == 'profiles') || (runner.os == 'Windows' && matrix.shard == 'profiles-lifecycle') }}
         working-directory: opensquilla-webui
         shell: bash
         run: |
@@ -1726,7 +1728,7 @@ jobs:
           fi
 
       - name: Run cross-platform production-dist browser session hang contract
-        if: ${{ (runner.os == 'Windows' || runner.os == 'macOS') && matrix.shard == 'profiles' }}
+        if: ${{ (runner.os == 'macOS' && matrix.shard == 'profiles') || (runner.os == 'Windows' && matrix.shard == 'profiles-lifecycle') }}
         working-directory: opensquilla-webui
         shell: bash
         env:
@@ -1754,7 +1756,7 @@ jobs:
           fi
 
       - name: Seed Playwright browser cache from nightly main
-        if: ${{ github.event_name == 'schedule' && (runner.os == 'Windows' || runner.os == 'macOS') && matrix.shard == 'profiles' && steps.playwright-cache.outputs.cache-hit != 'true' }}
+        if: ${{ github.event_name == 'schedule' && ((runner.os == 'macOS' && matrix.shard == 'profiles') || (runner.os == 'Windows' && matrix.shard == 'profiles-lifecycle')) && steps.playwright-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
@@ -2060,6 +2062,19 @@ jobs:
                 'profile-consolidation-flow:scripts/test-profile-consolidation-flow.mjs'
                 'primary-repair-accessibility:scripts/test-primary-repair-accessibility.mjs'
                 'profile-import-flow:scripts/test-profile-import-flow.mjs'
+                'desktop-cleanup-flow:scripts/test-desktop-cleanup-flow.mjs'
+              )
+              ;;
+            profiles-data)
+              entries=(
+                'profile-import-flow:scripts/test-profile-import-flow.mjs'
+                'profile-consolidation-flow:scripts/test-profile-consolidation-flow.mjs'
+              )
+              ;;
+            profiles-lifecycle)
+              entries=(
+                'onboarding-flow:scripts/test-onboarding-flow.mjs'
+                'primary-repair-accessibility:scripts/test-primary-repair-accessibility.mjs'
                 'desktop-cleanup-flow:scripts/test-desktop-cleanup-flow.mjs'
               )
               ;;

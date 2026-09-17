@@ -36,8 +36,16 @@ SHARD_NAMES: Final[tuple[str, ...]] = (
     "recovery-migration",
     "desktop-installer-contracts",
 )
+SHARD_PARTITION_COUNTS: Final[dict[str, int]] = {
+    "core": 2,
+    "gateway-sqlite": 4,
+    "recovery-migration": 2,
+    "desktop-installer-contracts": 2,
+}
 WINDOWS_SHARD_NAMES: Final[tuple[str, ...]] = tuple(
-    f"{family}-{partition}" for family in SHARD_NAMES for partition in (1, 2)
+    f"{family}-{partition}"
+    for family in SHARD_NAMES
+    for partition in range(1, SHARD_PARTITION_COUNTS[family] + 1)
 )
 DEFAULT_PARALLEL_WORKERS: Final[int] = 4
 _CORE_WHEEL_FIXTURE: Final[str] = "isolated_core_wheel"
@@ -440,6 +448,13 @@ def validate_partition_payload(payload: object) -> dict[str, str]:
 
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
         raise ValueError("unsupported Windows test partition schema")
+    counts = payload.get("partition_counts")
+    if (
+        counts != SHARD_PARTITION_COUNTS
+        or not isinstance(counts, dict)
+        or any(type(count) is not int for count in counts.values())
+    ):
+        raise ValueError("partition_counts must match the Windows execution layout")
     partitions = payload.get("partitions")
     if not isinstance(partitions, dict) or set(partitions) != set(WINDOWS_SHARD_NAMES):
         raise ValueError("partitions must contain every Windows execution shard exactly once")
@@ -494,7 +509,11 @@ def windows_shard_for_test(path: str) -> str:
     if assignment is not None:
         return assignment
     family = shard_for_test(normalized)
-    partition = int(hashlib.sha256(normalized.encode("utf-8")).hexdigest(), 16) % 2 + 1
+    partition = (
+        int(hashlib.sha256(normalized.encode("utf-8")).hexdigest(), 16)
+        % SHARD_PARTITION_COUNTS[family]
+        + 1
+    )
     return f"{family}-{partition}"
 
 
@@ -625,6 +644,7 @@ def _write_run_metadata(
     }
     if shard in WINDOWS_SHARD_NAMES:
         payload["family"] = shard_family(shard)
+        payload["partition_counts"] = SHARD_PARTITION_COUNTS
         payload["partition_sha256"] = partition_snapshot_fingerprint()
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 

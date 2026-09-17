@@ -608,6 +608,10 @@ def test_validate_candidate_rejects_non_green_or_mismatched_runs(tmp_path: Path)
         ("execution-digest", "execution digest"),
         ("platform-matrix", "platform matrix"),
         ("legacy-windows-matrix", "platform matrix"),
+        ("previous-eight-windows-matrix", "platform matrix"),
+        ("legacy-windows-profiles", "platform matrix"),
+        ("missing-gateway-partition", "platform matrix"),
+        ("missing-profile-partition", "platform matrix"),
         ("missing-contract-comparison", "platform matrix"),
     ),
 )
@@ -644,20 +648,39 @@ def test_validate_candidate_rejects_independent_evidence_contract_mismatches(
     elif mismatch == "platform-matrix":
         assert tampered["platform_matrix"]
         tampered["platform_matrix"] = tampered["platform_matrix"][:-1]
-    elif mismatch == "legacy-windows-matrix":
+    elif mismatch in {"legacy-windows-matrix", "previous-eight-windows-matrix"}:
         cells = [
             cell for cell in tampered["platform_matrix"]
             if cell["suite"] != "windows-high-risk"
         ]
+        names = ["core", "gateway-sqlite", "recovery-migration", "desktop-installer-contracts"]
+        if mismatch == "previous-eight-windows-matrix":
+            names = [f"{family}-{partition}" for family in names for partition in (1, 2)]
         cells.extend(
             {"suite": "windows-high-risk", "os": "windows-latest", "shard": family}
-            for family in (
-                "core", "gateway-sqlite", "recovery-migration", "desktop-installer-contracts"
-            )
+            for family in names
         )
         tampered["platform_matrix"] = sorted(
             cells, key=lambda cell: (cell["suite"], cell["os"], cell["shard"])
         )
+    elif mismatch == "legacy-windows-profiles":
+        cells = [cell for cell in tampered["platform_matrix"] if not (
+            cell["suite"] == "desktop-recovery-e2e" and cell["os"] == "windows-latest"
+            and cell["shard"] in {"profiles-data", "profiles-lifecycle"}
+        )]
+        cells.append({"suite": "desktop-recovery-e2e", "os": "windows-latest", "shard": "profiles"})
+        tampered["platform_matrix"] = sorted(
+            cells, key=lambda cell: (cell["suite"], cell["os"], cell["shard"])
+        )
+    elif mismatch in {"missing-gateway-partition", "missing-profile-partition"}:
+        suite, shard = (
+            ("windows-high-risk", "gateway-sqlite-4")
+            if mismatch == "missing-gateway-partition"
+            else ("desktop-recovery-e2e", "profiles-lifecycle")
+        )
+        tampered["platform_matrix"] = [cell for cell in tampered["platform_matrix"] if not (
+            cell["suite"] == suite and cell["os"] == "windows-latest" and cell["shard"] == shard
+        )]
     elif mismatch == "missing-contract-comparison":
         tampered["platform_matrix"] = [
             cell for cell in tampered["platform_matrix"]

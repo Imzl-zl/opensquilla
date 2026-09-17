@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import math
 import runpy
@@ -21,8 +22,19 @@ SHARD_NAMES: Final[tuple[str, ...]] = (
     "recovery-migration",
     "desktop-installer-contracts",
 )
-WINDOWS_SHARD_NAMES: Final[tuple[str, ...]] = tuple(
+PREVIOUS_WINDOWS_SHARD_NAMES: Final[tuple[str, ...]] = tuple(
     f"{family}-{partition}" for family in SHARD_NAMES for partition in (1, 2)
+)
+SHARD_PARTITION_COUNTS: Final[dict[str, int]] = {
+    "core": 2,
+    "gateway-sqlite": 4,
+    "recovery-migration": 2,
+    "desktop-installer-contracts": 2,
+}
+WINDOWS_SHARD_NAMES: Final[tuple[str, ...]] = tuple(
+    f"{family}-{partition}"
+    for family in SHARD_NAMES
+    for partition in range(1, SHARD_PARTITION_COUNTS[family] + 1)
 )
 METADATA_NAME: Final[str] = "windows-shard-metadata.json"
 JUNIT_NAME: Final[str] = "junit.xml"
@@ -144,11 +156,33 @@ def load_run_directory(run_dir: Path) -> RunObservation:
 
     metadata_paths = sorted(run_dir.rglob(METADATA_NAME))
     payloads = [_load_json(path) for path in metadata_paths]
+    declared_counts = [
+        payload.get("partition_counts")
+        for payload in payloads
+        if isinstance(payload, dict)
+    ]
+    declared_current = any(counts is not None for counts in declared_counts)
+    if declared_current and any(
+        counts != SHARD_PARTITION_COUNTS
+        or not isinstance(counts, dict)
+        or any(type(count) is not int for count in counts.values())
+        for counts in declared_counts
+    ):
+        raise ValueError("inconsistent or invalid Windows execution partition counts")
     physical = any(
         isinstance(payload, dict) and payload.get("shard") in WINDOWS_SHARD_NAMES
         for payload in payloads
     )
-    shard_names = WINDOWS_SHARD_NAMES if physical else SHARD_NAMES
+    if declared_current:
+        shard_names = WINDOWS_SHARD_NAMES
+    elif any(
+        isinstance(payload, dict)
+        and payload.get("shard") in set(WINDOWS_SHARD_NAMES) - set(PREVIOUS_WINDOWS_SHARD_NAMES)
+        for payload in payloads
+    ):
+        raise ValueError("current Windows execution metadata must declare partition_counts")
+    else:
+        shard_names = PREVIOUS_WINDOWS_SHARD_NAMES if physical else SHARD_NAMES
     if len(metadata_paths) != len(shard_names):
         raise ValueError(
             f"expected {len(shard_names)} Windows shard metadata files in {run_dir}, "
@@ -328,6 +362,57 @@ def _percentile(values: list[float], fraction: float) -> float:
     if low == high:
         return ordered[low]
     return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
+
+def partition_phase_estimate(
+    files: list[str], phase_weights: dict[str, dict[str, float]], *, workers: int
+) -> tuple[float, float]:
+    """Estimate loadfile worker time plus the separate serial phase."""
+
+    if type(workers) is not int or workers < 1:
+        raise ValueError("workers must be a positive integer")
+    loads = [0.0] * workers
+    parallel = serial = 0.0
+    for path in sorted(files, key=lambda path: (-phase_weights[path]["parallel"], path)):
+        row = phase_weights[path]
+        if any(not math.isfinite(row[phase]) or row[phase] < 0 for phase in ("parallel", "serial")):
+            raise ValueError(f"invalid phase weights for {path}")
+        parallel += row["parallel"]
+        serial += row["serial"]
+        heapq.heappush(loads, heapq.heappop(loads) + row["parallel"])
+    return max(loads) + serial, parallel / workers + serial
+
+
+def allocate_family_partitions(
+    files: list[str], phase_weights: dict[str, dict[str, float]], *, workers: int, count: int
+) -> tuple[list[str], ...]:
+    """Propose fixed whole-file partitions; applying the proposal remains explicit."""
+
+    if type(count) is not int or count < 1 or len(files) != len(set(files)):
+        raise ValueError("partition count must be positive and input files must be unique")
+    partitions: tuple[list[str], ...] = tuple([] for _ in range(count))
+    ordered = sorted(
+        files,
+        key=lambda path: (-(phase_weights[path]["parallel"] + phase_weights[path]["serial"]), path),
+    )
+    for path in ordered:
+        def score(candidate: int) -> tuple[float, float, float, int, int]:
+            estimates = [
+                partition_phase_estimate(
+                    paths + ([path] if index == candidate else []), phase_weights, workers=workers
+                )
+                for index, paths in enumerate(partitions)
+            ]
+            return (
+                max(estimate[0] for estimate in estimates),
+                max(estimate[1] for estimate in estimates),
+                estimates[candidate][0],
+                len(partitions[candidate]),
+                candidate,
+            )
+
+        partitions[min(range(count), key=score)].append(path)
+    return tuple(sorted(paths) for paths in partitions)
 
 
 def build_duration_payload(

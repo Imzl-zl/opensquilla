@@ -301,6 +301,20 @@ def test_partial_gate_rejects_omitted_windows_acceptance() -> None:
     assert any("partition" in error for error in check_ci_results(env))
 
 
+@pytest.mark.parametrize("suite,variable", [
+    ("windows-high-risk", "RESULT_WINDOWS_FULL"),
+    ("desktop-recovery-e2e", "RESULT_DESKTOP_RECOVERY_E2E"),
+])
+@pytest.mark.parametrize("result", ["skipped", "failure", "cancelled", ""])
+def test_partitioned_suites_require_successful_matrix_aggregate(
+    suite: str, variable: str, result: str,
+) -> None:
+    env = _env_for(BASELINE_SUITES | {suite})
+    assert check_ci_results(env) == []
+    env[variable] = result
+    assert check_ci_results(env)
+
+
 @pytest.mark.parametrize("result", ["skipped", "failure", "cancelled", ""])
 def test_frontend_requires_complete_verification_profile(result: str) -> None:
     env = _env_for(BASELINE_SUITES | {"frontend-validation"})

@@ -283,19 +283,19 @@ def test_test_only_change_selects_one_physical_windows_partition(
     }
 
 
-def test_windows_family_request_expands_only_its_two_physical_cells(
-    suite_config: dict[str, Any]
+@pytest.mark.parametrize("family,count", [("gateway-sqlite", 4), ("core", 2)])
+def test_windows_family_request_expands_only_its_physical_cells(
+    suite_config: dict[str, Any], family: str, count: int,
 ) -> None:
     python, platforms = MODULE["_execution_matrices"](
-        ["windows-high-risk"], set(), {"gateway-sqlite"}, False, suite_config
+        ["windows-high-risk"], set(), {family}, False, suite_config
     )
 
-    assert python == {
-        "ubuntu": [], "windows": ["gateway-sqlite-1", "gateway-sqlite-2"]
-    }
+    expected = [f"{family}-{partition}" for partition in range(1, count + 1)]
+    assert python == {"ubuntu": [], "windows": expected}
     assert platforms == [
         {"suite": "windows-high-risk", "os": "windows-latest", "shard": shard}
-        for shard in ("gateway-sqlite-1", "gateway-sqlite-2")
+        for shard in expected
     ]
 
 
@@ -316,7 +316,12 @@ def test_windows_partition_contract_rejects_incomplete_or_ambiguous_ownership(
         partitions["gateway-sqlite-1"] = []
         partitions["core-1"] = [path]
     snapshot = tmp_path / "partitions.json"
-    snapshot.write_text(json.dumps({"schema_version": 1, "partitions": partitions}))
+    snapshot.write_text(json.dumps({
+        "schema_version": 1,
+        "partition_counts": {"core": 2, "gateway-sqlite": 4,
+                             "recovery-migration": 2, "desktop-installer-contracts": 2},
+        "partitions": partitions,
+    }))
 
     with pytest.raises(PlanError):
         MODULE["_load_windows_test_partitions"](
@@ -781,6 +786,9 @@ def test_python_native_risk_domains_select_only_corresponding_desktop_group(
     assert {cell[1] for cell in _matrix(plan) if cell[0] == "ubuntu-latest"} == {group}
     if group == "profiles":
         assert "webui-chat-recovery" in plan["required_suites"]
+        assert {shard for os_name, shard in _matrix(plan) if os_name == "windows-latest"} == {
+            "profiles-data", "profiles-lifecycle"
+        }
     else:
         assert "webui-chat-recovery" not in plan["required_suites"]
 
@@ -904,11 +912,12 @@ def test_desktop_domain_selects_only_its_windows_shard(
     plan = _plan(tmp_path, suite_config, path)
 
     assert plan["full_fallback"] is False
-    assert _matrix(plan) == {
-        ("macos-latest", windows_shard),
-        ("ubuntu-latest", windows_shard),
-        ("windows-latest", windows_shard),
-    }
+    expected = {("macos-latest", windows_shard), ("ubuntu-latest", windows_shard)}
+    if windows_shard == "profiles":
+        expected.add(("windows-latest", "profiles-data"))
+    else:
+        expected.add(("windows-latest", windows_shard))
+    assert _matrix(plan) == expected
     assert reason in plan["reason_codes"]
 
 
@@ -2037,3 +2046,35 @@ def test_config_accepts_repository_wide_recursive_wildcard(
     loaded = load_config(path, repo=Path.cwd())
 
     assert loaded["suites"]["python-full"]["execution_inputs"] == ["**"]
+
+
+@pytest.mark.parametrize("path,physical", [
+    ("desktop/electron/scripts/test-profile-import-flow.mjs", "profiles-data"),
+    ("desktop/electron/scripts/test-profile-consolidation-flow.mjs", "profiles-data"),
+    ("desktop/electron/scripts/test-onboarding-flow.mjs", "profiles-lifecycle"),
+    ("desktop/electron/scripts/test-primary-repair-accessibility.mjs", "profiles-lifecycle"),
+    ("desktop/electron/scripts/test-desktop-cleanup-flow.mjs", "profiles-lifecycle"),
+    ("opensquilla-webui/e2e/history-hydration.spec.ts", "profiles-lifecycle"),
+])
+def test_profile_case_changes_select_exact_windows_partition_and_macos_family(
+    tmp_path: Path, suite_config: dict[str, Any], path: str, physical: str,
+) -> None:
+    plan = _plan(tmp_path, suite_config, path)
+    assert _matrix(plan) == {
+        ("windows-latest", physical), ("macos-latest", "profiles"),
+        ("ubuntu-latest", "profiles"),
+    }
+
+
+def test_full_matrix_contains_all_gateway_and_profile_partitions(
+    tmp_path: Path, suite_config: dict[str, Any],
+) -> None:
+    plan = _plan(tmp_path, suite_config, ".ci/run-all")
+    assert len(plan["python_matrix"]["ubuntu"]) == 4
+    assert len(plan["python_matrix"]["windows"]) == 10
+    assert _platform_cells(plan, "desktop-recovery-e2e") == {
+        (cell["os"], cell["shard"]) for cell in suite_config["full_desktop_matrix"]
+    }
+    assert {shard for os_name, shard in _matrix(plan) if os_name == "windows-latest"} == {
+        "profiles-data", "profiles-lifecycle", "ownership", "workbench",
+    }

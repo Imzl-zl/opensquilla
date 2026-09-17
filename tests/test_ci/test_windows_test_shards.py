@@ -22,6 +22,7 @@ SHARD_MODULE: dict[str, Any] = runpy.run_path(
 )
 SHARD_NAMES: tuple[str, ...] = SHARD_MODULE["SHARD_NAMES"]
 WINDOWS_SHARD_NAMES: tuple[str, ...] = SHARD_MODULE["WINDOWS_SHARD_NAMES"]
+SHARD_PARTITION_COUNTS: dict[str, int] = SHARD_MODULE["SHARD_PARTITION_COUNTS"]
 discover_test_files = SHARD_MODULE["discover_test_files"]
 files_for_shard = SHARD_MODULE["files_for_shard"]
 historical_test_weights = SHARD_MODULE["historical_test_weights"]
@@ -817,14 +818,16 @@ def test_windows_execution_partitions_cover_every_file_once_within_its_family() 
     physical_files = {
         shard: set(validated_files_for_shard(root, shard)) for shard in WINDOWS_SHARD_NAMES
     }
-    assert len(physical_files) == 8
+    assert len(physical_files) == 10
     assert all(physical_files.values())
     assert set().union(*physical_files.values()) == discovered
     assert sum(map(len, physical_files.values())) == len(discovered)
     for family in SHARD_NAMES:
-        assert physical_files[f"{family}-1"] | physical_files[f"{family}-2"] == set(
-            files_for_shard(root, family)
-        )
+        family_partitions = [
+            physical_files[f"{family}-{partition}"]
+            for partition in range(1, SHARD_PARTITION_COUNTS[family] + 1)
+        ]
+        assert set().union(*family_partitions) == set(files_for_shard(root, family))
     for path, physical in assignments.items():
         assert shard_family(physical) == shard_for_test(path)
         assert windows_shard_for_test(path) == physical
@@ -861,6 +864,14 @@ def test_windows_new_file_fallback_is_stable_and_keeps_environment_family() -> N
         assert shard_family(shard) == shard_for_test(path)
 
 
+def test_new_gateway_files_can_use_all_four_execution_partitions() -> None:
+    paths = [f"tests/test_gateway/test_future_partition_{index}.py" for index in range(100)]
+    assert not set(paths).intersection(partition_assignments())
+    assert {windows_shard_for_test(path) for path in paths} == {
+        f"gateway-sqlite-{index}" for index in range(1, 5)
+    }
+
+
 @pytest.mark.parametrize(
     ("case", "message"),
     [
@@ -885,7 +896,21 @@ def test_windows_partition_snapshot_rejects_invalid_coverage(case: str, message:
     elif case == "unsorted":
         partitions["core-1"] = ["tests/test_partition_z.py", "tests/test_partition_a.py"]
     with pytest.raises(ValueError, match=message):
-        validate_partition_payload({"schema_version": 1, "partitions": partitions})
+        validate_partition_payload({
+            "schema_version": 1,
+            "partition_counts": SHARD_PARTITION_COUNTS,
+            "partitions": partitions,
+        })
+
+
+@pytest.mark.parametrize("counts", [None, {**SHARD_PARTITION_COUNTS, "gateway-sqlite": 2}])
+def test_windows_partition_snapshot_rejects_old_execution_layout(counts: object) -> None:
+    with pytest.raises(ValueError, match="partition_counts"):
+        validate_partition_payload({
+            "schema_version": 1,
+            "partition_counts": counts,
+            "partitions": {shard: [] for shard in WINDOWS_SHARD_NAMES},
+        })
 
 
 def test_windows_physical_metadata_binds_both_family_and_partition_snapshots(
@@ -897,6 +922,7 @@ def test_windows_physical_metadata_binds_both_family_and_partition_snapshots(
     physical = json.loads(path.read_text(encoding="utf-8"))
     assert physical["shard"] == "gateway-sqlite-2"
     assert physical["family"] == "gateway-sqlite"
+    assert physical["partition_counts"] == SHARD_PARTITION_COUNTS
     assert physical["partition_sha256"] == partition_snapshot_fingerprint()
     assert physical["assignment_sha256"] == assignment_snapshot_fingerprint()
     assert physical["execution"]["parallel"]["workers"] == 3
@@ -905,6 +931,7 @@ def test_windows_physical_metadata_binds_both_family_and_partition_snapshots(
     family = json.loads(path.read_text(encoding="utf-8"))
     assert family["assignment_sha256"] == physical["assignment_sha256"]
     assert "partition_sha256" not in family
+    assert "partition_counts" not in family
     assert "family" not in family
 
 

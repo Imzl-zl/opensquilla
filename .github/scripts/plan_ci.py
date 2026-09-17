@@ -613,6 +613,14 @@ def _load_windows_test_partitions(
     partitions = value.get("partitions")
     if not isinstance(partitions, dict) or set(partitions) != allowed_shards:
         raise PlanError("Windows test partitions must define every physical shard exactly once")
+    counts = value.get("partition_counts")
+    expected_counts = _windows_partition_counts(allowed_shards)
+    if (
+        not isinstance(counts, dict)
+        or any(type(count) is not int for count in counts.values())
+        or counts != expected_counts
+    ):
+        raise PlanError("Windows partition counts do not match the configured execution matrix")
     physical: dict[str, str] = {}
     for shard, raw_paths in partitions.items():
         paths = _require_string_list(raw_paths, f"Windows partition {shard!r}")
@@ -637,9 +645,25 @@ def _load_windows_test_partitions(
             physical[test_path] = str(shard)
     return {
         test_path: physical.get(test_path)
-        or f"{family}-{int(hashlib.sha256(test_path.encode('utf-8')).hexdigest(), 16) % 2 + 1}"
+        or (
+            f"{family}-"
+            f"{int(hashlib.sha256(test_path.encode('utf-8')).hexdigest(), 16) % counts[family] + 1}"
+        )
         for test_path, family in assignments.items()
     }
+
+
+def _windows_partition_counts(shards: Iterable[str]) -> dict[str, int]:
+    partitions: dict[str, set[int]] = {}
+    for shard in shards:
+        family, separator, suffix = shard.rpartition("-")
+        if not separator or not suffix.isdigit() or str(int(suffix)) != suffix:
+            raise PlanError(f"invalid physical Windows shard: {shard}")
+        partitions.setdefault(family, set()).add(int(suffix))
+    counts = {family: len(indices) for family, indices in partitions.items()}
+    if any(indices != set(range(1, counts[family] + 1)) for family, indices in partitions.items()):
+        raise PlanError("Windows partition numbers must start at one without gaps")
+    return counts
 
 
 def load_config(path: Path, *, repo: Path | None = None) -> dict[str, Any]:
@@ -700,13 +724,9 @@ def load_config(path: Path, *, repo: Path | None = None) -> dict[str, Any]:
         if not shards:
             raise PlanError(f"full_python_matrix {platform_name} must not be empty")
 
-    expected_windows = {
-        f"{family}-{partition}"
-        for family in python_matrix["ubuntu"]
-        for partition in (1, 2)
-    }
-    if set(python_matrix["windows"]) != expected_windows:
-        raise PlanError("Windows matrix must define two physical shards per Python family")
+    counts = _windows_partition_counts(python_matrix["windows"])
+    if set(counts) != set(python_matrix["ubuntu"]):
+        raise PlanError("Windows matrix must partition every Python family")
 
     assignments_path = value.get(_WINDOWS_ASSIGNMENTS_CONFIG_KEY)
     if (
@@ -784,6 +804,19 @@ def load_config(path: Path, *, repo: Path | None = None) -> dict[str, Any]:
             raw_group.get("path_patterns"),
             f"desktop group {group!r} path_patterns",
         )
+    profile_partitions = groups["profiles"].get("windows_partitions")
+    if not isinstance(profile_partitions, dict) or set(profile_partitions) != {
+        "profiles-data", "profiles-lifecycle"
+    }:
+        raise PlanError("Windows profiles must define data and lifecycle partitions")
+    for shard, patterns in profile_partitions.items():
+        _require_string_list(patterns, f"Windows profile partition {shard!r}")
+    expected_desktop_windows = {
+        ("windows-latest", shard)
+        for shard in (*profile_partitions, "ownership", "workbench")
+    }
+    if {cell for cell in seen_cells if cell[0] == "windows-latest"} != expected_desktop_windows:
+        raise PlanError("Windows desktop matrix must include every configured physical group")
     if repo is not None:
         _validate_execution_input_patterns(value, repo.resolve())
     return value
@@ -956,7 +989,7 @@ def _desktop_groups(path: str, config: Mapping[str, Any]) -> set[str]:
 
 
 def _desktop_cells(
-    *, groups: set[str], os_scope: set[str], config: Mapping[str, Any]
+    *, groups: set[str], os_scope: set[str], config: Mapping[str, Any], path: str | None = None
 ) -> set[tuple[str, str]]:
     if not groups:
         return {
@@ -972,7 +1005,17 @@ def _desktop_cells(
     if "macos-latest" in platforms:
         cells.update(("macos-latest", group) for group in selected_groups)
     if "windows-latest" in platforms:
-        cells.update(("windows-latest", group) for group in selected_groups)
+        for group in selected_groups:
+            if group != "profiles":
+                cells.add(("windows-latest", group))
+                continue
+            partitions = config["desktop_groups"]["profiles"]["windows_partitions"]
+            selected = {
+                shard for shard, patterns in partitions.items()
+                if path is not None
+                and any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+            }
+            cells.update(("windows-latest", shard) for shard in (selected or set(partitions)))
     return cells
 
 
@@ -1606,7 +1649,10 @@ def _execution_matrices(
         if shard in config["full_python_matrix"]["windows"]:
             physical_windows_shards.add(shard)
         elif shard in config["full_python_matrix"]["ubuntu"]:
-            physical_windows_shards.update(f"{shard}-{partition}" for partition in (1, 2))
+            physical_windows_shards.update(
+                cell for cell in config["full_python_matrix"]["windows"]
+                if cell.rsplit("-", 1)[0] == shard
+            )
         else:
             raise PlanError(f"unknown Windows execution shard: {shard}")
     python_matrix = {
@@ -1937,6 +1983,7 @@ def plan_changes(
                             groups=groups,
                             os_scope=_os_scope(selected_test_path),
                             config=config,
+                            path=selected_test_path,
                         )
                     )
                     reasons.update(
@@ -1961,7 +2008,7 @@ def plan_changes(
             if groups or "platform/desktop" in path.casefold():
                 suites.update({"desktop-recovery-e2e", "desktop-static"})
                 desktop_cells.update(
-                    _desktop_cells(groups=groups, os_scope=os_scope, config=config)
+                    _desktop_cells(groups=groups, os_scope=os_scope, config=config, path=path)
                 )
                 reasons.update(f"desktop_{group}_changed" for group in groups)
             continue
@@ -1996,7 +2043,7 @@ def plan_changes(
             if not groups or "profiles" in groups:
                 suites.add("webui-chat-recovery")
             desktop_cells.update(
-                _desktop_cells(groups=groups, os_scope=os_scope, config=config)
+                _desktop_cells(groups=groups, os_scope=os_scope, config=config, path=path)
             )
             continue
 
@@ -2039,7 +2086,7 @@ def plan_changes(
                 groups = _desktop_groups(path, config)
                 if groups:
                     desktop_cells.update(
-                        _desktop_cells(groups=groups, os_scope=os_scope, config=config)
+                        _desktop_cells(groups=groups, os_scope=os_scope, config=config, path=path)
                     )
                     suites.update({"desktop-recovery-e2e", "frontend-artifact"})
                     if "profiles" in groups:
@@ -2060,7 +2107,9 @@ def plan_changes(
                         windows_full_matrix = True
                     if not groups:
                         desktop_cells.update(
-                            _desktop_cells(groups=groups, os_scope=os_scope, config=config)
+                            _desktop_cells(
+                                groups=groups, os_scope=os_scope, config=config, path=path
+                            )
                         )
                     if desktop_cells:
                         suites.add("desktop-recovery-e2e")

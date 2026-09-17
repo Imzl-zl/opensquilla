@@ -54,7 +54,11 @@
     },
     {
       "os": "windows-latest",
-      "shard": "profiles"
+      "shard": "profiles-data"
+    },
+    {
+      "os": "windows-latest",
+      "shard": "profiles-lifecycle"
     },
     {
       "os": "windows-latest",
@@ -77,6 +81,8 @@
       "core-2",
       "gateway-sqlite-1",
       "gateway-sqlite-2",
+      "gateway-sqlite-3",
+      "gateway-sqlite-4",
       "recovery-migration-1",
       "recovery-migration-2",
       "desktop-installer-contracts-1",
@@ -101,8 +107,21 @@
         "desktop/electron/scripts/test-onboarding*.mjs",
         "desktop/electron/scripts/test-profile*.mjs",
         "desktop/electron/scripts/test-primary-repair*.mjs",
-        "desktop/electron/scripts/test-desktop-cleanup*.mjs"
-      ]
+        "desktop/electron/scripts/test-desktop-cleanup*.mjs",
+        "opensquilla-webui/e2e/history-hydration.spec.ts"
+      ],
+      "windows_partitions": {
+        "profiles-data": [
+          "desktop/electron/scripts/test-profile-import-flow.mjs",
+          "desktop/electron/scripts/test-profile-consolidation-flow.mjs"
+        ],
+        "profiles-lifecycle": [
+          "desktop/electron/scripts/test-onboarding-flow.mjs",
+          "desktop/electron/scripts/test-primary-repair-accessibility.mjs",
+          "desktop/electron/scripts/test-desktop-cleanup-flow.mjs",
+          "opensquilla-webui/e2e/history-hydration.spec.ts"
+        ]
+      }
     },
     "ownership": {
       "keywords": [
@@ -253,6 +272,8 @@
     },
     "desktop-recovery-e2e": {
       "execution_inputs": [
+        ".github/ci/suites.v1.json",
+        ".github/workflows/ci.yml",
         ".github/scripts/verify-windows-native-write-view.mjs",
         ".github/scripts/native-audit-write-view.py",
         "tests/test_ci/test_windows_signed_update_audit.py",

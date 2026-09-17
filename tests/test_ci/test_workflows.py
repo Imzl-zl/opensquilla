@@ -1876,6 +1876,56 @@ def test_desktop_case_arguments_work_with_nounset(
     assert command == expected
 
 
+def test_windows_profile_partitions_execute_every_case_once_on_separate_runners() -> None:
+    job = _workflow("ci.yml")["jobs"]["desktop-recovery-e2e"]
+    flow = next(step["run"] for step in job["steps"]
+                if step.get("name") == "Run compiled Desktop recovery flows")
+    selector = flow[flow.index('case "${{ matrix.shard }}" in'):]
+    selector = selector.split('for entry in "${entries[@]}"', 1)[0]
+    selected: dict[str, list[str]] = {}
+    for runner_os, shard in (
+        ("macOS", "profiles"),
+        ("Windows", "profiles-data"),
+        ("Windows", "profiles-lifecycle"),
+    ):
+        command = selector.replace("${{ matrix.shard }}", shard)
+        command += '\nprintf "%s\\n" "${entries[@]}"\n'
+        result = subprocess.run(
+            [_bash_executable(), "-euo", "pipefail", "-c", command],
+            env={**os.environ, "RUNNER_OS": runner_os},
+            capture_output=True, text=True, timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        selected[shard] = result.stdout.splitlines()
+    assert selected["profiles-data"] == [
+        "profile-import-flow:scripts/test-profile-import-flow.mjs",
+        "profile-consolidation-flow:scripts/test-profile-consolidation-flow.mjs",
+    ]
+    assert selected["profiles-lifecycle"] == [
+        "onboarding-flow:scripts/test-onboarding-flow.mjs",
+        "primary-repair-accessibility:scripts/test-primary-repair-accessibility.mjs",
+        "desktop-cleanup-flow:scripts/test-desktop-cleanup-flow.mjs",
+    ]
+    partitioned = selected["profiles-data"] + selected["profiles-lifecycle"]
+    assert len(partitioned) == len(set(partitioned)) == len(selected["profiles"]) == 5
+    assert set(partitioned) == set(selected["profiles"])
+    suites = json.loads(Path(".github/ci/suites.v1.json").read_text(encoding="utf-8"))
+    partitions = suites["desktop_groups"]["profiles"]["windows_partitions"]
+    for shard in ("profiles-data", "profiles-lifecycle"):
+        scripts = {"desktop/electron/" + entry.split(":", 1)[1] for entry in selected[shard]}
+        configured = {path for path in partitions[shard]
+                      if path.startswith("desktop/electron/scripts/")}
+        assert configured == scripts
+    browser_contract = "opensquilla-webui/e2e/history-hydration.spec.ts"
+    assert browser_contract in partitions["profiles-lifecycle"]
+    assert browser_contract not in partitions["profiles-data"]
+    assert job["runs-on"] == "${{ matrix.os }}"
+    assert job["strategy"]["fail-fast"] is False
+    assert job["timeout-minutes"] == 45
+    assert 'if run_case "${name}" "${script}" 1; then' in flow
+    assert 'run_case "${name}" "${script}" 1 &' not in flow
+
+
 def test_desktop_recovery_e2e_runs_compiled_flows_on_all_release_platforms() -> None:
     job = _workflow("ci.yml")["jobs"]["desktop-recovery-e2e"]
     steps = job["steps"]
@@ -1932,9 +1982,31 @@ def test_desktop_recovery_e2e_runs_compiled_flows_on_all_release_platforms() -> 
     assert session_recovery["working-directory"] == "opensquilla-webui"
     assert session_recovery["env"]["OPENSQUILLA_PLAYWRIGHT_MANAGE_WEBUI"] == "gateway"
     assert session_recovery["env"]["OPENSQUILLA_WEBUI_BASE_URL"].endswith(":18791")
-    assert session_recovery["if"] == (
-        "${{ (runner.os == 'Windows' || runner.os == 'macOS') && "
-        "matrix.shard == 'profiles' }}"
+    browser_condition = (
+        "${{ (runner.os == 'macOS' && matrix.shard == 'profiles') || "
+        "(runner.os == 'Windows' && matrix.shard == 'profiles-lifecycle') }}"
+    )
+    assert session_recovery["if"] == browser_condition
+    for name in (
+        "Resolve Playwright browser revision", "Restore Playwright browser",
+        "Install WebUI recovery browser",
+    ):
+        assert next(step for step in steps if step.get("name") == name)["if"] == browser_condition
+    webui_install = next(step for step in steps
+                         if step.get("name") == "Install WebUI recovery dependencies")
+    assert webui_install["if"] == (
+        "${{ (runner.os == 'macOS' && matrix.shard == 'profiles') || "
+        "(runner.os == 'Windows' && (matrix.shard == 'profiles-lifecycle' || "
+        "matrix.shard == 'ownership' || matrix.shard == 'ownership-workbench' || "
+        "matrix.shard == 'all')) }}"
+    )
+    browser_seed = next(step for step in steps
+                        if step.get("name") == "Seed Playwright browser cache from nightly main")
+    assert browser_seed["if"] == (
+        "${{ github.event_name == 'schedule' && "
+        "((runner.os == 'macOS' && matrix.shard == 'profiles') || "
+        "(runner.os == 'Windows' && matrix.shard == 'profiles-lifecycle')) && "
+        "steps.playwright-cache.outputs.cache-hit != 'true' }}"
     )
     assert "history-hydration.spec.ts" in session_recovery["run"]
     # Select by a stable contract tag, not the scenario's human-readable title.
@@ -1985,7 +2057,7 @@ def test_desktop_recovery_e2e_runs_compiled_flows_on_all_release_platforms() -> 
     assert "test-profile-consolidation-flow.mjs" in run["run"]
     assert "test-primary-repair-accessibility.mjs" in run["run"]
     assert "test-profile-import-flow.mjs" in run["run"]
-    assert run["run"].count("'onboarding-flow:scripts/test-onboarding-flow.mjs'") == 2
+    assert run["run"].count("'onboarding-flow:scripts/test-onboarding-flow.mjs'") == 3
     assert 'if [[ "${RUNNER_OS}" == "macOS" ]]' in run["run"]
     assert "test-desktop-cleanup-flow.mjs" in run["run"]
     assert "test-desktop-gateway-ownership.mjs" in run["run"]

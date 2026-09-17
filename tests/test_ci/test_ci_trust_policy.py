@@ -222,3 +222,17 @@ def test_policy_digest_rejects_missing_manifest_input(tmp_path: Path) -> None:
 
     with pytest.raises(AttestationError, match="inputs are missing"):
         policy_digest(repo)
+
+
+@pytest.mark.parametrize("path", [
+    ".github/scripts/windows_test_partitions.json", ".github/ci/suites.v1.json",
+])
+def test_partition_layout_changes_invalidate_the_ci_trust_fingerprint(
+    tmp_path: Path, path: str,
+) -> None:
+    repo = _seed_policy_repo(tmp_path)
+    baseline = policy_digest(repo)
+    _write(repo, path, '{"changed_layout": true}\n')
+    _git(repo, "add", path)
+    _git(repo, "commit", "-m", "change physical execution layout")
+    assert policy_digest(repo) != baseline
