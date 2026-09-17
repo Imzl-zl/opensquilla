@@ -3347,6 +3347,56 @@ class TaskRuntime:
                 capability=capability,
             )
 
+    async def adopt_created_goal(
+        self,
+        session_key: str,
+        task_id: str,
+        *,
+        persist: Callable[[Any, str], Awaitable[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """Attach Goal control to an admitted turn under its existing steer gate."""
+        from opensquilla.gateway.rpc import RpcContext
+        from opensquilla.gateway.scopes import operator_scope_satisfies
+        from opensquilla.gateway.websocket import get_registry
+        from opensquilla.session.goals import GoalConflictError
+
+        key = canonicalize_session_key(session_key)
+        async with self._state_lock:
+            task = self._running_by_session.get(key)
+        if task is None or task.task_id != task_id:
+            raise GoalConflictError("STALE_GOAL", "The creating task is no longer running")
+        async with task.steer_claim:
+            async with self._state_lock:
+                if (
+                    self._running_by_session.get(key) is not task
+                    or task.terminal_closing
+                    or task.cancel_requested
+                    or task.status is not AgentTaskStatus.RUNNING
+                ):
+                    raise GoalConflictError("STALE_GOAL", "The creating task is closing")
+            conn_id = str(task.envelope.metadata.get("conn_id") or "")
+            if not conn_id and str(task.envelope.source_kind) == "cli":
+                channel_id = str(task.envelope.channel_id or "")
+                if channel_id.startswith("cli:"):
+                    conn_id = channel_id.removeprefix("cli:")
+            connection = get_registry().get(conn_id)
+            if connection is None or not operator_scope_satisfies(
+                "operator.write", connection.principal.scopes
+            ):
+                raise GoalConflictError(
+                    "GOAL_AUTHORITY_UNAVAILABLE", "A live authenticated Goal owner is required"
+                )
+            source_kind = "cli" if str(task.envelope.source_kind) == "cli" else "web"
+            result = await persist(
+                RpcContext(conn_id=conn_id, principal=connection.principal), source_kind
+            )
+            context = result["context"]
+            task.goal_context = dict(context)
+            task.goal_candidate = None
+            services = dict(task.envelope.runtime_services)
+            services["goal_context"] = dict(context)
+            task.envelope = replace(task.envelope, runtime_services=services)
+            return result
 
     async def apply_goal_objective_edit(
         self,
@@ -4792,6 +4842,7 @@ class TaskRuntime:
             **task.envelope.runtime_services,
             "update_progress": update_progress,
             "plan_storage": self._storage,
+            "goal_service": self._goal_service,
             "plan_event_emitter": self._emit,
             "suspend_compute_slot": lambda: self._suspend_compute_slot(task),
         }

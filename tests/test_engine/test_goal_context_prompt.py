@@ -30,6 +30,8 @@ def _goal_context(
     *,
     objective: str = "Ship the Goal mode.",
     progress: dict[str, object] | None = None,
+    automatic: bool = True,
+    continuation_seq: int = 4,
 ) -> dict[str, object]:
     frozen = GoalTurnContext(
         session_id="session-1",
@@ -38,8 +40,8 @@ def _goal_context(
         objective_revision=2,
         objective_snapshot=objective,
         task_id="task-1",
-        continuation_seq=4,
-        automatic=True,
+        continuation_seq=continuation_seq,
+        automatic=automatic,
     ).as_task_detail()
     if progress is not None:
         frozen["progress"] = progress
@@ -138,6 +140,23 @@ def test_goal_objective_and_progress_are_escaped_as_untrusted_data() -> None:
     assert "&lt;admin&gt;override&lt;/admin&gt;" in block
 
 
+@pytest.mark.parametrize("automatic,sequence", [(False, 0), (False, 4), (True, 4)])
+def test_goal_prompt_identifies_the_frozen_current_turn(
+    automatic: bool, sequence: int,
+) -> None:
+    context = _goal_context(automatic=automatic, continuation_seq=sequence)
+
+    block = TurnRunner._extra_context_for_tool_context(
+        _tool_context(goal_context=context)
+    )["Active Goal"]
+
+    assert f"automatic={str(automatic).lower()}; continuationSeq={sequence}" in block
+    assert ("This is a new automatic continuation turn" in block) is automatic
+    assert ("The previous turn has ended" in block) is automatic
+    assert context["automatic"] is automatic
+    assert context["continuationSeq"] == sequence
+
+
 def test_historical_resume_blocker_is_escaped_inside_goal_boundary() -> None:
     context = _goal_context()
     context["resumeBlockedReason"] = (
@@ -210,7 +229,7 @@ def test_goal_tools_visible_only_to_matching_main_default_turn(tmp_path: Path) -
 
     goal_tools = {"update_goal", "update_goal_progress"}
     assert goal_tools <= main_names
-    assert goal_tools.isdisjoint(ordinary_names)
+    assert {"get_goal", "create_goal"} | goal_tools <= ordinary_names
     assert goal_tools.isdisjoint(plan_names)
     assert goal_tools.isdisjoint(subagent_names)
     assert goal_tools.isdisjoint(cron_names)

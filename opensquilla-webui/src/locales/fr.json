@@ -3946,7 +3946,7 @@
     },
     "planMode": {
       "label": "Mode plan",
-      "readOnly": "L’agent effectue des recherches et propose un plan sans modifier les fichiers.",
+      "readOnly": "Étudier et discuter du plan avant sa mise en œuvre. Les tests et compilations restent soumis aux autorisations habituelles.",
       "nextTurn": "S’applique au prochain tour",
       "updating": "Mise à jour…",
       "turnOff": "Désactiver le mode plan",

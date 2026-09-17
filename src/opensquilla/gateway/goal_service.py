@@ -40,6 +40,7 @@ from opensquilla.session.goals import (
     new_goal,
     normalize_client_request_id,
     normalize_goal_objective,
+    validate_goal_budget,
 )
 from opensquilla.session.keys import canonicalize_session_key, parse_agent_id
 from opensquilla.session.models import AgentTaskStatus
@@ -52,8 +53,10 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 _AUTOMATIC_GOAL_MESSAGE = (
-    "Continue working toward the active Goal from its durable objective and progress. "
-    "Use the Goal controls when progress or a terminal result can be recorded."
+    "This is a new automatic continuation turn. The previous turn has ended. "
+    "Inspect the current state and make concrete progress on the remaining work toward "
+    "the full active Goal. Use its durable objective and progress as context, and use "
+    "the Goal controls when progress or a terminal result can be recorded."
 )
 
 
@@ -619,6 +622,8 @@ class GoalService:
         client_request_id: str,
         client_message_id: str,
         source_kind: str,
+        token_budget: int | None = None,
+        execution_policy: str = "foreground",
     ) -> dict[str, Any]:
         key = canonicalize_session_key(session_key)
         async with self._task_runtime.explicit_ingress_intent(key):
@@ -629,6 +634,8 @@ class GoalService:
                 client_request_id=client_request_id,
                 client_message_id=client_message_id,
                 source_kind=source_kind,
+                token_budget=token_budget,
+                execution_policy=execution_policy,
             )
 
     async def _set_with_registered_intent(
@@ -640,9 +647,14 @@ class GoalService:
         client_request_id: str,
         client_message_id: str,
         source_kind: str,
+        token_budget: int | None = None,
+        execution_policy: str = "foreground",
     ) -> dict[str, Any]:
         key = canonicalize_session_key(session_key)
         objective = normalize_goal_objective(objective)
+        token_budget = validate_goal_budget(token_budget)
+        if execution_policy != "foreground":
+            raise ValueError("Background Goal execution is not available yet")
         client_message_id = normalize_client_request_id(client_message_id)
         source_kind = "cli" if source_kind == "cli" else "web"
         source_scope = self.source_scope(ctx, source_kind=source_kind)
@@ -653,6 +665,12 @@ class GoalService:
             source_scope=source_scope,
             business_params={
                 "objective": objective,
+                **({"tokenBudget": token_budget} if token_budget is not None else {}),
+                **(
+                    {"executionPolicy": execution_policy}
+                    if execution_policy != "foreground"
+                    else {}
+                ),
                 "clientMessageId": client_message_id,
                 "expectedGoalId": None,
                 "expectedStateRevision": None,
@@ -703,6 +721,8 @@ class GoalService:
             objective=objective,
             task_id=task_id,
             source_user_message_id=entry.message_id,
+            token_budget=token_budget,
+            background=execution_policy == "background",
         )
         frozen = goal_turn_context(goal, task_id=task_id, automatic=False)
         # Build from the authenticated caller; later automatic turns rebuild
@@ -816,9 +836,7 @@ class GoalService:
                             )
                     response = acceptance.goal_command_response
                     previous_goal_id = (
-                        response.get("previousGoalId")
-                        if isinstance(response, dict)
-                        else None
+                        response.get("previousGoalId") if isinstance(response, dict) else None
                     )
                     try:
                         await self._emit_goal(
@@ -829,9 +847,7 @@ class GoalService:
                             epoch=acceptance.goal.session_epoch,
                             state_revision=acceptance.goal.state_revision,
                             progress_revision=acceptance.goal.progress_revision,
-                            previous_goal_id=(
-                                str(previous_goal_id) if previous_goal_id else None
-                            ),
+                            previous_goal_id=(str(previous_goal_id) if previous_goal_id else None),
                         )
                     except Exception:
                         # Event replay/hydration can recover a missed live
@@ -918,6 +934,146 @@ class GoalService:
             ctx=ctx,
         )
 
+    async def create_from_turn(
+        self,
+        tool_context: Any,
+        *,
+        objective: str,
+        token_budget: int | None = None,
+    ) -> dict[str, Any]:
+        self._require_execution_available()
+        key = canonicalize_session_key(tool_context.session_key)
+        task_id = str(tool_context.task_id or "")
+        if not task_id or not tool_context.session_id or tool_context.session_epoch is None:
+            raise GoalConflictError(
+                "STALE_GOAL", "Goal creation requires a durable task generation"
+            )
+        # A tool retry in this task has a stable identity and cannot create a second Goal.
+        goal_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"opensquilla:goal:{task_id}"))
+        goal = new_goal(
+            goal_id=goal_id,
+            session_key=key,
+            session_id=tool_context.session_id,
+            session_epoch=tool_context.session_epoch,
+            objective=objective,
+            task_id=task_id,
+            token_budget=token_budget,
+        )
+
+        async def persist(ctx: Any, source_kind: str) -> dict[str, Any]:
+            async with self._lock(key):
+                self._require_execution_available()
+                self._require_subscription(ctx, key)
+                previous_lease = self._leases.get(key)
+                previous_grant = self._continuity_grants.get(key)
+                self._install_lease(ctx, goal=goal, source_kind=source_kind)
+                try:
+                    created = await self._storage.create_goal_for_running_task(
+                        goal, task_id=task_id
+                    )
+                except BaseException:
+                    self._restore_authority(key, lease=previous_lease, grant=previous_grant)
+                    raise
+                context = goal_turn_context(
+                    created, task_id=task_id, automatic=False
+                ).as_task_detail()
+                await self._emit_goal(
+                    created,
+                    event_type="updated",
+                    session_key=key,
+                    session_id=created.session_id,
+                    epoch=created.session_epoch,
+                    state_revision=created.state_revision,
+                    progress_revision=created.progress_revision,
+                )
+                return {"goal": await self.snapshot(created), "context": context}
+
+        result = await complete_durable_ingress(
+            self._task_runtime.adopt_created_goal(key, task_id, persist=persist)
+        )
+        tool_context.goal_context = result["context"]
+        return dict(result["goal"])
+
+    async def update_from_turn(
+        self,
+        tool_context: Any,
+        *,
+        objective: str | None = None,
+        settings: dict[str, Any] | None = None,
+        resume: bool = False,
+        pause: bool = False,
+    ) -> dict[str, Any]:
+        """Edit, pause or resume atomically on the authenticated current task."""
+        key = canonicalize_session_key(tool_context.session_key)
+        task_id = str(tool_context.task_id or "")
+
+        async def persist(ctx: Any, source_kind: str) -> dict[str, Any]:
+            async with self._lock(key):
+                self._require_execution_available()
+                self._require_subscription(ctx, key)
+                goal = await self._storage.get_goal(key)
+                if (
+                    goal is None
+                    or goal.session_id != tool_context.session_id
+                    or goal.session_epoch != tool_context.session_epoch
+                ):
+                    raise GoalConflictError("STALE_GOAL", "No Goal exists for this task generation")
+                next_objective = (
+                    normalize_goal_objective(objective) if objective is not None else goal.objective
+                )
+                command = self._command(
+                    action="edit",
+                    session_key=key,
+                    client_request_id=str(uuid.uuid4()),
+                    source_scope=self.source_scope(ctx, source_kind=source_kind),
+                    business_params={
+                        "objective": next_objective,
+                        "resume": resume,
+                        "pause": pause,
+                        "taskId": task_id,
+                        **(settings or {}),
+                    },
+                )
+                previous_lease = self._leases.get(key)
+                previous_grant = self._continuity_grants.get(key)
+                self._install_lease(ctx, goal=goal, source_kind=source_kind)
+                try:
+                    result = await self._storage.edit_goal(
+                        session_key=key,
+                        expected=ExpectedGoal(
+                            goal.session_id, goal.session_epoch, goal.goal_id, goal.state_revision
+                        ),
+                        objective=next_objective,
+                        command=command,
+                        settings=settings,
+                        binding_task_id=task_id,
+                        resume_requested=resume,
+                        pause_requested=pause,
+                    )
+                except BaseException:
+                    self._restore_authority(key, lease=previous_lease, grant=previous_grant)
+                    raise
+                assert result.goal is not None
+                context = goal_turn_context(
+                    result.goal, task_id=task_id, automatic=False
+                ).as_task_detail()
+                await self._emit_goal(
+                    result.goal,
+                    event_type="updated",
+                    session_key=key,
+                    session_id=result.goal.session_id,
+                    epoch=result.goal.session_epoch,
+                    state_revision=result.goal.state_revision,
+                    progress_revision=result.goal.progress_revision,
+                )
+                return {"goal": await self.snapshot(result.goal), "context": context}
+
+        result = await complete_durable_ingress(
+            self._task_runtime.adopt_created_goal(key, task_id, persist=persist)
+        )
+        tool_context.goal_context = result["context"]
+        return dict(result["goal"])
+
     async def on_usage_changed(self, goal_id: str) -> None:
         """Publish committed usage, including descendants finishing after their owner."""
         goal = await self._storage.get_goal_by_id(goal_id)
@@ -932,7 +1088,6 @@ class GoalService:
                 session_id=goal.session_id, epoch=goal.session_epoch,
                 state_revision=goal.state_revision, progress_revision=goal.progress_revision,
             )
-
 
     async def status(self, session_key: str) -> dict[str, Any]:
         key = canonicalize_session_key(session_key)
@@ -956,6 +1111,7 @@ class GoalService:
         client_request_id: str,
         source_scope: str,
         source_kind: str,
+        settings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         key = canonicalize_session_key(session_key)
         async with self._task_runtime.explicit_ingress_intent(key):
@@ -971,6 +1127,7 @@ class GoalService:
                     client_request_id=client_request_id,
                     source_scope=source_scope,
                     source_kind=source_kind,
+                    settings=settings,
                     adoption_task_id=adoption_task_id,
                 )
 
@@ -993,8 +1150,11 @@ class GoalService:
         client_request_id: str,
         source_scope: str,
         source_kind: str,
+        settings: dict[str, Any] | None = None,
         adoption_task_id: str | None = None,
     ) -> dict[str, Any]:
+        if (settings or {}).get("executionPolicy", "foreground") != "foreground":
+            raise ValueError("Background Goal execution is not available yet")
         key = canonicalize_session_key(session_key)
         command = self._command(
             action="edit",
@@ -1005,6 +1165,7 @@ class GoalService:
                 "expectedGoalId": expected_goal_id,
                 "expectedStateRevision": expected_state_revision,
                 "objective": objective,
+                **(settings or {}),
             },
         )
         replay = await self._storage.get_goal_command_receipt(command)
@@ -1034,10 +1195,12 @@ class GoalService:
                 state_revision=expected_state_revision,
             )
             reactivating = goal.status == GoalStatus.COMPLETE.value
+            changing_execution_policy = "executionPolicy" in (settings or {})
+            installing_authority = reactivating or changing_execution_policy
             previous_lease = self._leases.get(key)
             previous_grant = self._continuity_grants.get(key)
             try:
-                if reactivating:
+                if installing_authority:
                     self._require_execution_available()
                     self._install_lease(
                         ctx,
@@ -1050,16 +1213,17 @@ class GoalService:
                     objective=objective,
                     command=command,
                     adoption_task_id=adoption_task_id,
+                    settings=settings,
                 )
             except BaseException:
-                if reactivating:
+                if installing_authority:
                     self._restore_authority(
                         key,
                         lease=previous_lease,
                         grant=previous_grant,
                     )
                 raise
-            if result.replayed and reactivating:
+            if result.replayed and installing_authority:
                 self._restore_authority(
                     key,
                     lease=previous_lease,
@@ -1513,7 +1677,6 @@ class GoalService:
         assert snapshot is not None
         return snapshot
 
-
     async def build_prompt_context(
         self,
         context_value: Mapping[str, Any],
@@ -1537,6 +1700,10 @@ class GoalService:
             return None
         rendered = dict(context.as_task_detail())
         rendered["progress"] = goal.progress_json
+        rendered["status"] = goal.status
+        rendered["pauseReason"] = goal.pause_reason
+        rendered["tokenBudget"] = goal.token_budget
+        rendered["budgetTokensUsed"] = goal.budget_tokens_used
         if goal.blocked_reason:
             # Resume keeps the previous blocker internally until one resumed
             # task has genuinely started and settled.  Name it historically so
@@ -1659,6 +1826,8 @@ class GoalService:
                 progress_revision=accepted.goal.progress_revision,
             )
             return dict(accepted.context.as_task_detail())
+
+
 
     async def on_task_lifecycle(self, event: TaskLifecycleEvent) -> None:
         if event.phase in {"queued", "running"}:
@@ -1839,7 +2008,6 @@ class GoalService:
                 session_id=paused.session_id, epoch=paused.session_epoch,
                 state_revision=paused.state_revision, progress_revision=paused.progress_revision,
             )
-
 
     def schedule_idle_evaluation(self, session_key: str) -> None:
         if self._closed:
