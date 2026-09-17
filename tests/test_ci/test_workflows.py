@@ -362,6 +362,11 @@ def test_dependabot_keeps_major_version_updates_separate_from_weekly_compatible_
                     "version-update:semver-patch",
                 ],
             }]
+        elif item["directory"] == "/desktop/electron":
+            assert item.get("ignore") == [{
+                "dependency-name": "electron",
+                "update-types": ["version-update:semver-major"],
+            }]
         else:
             assert "ignore" not in item
         assert "target-branch" not in item
