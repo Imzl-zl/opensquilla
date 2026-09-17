@@ -150,13 +150,6 @@
             {{ t('workbench.changes.diffTruncated') }}
           </p>
           <div class="wb-changes__code" :class="{ 'is-wrapped': wrapLines }">
-            <!-- Two number columns are the convention, but they are not
-                 self-explanatory, so the columns are named explicitly. -->
-            <div class="wb-changes__line wb-changes__line--head" aria-hidden="true">
-              <span class="wb-changes__gutter">{{ t('workbench.changes.oldLineNumber') }}</span>
-              <span class="wb-changes__gutter">{{ t('workbench.changes.newLineNumber') }}</span>
-              <span class="wb-changes__marker" />
-            </div>
             <div
               v-for="(line, index) in diffLines"
               :key="index"
@@ -166,14 +159,8 @@
               <template v-if="hasGutters(line)">
                 <span class="wb-changes__gutter" aria-hidden="true">{{ line.oldNumber ?? '' }}</span>
                 <span class="wb-changes__gutter" aria-hidden="true">{{ line.newNumber ?? '' }}</span>
-                <span class="wb-changes__marker" />
               </template>
-              <code
-                v-if="line.html"
-                class="hljs wb-changes__line-code"
-                v-html="line.html"
-              />
-              <code v-else class="wb-changes__line-code">{{ line.text }}</code>
+              <code class="wb-changes__line-code">{{ line.text }}</code>
             </div>
           </div>
         </template>
@@ -183,8 +170,6 @@
 </template>
 
 <script setup lang="ts">
-import DOMPurify from 'dompurify'
-import hljs from 'highlight.js/lib/common'
 import { computed, inject, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
@@ -235,27 +220,6 @@ interface DiffLine {
   oldNumber: number | null
   newNumber: number | null
   text: string
-  /** Highlighted markup for a content line; empty when highlighting is off. */
-  html: string
-}
-
-// Rendering the patch as highlighted text keeps this panel consistent with the
-// diff the chat already shows for tool results: same highlighter, same tokens.
-const HIGHLIGHT_MAX_CHARS = 30_000
-
-function highlightDiffLine(line: string): string {
-  try {
-    const rendered = hljs.highlight(line, { language: 'diff', ignoreIllegals: true }).value
-    const sanitized = DOMPurify.sanitize(rendered, {
-      ALLOWED_TAGS: ['span'],
-      ALLOWED_ATTR: ['class'],
-    })
-    // A sanitizer that is unavailable (non-DOM test environment) must degrade to
-    // plain text rather than to an undefined template value.
-    return typeof sanitized === 'string' ? sanitized : ''
-  } catch {
-    return ''
-  }
 }
 
 const HUNK_HEADER_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/
@@ -339,7 +303,6 @@ const groups = computed(() => {
 const diffLines = computed<DiffLine[]>(() => {
   const value = diff.value
   if (!value || value.binary || !value.text) return []
-  const highlight = value.text.length <= HIGHLIGHT_MAX_CHARS
   const rows: DiffLine[] = []
   let oldNumber = 0
   let newNumber = 0
@@ -349,14 +312,7 @@ const diffLines = computed<DiffLine[]>(() => {
     oldLine: number | null,
     newLine: number | null,
   ) => {
-    const isContent = kind === 'context' || kind === 'added' || kind === 'removed'
-    rows.push({
-      kind,
-      oldNumber: oldLine,
-      newNumber: newLine,
-      text,
-      html: isContent && highlight ? highlightDiffLine(text) : '',
-    })
+    rows.push({ kind, oldNumber: oldLine, newNumber: newLine, text })
   }
   for (const raw of value.text.split('\n')) {
     // A trailing newline leaves one empty tail entry; an empty *context* line in
@@ -622,12 +578,15 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   display: grid;
   flex: 1;
   gap: 0.625rem;
-  grid-template-rows: minmax(0, 2fr) minmax(0, 3fr);
+  /* The list takes the height it needs (bounded), so a short change set does
+     not reserve a fixed share of the panel and leave it empty. */
+  grid-template-rows: minmax(0, auto) minmax(0, 1fr);
   min-height: 0;
 }
 
 .wb-changes__list {
   overflow-y: auto;
+  max-height: 45vh;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-surface);
@@ -805,7 +764,10 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 
 .wb-changes__code {
   overflow: auto;
-  flex: 1;
+  /* Hug the patch: a short diff should not sit inside a mostly empty frame,
+     and a long one scrolls once it reaches the pane height. */
+  flex: 0 1 auto;
+  max-height: 100%;
   min-height: 0;
   padding: 0.25rem 0;
   font-family: var(--font-mono);
@@ -830,6 +792,25 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   overflow-wrap: anywhere;
 }
 
+/* Added and removed lines carry the add/remove colour, the way every diff view
+   does. The colour is the row background plus a left stripe — the text itself
+   stays in the normal foreground, because coloured text on a tint of the same
+   colour is the pairing that drops below the contrast floor. */
+.wb-changes__line[data-kind="added"] {
+  background: color-mix(in srgb, var(--syntax-string) 12%, transparent);
+  border-left: 2px solid var(--syntax-string);
+}
+
+.wb-changes__line[data-kind="removed"] {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-left: 2px solid var(--danger);
+}
+
+.wb-changes__line[data-kind="context"],
+.wb-changes__line[data-kind="notice"] {
+  border-left: 2px solid transparent;
+}
+
 .wb-changes__line[data-kind="hunk"] {
   margin: 0.125rem 0;
   /* --syntax-comment is a comment tier: it falls to 1.68:1 on a light
@@ -842,37 +823,12 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   color: var(--text-muted);
 }
 
-.wb-changes__line--head {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  color: var(--text-muted);
-  font-size: 0.6875rem;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border);
-}
-
 .wb-changes__gutter {
   flex: none;
   width: 2.375rem;
   padding-right: 0.375rem;
   color: var(--text-muted);
   text-align: right;
-  user-select: none;
-}
-
-/* The column labels are words, not digits, so they need to stay on one line
-   and may not inherit the wrapping the patch body uses. */
-.wb-changes__line--head .wb-changes__gutter {
-  font-size: 0.625rem;
-  line-height: 1.6;
-  white-space: nowrap;
-}
-
-.wb-changes__marker {
-  flex: none;
-  width: 0.75rem;
-  text-align: center;
   user-select: none;
 }
 

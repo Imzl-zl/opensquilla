@@ -306,7 +306,7 @@ describe('WorkspaceChangesPanel', () => {
     mounted.unmount()
   })
 
-  it('labels the two number columns and keeps hunk rows aligned across the row', async () => {
+  it('keeps numbered rows aligned and lets hunk rows span the width', async () => {
     const mounted = mountPanel(reader({
       readChanges: vi.fn(async () => changes({
         entries: [
@@ -323,9 +323,9 @@ describe('WorkspaceChangesPanel', () => {
     clickEntry(mounted.element, 'src/a.ts')
     await settle()
 
-    const head = mounted.element.querySelector('.wb-changes__line--head')
-    expect(head?.textContent).toContain('Old')
-    expect(head?.textContent).toContain('New')
+    // The number columns carry no header row: two columns of numbers are the
+    // convention, and a label above them is one more thing to read.
+    expect(mounted.element.querySelector('.wb-changes__line--head')).toBeNull()
 
     // A hunk band spans the row instead of leaving an empty gutter column.
     const hunk = [...mounted.element.querySelectorAll('.wb-changes__line')]
