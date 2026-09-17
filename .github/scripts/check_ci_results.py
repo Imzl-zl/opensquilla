@@ -23,6 +23,7 @@ JOB_RESULT_LABELS: Final[dict[str, str]] = {
     "RESULT_FRONTEND": "Frontend validation and wheel WebUI roundtrip",
     "RESULT_CONTRACT_WINDOWS": "Gateway Contract determinism on Windows",
     "RESULT_CONTRACT_VERIFICATION_LINUX": "Complete Gateway Contract verification on Linux",
+    "RESULT_CONTRACT_COMPARE": "Gateway Contract cross-platform hashes",
     "RESULT_TUI": "OpenTUI package tests",
     "RESULT_DESKTOP": "Desktop Electron unit tests",
     "RESULT_UBUNTU": "Ubuntu quality gate",
@@ -68,6 +69,7 @@ SUITE_RESULT_REQUIREMENTS: Final[dict[str, tuple[str, ...]]] = {
     "frontend-artifact": ("RESULT_FRONTEND_ARTIFACT",),
     "frontend-validation": (
         "RESULT_FRONTEND", "RESULT_CONTRACT_WINDOWS", "RESULT_CONTRACT_VERIFICATION_LINUX",
+        "RESULT_CONTRACT_COMPARE",
     ),
     "macos-recovery": ("RESULT_MACOS_RECOVERY",),
     "managed-toolchain": ("RESULT_MANAGED_TOOLCHAIN_ARTIFACTS",),

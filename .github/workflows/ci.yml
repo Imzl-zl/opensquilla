@@ -613,17 +613,15 @@ jobs:
 
   gateway-contract-windows:
     name: Gateway Contract determinism (Windows)
-    needs: [plan-ci, frontend-check, gateway-contract-verification-linux]
+    needs: [plan-ci]
     if: >-
       ${{ !cancelled()
           && needs.plan-ci.result == 'success'
-          && needs.frontend-check.result == 'success'
-          && needs.gateway-contract-verification-linux.result == 'success'
           && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'frontend-validation') }}
     runs-on: windows-latest
     # Real-toolchain generation scales with the complete Contract inventory.
-    # Keep the full Windows check, determinism replay, tests, and cross-OS hash
-    # comparison within one bounded job instead of weakening the gate.
+    # Start the complete Windows checks independently of Linux producers; the
+    # required comparison job joins both platforms after their manifests exist.
     timeout-minutes: 60
     steps:
       - name: Check out repository
@@ -679,21 +677,63 @@ jobs:
           uv run --no-sync python scripts/contracts/generate_gateway_contracts.py --hash-manifest $verificationManifest --profile verification --output-root $verificationRoot
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Write Windows Gateway Contract hash manifest
+        shell: pwsh
+        run: |
+          $windowsManifest = Join-Path $env:RUNNER_TEMP "gateway-contract-hashes-windows.json"
+          uv run --no-sync python scripts/contracts/generate_gateway_contracts.py --hash-manifest $windowsManifest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows Gateway Contract hash manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-contract-hashes-windows
+          path: ${{ runner.temp }}/gateway-contract-hashes-windows.json
+          if-no-files-found: error
+          retention-days: 31
+          overwrite: true
+
+      - name: Upload Windows verification hash manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-contract-verification-hashes-windows
+          path: ${{ runner.temp }}/gateway-contract-verification-hashes-windows.json
+          if-no-files-found: error
+          retention-days: 31
+          overwrite: true
+
+  gateway-contract-compare:
+    name: Gateway Contract cross-platform hashes
+    needs: [plan-ci, frontend-check, gateway-contract-verification-linux, gateway-contract-windows]
+    if: >-
+      ${{ !cancelled()
+          && needs.plan-ci.result == 'success'
+          && needs.frontend-check.result == 'success'
+          && needs.gateway-contract-verification-linux.result == 'success'
+          && needs.gateway-contract-windows.result == 'success'
+          && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'frontend-validation') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Download Linux Gateway Contract hash manifest
         uses: ./.github/actions/download-required-artifact
         with:
           name: gateway-contract-hashes-linux
           path: ${{ runner.temp }}/gateway-contract-hashes-linux
 
-      - name: Compare Linux and Windows Contract hashes
-        shell: pwsh
-        run: |
-          $windowsManifest = Join-Path $env:RUNNER_TEMP "gateway-contract-hashes-windows.json"
-          $linuxManifest = Join-Path $env:RUNNER_TEMP "gateway-contract-hashes-linux/gateway-contract-hashes.json"
-          uv run --no-sync python scripts/contracts/generate_gateway_contracts.py --hash-manifest $windowsManifest
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          uv run --no-sync python scripts/contracts/generate_gateway_contracts.py --compare-hash-manifests $linuxManifest $windowsManifest
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Download Windows Gateway Contract hash manifest
+        uses: ./.github/actions/download-required-artifact
+        with:
+          name: gateway-contract-hashes-windows
+          path: ${{ runner.temp }}/gateway-contract-hashes-windows
 
       - name: Download Linux verification hash manifest
         uses: ./.github/actions/download-required-artifact
@@ -701,13 +741,21 @@ jobs:
           name: gateway-contract-verification-hashes-linux
           path: ${{ runner.temp }}/gateway-contract-verification-hashes-linux
 
-      - name: Compare Linux and Windows verification hashes
-        shell: pwsh
+      - name: Download Windows verification hash manifest
+        uses: ./.github/actions/download-required-artifact
+        with:
+          name: gateway-contract-verification-hashes-windows
+          path: ${{ runner.temp }}/gateway-contract-verification-hashes-windows
+
+      - name: Compare Linux and Windows Contract hashes
+        shell: bash
         run: |
-          $windowsManifest = Join-Path $env:RUNNER_TEMP "gateway-contract-verification-hashes-windows.json"
-          $linuxManifest = Join-Path $env:RUNNER_TEMP "gateway-contract-verification-hashes-linux/gateway-contract-verification-hashes.json"
-          uv run --no-sync python scripts/contracts/generate_gateway_contracts.py --compare-hash-manifests $linuxManifest $windowsManifest
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/contracts/generate_gateway_contracts.py --compare-hash-manifests \
+            "${RUNNER_TEMP}/gateway-contract-hashes-linux/gateway-contract-hashes.json" \
+            "${RUNNER_TEMP}/gateway-contract-hashes-windows/gateway-contract-hashes-windows.json"
+          python scripts/contracts/generate_gateway_contracts.py --compare-hash-manifests \
+            "${RUNNER_TEMP}/gateway-contract-verification-hashes-linux/gateway-contract-verification-hashes.json" \
+            "${RUNNER_TEMP}/gateway-contract-verification-hashes-windows/gateway-contract-verification-hashes-windows.json"
 
   webui-chat-recovery:
     name: WebUI chat recovery
@@ -1282,13 +1330,13 @@ jobs:
           throw "No verified native Git Bash found. Candidates: $($candidates -join '; ')"
 
       - name: Set up Bun
-        if: ${{ matrix.shard == 'core' }}
+        if: ${{ startsWith(matrix.shard, 'core-') }}
         uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: src/opensquilla/cli/tui/opentui/package/.bun-version
 
       - name: Install OpenTUI host dependencies
-        if: ${{ matrix.shard == 'core' }}
+        if: ${{ startsWith(matrix.shard, 'core-') }}
         shell: bash
         run: bun install --frozen-lockfile --cwd=src/opensquilla/cli/tui/opentui/package
 
@@ -1307,7 +1355,7 @@ jobs:
           } >> "${CI_REPORT_DIR}/environment.txt" 2>&1
 
       - name: Provision distinct Windows test volumes
-        if: ${{ matrix.shard == 'recovery-migration' }}
+        if: ${{ startsWith(matrix.shard, 'recovery-migration-') }}
         shell: pwsh
         run: |
           $token = [guid]::NewGuid().ToString("N")
@@ -1360,16 +1408,18 @@ jobs:
             maxfail_args+=(--maxfail=3)
           fi
 
+          shard="${{ matrix.shard }}"
+          family="${shard%-*}"
           worker_args=()
-          if [[ "${{ matrix.shard }}" == "recovery-migration" ||
-                "${{ matrix.shard }}" == "gateway-sqlite" ||
-                "${{ matrix.shard }}" == "desktop-installer-contracts" ]]; then
+          if [[ "${family}" == "recovery-migration" ||
+                "${family}" == "gateway-sqlite" ||
+                "${family}" == "desktop-installer-contracts" ]]; then
             # These shards start Windows ``spawn`` children, Node/Electron
             # processes, or gateways from several tests.  Leave runner
             # headroom for those process-start handshakes instead of changing
             # their bounded readiness/timing assertions.
-            if [[ "${{ matrix.shard }}" == "recovery-migration" ||
-                  "${{ matrix.shard }}" == "gateway-sqlite" ]]; then
+            if [[ "${family}" == "recovery-migration" ||
+                  "${family}" == "gateway-sqlite" ]]; then
               worker_args+=(--workers=3)
             else
               worker_args+=(--workers=2)
@@ -1390,7 +1440,7 @@ jobs:
             2>&1 | tee "${CI_REPORT_DIR}/pytest.log"
 
       - name: Clean up Windows test volumes
-        if: ${{ always() && matrix.shard == 'recovery-migration' }}
+        if: ${{ always() && startsWith(matrix.shard, 'recovery-migration-') }}
         shell: pwsh
         run: |
           $testRoots = @(
@@ -2406,6 +2456,7 @@ jobs:
       - frontend-check
       - gateway-contract-verification-linux
       - gateway-contract-windows
+      - gateway-contract-compare
       - webui-chat-recovery
       - tui-check
       - desktop-check
@@ -2512,6 +2563,7 @@ jobs:
           RESULT_FRONTEND: ${{ needs.frontend-check.result }}
           RESULT_CONTRACT_VERIFICATION_LINUX: ${{ needs.gateway-contract-verification-linux.result }}
           RESULT_CONTRACT_WINDOWS: ${{ needs.gateway-contract-windows.result }}
+          RESULT_CONTRACT_COMPARE: ${{ needs.gateway-contract-compare.result }}
           RESULT_TUI: ${{ needs.tui-check.result }}
           RESULT_DESKTOP: ${{ needs.desktop-check.result }}
           RESULT_UBUNTU: ${{ needs.ubuntu-quality.result }}

@@ -20,6 +20,7 @@ SHARD_MODULE: dict[str, Any] = runpy.run_path(
     SHARD_SCRIPT.as_posix(), run_name="windows_test_shards"
 )
 SHARD_NAMES: tuple[str, ...] = SHARD_MODULE["SHARD_NAMES"]
+WINDOWS_SHARD_NAMES: tuple[str, ...] = SHARD_MODULE["WINDOWS_SHARD_NAMES"]
 discover_test_files = SHARD_MODULE["discover_test_files"]
 files_for_shard = SHARD_MODULE["files_for_shard"]
 historical_test_weights = SHARD_MODULE["historical_test_weights"]
@@ -34,6 +35,11 @@ validated_files_for_shard = SHARD_MODULE["validated_files_for_shard"]
 requires_isolated_core_wheel = SHARD_MODULE["_requires_isolated_core_wheel"]
 combined_pytest_exit_code = SHARD_MODULE["_combined_pytest_exit_code"]
 pytest_file_selection_arg = SHARD_MODULE["_pytest_file_selection_arg"]
+windows_shard_for_test = SHARD_MODULE["windows_shard_for_test"]
+shard_family = SHARD_MODULE["shard_family"]
+partition_assignments = SHARD_MODULE["partition_assignments"]
+partition_snapshot_fingerprint = SHARD_MODULE["partition_snapshot_fingerprint"]
+validate_partition_payload = SHARD_MODULE["validate_partition_payload"]
 
 OFFLINE_MARKER_EXCLUSIONS = SHARD_MODULE["OFFLINE_MARKER_EXCLUSIONS"]
 RECENTLY_ADDED_ACTIVE_TESTS = {
@@ -675,6 +681,105 @@ def test_windows_shards_are_balanced_by_historical_duration() -> None:
     assert max(estimated_seconds) / min(estimated_seconds) < 1.05
 
 
+def test_windows_execution_partitions_cover_every_file_once_within_its_family() -> None:
+    root = Path.cwd()
+    discovered = set(discover_test_files(root))
+    assignments = partition_assignments()
+    assert set(assignments) <= discovered
+    physical_files = {
+        shard: set(validated_files_for_shard(root, shard)) for shard in WINDOWS_SHARD_NAMES
+    }
+    assert len(physical_files) == 8
+    assert all(physical_files.values())
+    assert set().union(*physical_files.values()) == discovered
+    assert sum(map(len, physical_files.values())) == len(discovered)
+    for family in SHARD_NAMES:
+        assert physical_files[f"{family}-1"] | physical_files[f"{family}-2"] == set(
+            files_for_shard(root, family)
+        )
+    for path, physical in assignments.items():
+        assert shard_family(physical) == shard_for_test(path)
+        assert windows_shard_for_test(path) == physical
+
+
+def test_windows_partitions_stay_fixed_when_duration_weights_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assignments = dict(partition_assignments())
+    before = partition_snapshot_fingerprint()
+
+    def unexpected_weight_access() -> dict[str, float]:
+        raise AssertionError("partition scheduling must not consult duration weights")
+
+    monkeypatch.setitem(
+        windows_shard_for_test.__globals__, "historical_test_weights", unexpected_weight_access
+    )
+    assert {path: windows_shard_for_test(path) for path in assignments} == assignments
+    assert partition_snapshot_fingerprint() == before
+
+
+def test_windows_new_file_fallback_is_stable_and_keeps_environment_family() -> None:
+    paths = (
+        "tests/test_new_partition_fallback.py",
+        "tests/test_gateway/test_new_partition_fallback.py",
+        "tests/test_recovery/test_new_partition_fallback.py",
+        "tests/test_desktop/test_new_partition_fallback.py",
+    )
+    assert not set(paths).intersection(partition_assignments())
+    first = {path: windows_shard_for_test(path) for path in paths}
+    assert {path: windows_shard_for_test(path) for path in reversed(paths)} == first
+    for path, shard in first.items():
+        assert shard in WINDOWS_SHARD_NAMES
+        assert shard_family(shard) == shard_for_test(path)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("missing_partition", "every Windows execution shard"),
+        ("duplicate_file", "duplicate Windows partition"),
+        ("cross_family", "crosses responsibility families"),
+        ("path_escape", "invalid Windows partition test path"),
+        ("unsorted", "is not sorted"),
+    ],
+)
+def test_windows_partition_snapshot_rejects_invalid_coverage(case: str, message: str) -> None:
+    partitions: dict[str, list[str]] = {shard: [] for shard in WINDOWS_SHARD_NAMES}
+    if case == "missing_partition":
+        del partitions["core-2"]
+    elif case == "duplicate_file":
+        partitions["core-1"] = ["tests/test_partition_fixture.py"]
+        partitions["core-2"] = ["tests/test_partition_fixture.py"]
+    elif case == "cross_family":
+        partitions["core-1"] = ["tests/test_gateway/test_partition_fixture.py"]
+    elif case == "path_escape":
+        partitions["core-1"] = ["tests/../test_partition_fixture.py"]
+    elif case == "unsorted":
+        partitions["core-1"] = ["tests/test_partition_z.py", "tests/test_partition_a.py"]
+    with pytest.raises(ValueError, match=message):
+        validate_partition_payload({"schema_version": 1, "partitions": partitions})
+
+
+def test_windows_physical_metadata_binds_both_family_and_partition_snapshots(
+    tmp_path: Path,
+) -> None:
+    write_metadata = SHARD_MODULE["_write_run_metadata"]
+    path = tmp_path / "metadata.json"
+    write_metadata(path, "gateway-sqlite-2", (), parallel_workers=3)
+    physical = json.loads(path.read_text(encoding="utf-8"))
+    assert physical["shard"] == "gateway-sqlite-2"
+    assert physical["family"] == "gateway-sqlite"
+    assert physical["partition_sha256"] == partition_snapshot_fingerprint()
+    assert physical["assignment_sha256"] == assignment_snapshot_fingerprint()
+    assert physical["execution"]["parallel"]["workers"] == 3
+
+    write_metadata(path, "gateway-sqlite", (), parallel_workers=2)
+    family = json.loads(path.read_text(encoding="utf-8"))
+    assert family["assignment_sha256"] == physical["assignment_sha256"]
+    assert "partition_sha256" not in family
+    assert "family" not in family
+
+
 def test_windows_assignment_snapshot_governs_reviewed_rebalancing() -> None:
     baseline, assignments, guardrails, overrides = assignment_governance()
     report = assignment_governance_summary(Path.cwd())
@@ -1266,3 +1371,102 @@ def test_windows_shard_runner_splits_parallel_and_serial_tests(tmp_path: Path) -
         "tests/test_serial.py",
     ]
     assert metadata_payload["execution"]["parallel"]["workers"] == 2
+
+
+def test_windows_physical_runner_selects_partition_and_preserves_both_phases(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\nmarkers = ["ci_serial: serial CI contract"]\n',
+        encoding="utf-8",
+    )
+    test_dir = tmp_path / "tests"
+    test_dir.mkdir()
+    selected_path = "tests/test_partition_probe.py"
+    selected_shard = windows_shard_for_test(selected_path)
+    (tmp_path / selected_path).write_text(
+        "import os\nimport pytest\n\n"
+        "def test_parallel():\n"
+        "    assert os.environ.get('PYTEST_XDIST_WORKER', '').startswith('gw')\n\n"
+        "@pytest.mark.ci_serial\n"
+        "def test_serial():\n"
+        "    assert 'PYTEST_XDIST_WORKER' not in os.environ\n",
+        encoding="utf-8",
+    )
+    unselected_path = next(
+        f"tests/test_partition_other_{index}.py"
+        for index in range(100)
+        if windows_shard_for_test(f"tests/test_partition_other_{index}.py") != selected_shard
+    )
+    (tmp_path / unselected_path).write_text(
+        "def test_must_not_execute():\n    assert False, 'another physical partition'\n",
+        encoding="utf-8",
+    )
+    reports = tmp_path / "reports"
+    env = os.environ.copy()
+    for key in (
+        "PYTEST_XDIST_WORKER",
+        "PYTEST_XDIST_WORKER_COUNT",
+        "PYTEST_XDIST_TESTRUNUID",
+        "OPENSQUILLA_PYTEST_XDIST_SCOPE",
+    ):
+        env.pop(key, None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SHARD_SCRIPT.resolve()),
+            "run",
+            selected_shard,
+            "--root",
+            str(tmp_path),
+            "--junit",
+            str(reports / "junit.xml"),
+            "--summary",
+            str(reports / "summary.txt"),
+            "--metadata",
+            str(reports / "metadata.json"),
+            "--workers",
+            "1",
+            "--",
+            "-q",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    metadata = json.loads((reports / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["test_files"] == [selected_path]
+    assert metadata["partition_sha256"] == partition_snapshot_fingerprint()
+    assert metadata["family"] == "core"
+    junit = ET.parse(reports / "junit.xml").getroot()
+    assert {test.get("name") for test in junit.iter("testcase")} == {
+        "test_parallel",
+        "test_serial",
+    }
+    assert (reports / "junit.parallel.xml").is_file()
+    assert (reports / "junit.serial.xml").is_file()
+
+
+def test_windows_empty_physical_partition_fails_with_diagnostics(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    junit = tmp_path / "reports" / "junit.xml"
+    summary = tmp_path / "reports" / "summary.txt"
+    metadata = tmp_path / "reports" / "metadata.json"
+    result = SHARD_MODULE["_run"](
+        SimpleNamespace(
+            root=tmp_path,
+            shard="core-1",
+            junit=junit,
+            summary=summary,
+            metadata=metadata,
+            workers=4,
+            pytest_args=[],
+        )
+    )
+    assert result == 2
+    assert ET.parse(junit).getroot().get("errors") == "1"
+    assert "has no tests" in summary.read_text(encoding="utf-8")
+    assert json.loads(metadata.read_text(encoding="utf-8"))["test_files"] == []

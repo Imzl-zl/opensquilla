@@ -23,12 +23,19 @@ def test_verification_profile_is_required_and_uses_separate_output() -> None:
     ):
         assert required in commands
     windows = jobs["gateway-contract-windows"]
-    assert "gateway-contract-verification-linux" in windows["needs"]
+    assert windows["needs"] == ["plan-ci"]
     windows_commands = "\n".join(step.get("run", "") for step in windows["steps"])
     assert "--profile verification" in windows_commands
     assert "--verification-root" in windows_commands
-    assert "gateway-contract-verification-hashes-linux" in windows_commands
-    assert "--compare-hash-manifests" in windows_commands
+    assert "--compare-hash-manifests" not in windows_commands
+    compare = jobs["gateway-contract-compare"]
+    assert "gateway-contract-verification-linux" in compare["needs"]
+    assert "gateway-contract-windows" in compare["needs"]
+    assert "gateway-contract-compare" in jobs["ci-result"]["needs"]
+    compare_commands = "\n".join(step.get("run", "") for step in compare["steps"])
+    assert "gateway-contract-verification-hashes-linux" in compare_commands
+    assert "gateway-contract-verification-hashes-windows" in compare_commands
+    assert compare_commands.count("--compare-hash-manifests") == 2
     for job in (linux, windows):
         verification_step = next(
             step

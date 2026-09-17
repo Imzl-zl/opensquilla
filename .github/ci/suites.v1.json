@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "windows_test_assignments": ".github/scripts/windows_test_assignments.json",
+  "windows_test_partitions": ".github/scripts/windows_test_partitions.json",
   "macos_recovery_test_inputs": [
     "tests/test_recovery/**",
     "tests/test_migration/test_opensquilla_home_migration.py",
@@ -71,10 +72,14 @@
       "desktop-installer-contracts"
     ],
     "windows": [
-      "core",
-      "gateway-sqlite",
-      "recovery-migration",
-      "desktop-installer-contracts"
+      "core-1",
+      "core-2",
+      "gateway-sqlite-1",
+      "gateway-sqlite-2",
+      "recovery-migration-1",
+      "recovery-migration-2",
+      "desktop-installer-contracts-1",
+      "desktop-installer-contracts-2"
     ]
   },
   "desktop_groups": {
@@ -151,7 +156,8 @@
         ".github/scripts/check_ci_results.py",
         ".github/scripts/plan_ci.py",
         ".github/ci/suites.v1.json",
-        ".github/ci/trust-policy.v1.json"
+        ".github/ci/trust-policy.v1.json",
+        ".github/scripts/windows_test_partitions.json"
       ]
     },
     "readme-locale": {
@@ -243,6 +249,7 @@
         ".github/scripts/**",
         ".github/signing/**",
         ".github/scripts/windows_test_assignments.json",
+        ".github/scripts/windows_test_partitions.json",
         ".github/scripts/windows_test_durations.json",
         ".github/workflows/desktop-fault-injection.yml",
         ".github/workflows/wheelhouse-release.yml",

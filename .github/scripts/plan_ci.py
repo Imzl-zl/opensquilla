@@ -23,6 +23,8 @@ DEFAULT_TRUST_POLICY: Final = Path(".github/ci/trust-policy.v1.json")
 _WINDOWS_ASSIGNMENTS_CONFIG_KEY: Final = "windows_test_assignments"
 _WINDOWS_ASSIGNMENTS_PATH_KEY: Final = "_windows_test_assignments_path"
 _LOADED_WINDOWS_ASSIGNMENTS_KEY: Final = "_loaded_windows_test_assignments"
+_WINDOWS_PARTITIONS_CONFIG_KEY: Final = "windows_test_partitions"
+_WINDOWS_PARTITIONS_PATH_KEY: Final = "_windows_test_partitions_path"
 _MACOS_RECOVERY_TEST_INPUTS_KEY: Final = "macos_recovery_test_inputs"
 _MERGE_CRITICAL_INPUTS_KEY: Final = "_merge_critical_inputs"
 
@@ -410,6 +412,7 @@ _FIXED_PLATFORM_MATRIX: Final[dict[str, tuple[tuple[str, str], ...]]] = {
         ("ubuntu-latest", "validation"),
         ("ubuntu-latest", "contract-verification"),
         ("windows-latest", "contract-determinism"),
+        ("ubuntu-latest", "contract-compare"),
     ),
     "wheel-webui-roundtrip": (("ubuntu-latest", "package"),),
     "webui-chat-recovery": (("ubuntu-22.04", "chromium"),),
@@ -566,6 +569,49 @@ def _load_windows_test_assignments(
     return assignments
 
 
+def _load_windows_test_partitions(
+    path: Path, *, assignments: Mapping[str, str], allowed_shards: set[str]
+) -> dict[str, str]:
+    """Map governed family ownership to the physical Windows execution cells."""
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PlanError(f"cannot read Windows test partitions {path}: {exc}") from exc
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        raise PlanError("unsupported Windows test partition schema")
+    partitions = value.get("partitions")
+    if not isinstance(partitions, dict) or set(partitions) != allowed_shards:
+        raise PlanError("Windows test partitions must define every physical shard exactly once")
+    physical: dict[str, str] = {}
+    for shard, raw_paths in partitions.items():
+        paths = _require_string_list(raw_paths, f"Windows partition {shard!r}")
+        if paths != sorted(set(paths)):
+            raise PlanError(f"Windows partition paths must be unique and sorted: {shard}")
+        for test_path in paths:
+            candidate = PurePosixPath(test_path)
+            if (
+                candidate.as_posix() != test_path
+                or not test_path.startswith("tests/")
+                or not candidate.name.startswith("test_")
+                or candidate.suffix != ".py"
+                or ".." in candidate.parts
+                or "\\" in test_path
+            ):
+                raise PlanError(f"invalid Windows test partition path: {test_path!r}")
+            if test_path in physical:
+                raise PlanError(f"duplicate Windows test partition: {test_path}")
+            family = assignments.get(test_path)
+            if family is not None and shard.rsplit("-", 1)[0] != family:
+                raise PlanError(f"Windows test partition changed family ownership: {test_path}")
+            physical[test_path] = str(shard)
+    return {
+        test_path: physical.get(test_path)
+        or f"{family}-{int(hashlib.sha256(test_path.encode('utf-8')).hexdigest(), 16) % 2 + 1}"
+        for test_path, family in assignments.items()
+    }
+
+
 def load_config(path: Path, *, repo: Path | None = None) -> dict[str, Any]:
     """Load and validate the v1 suite contract."""
 
@@ -624,6 +670,14 @@ def load_config(path: Path, *, repo: Path | None = None) -> dict[str, Any]:
         if not shards:
             raise PlanError(f"full_python_matrix {platform_name} must not be empty")
 
+    expected_windows = {
+        f"{family}-{partition}"
+        for family in python_matrix["ubuntu"]
+        for partition in (1, 2)
+    }
+    if set(python_matrix["windows"]) != expected_windows:
+        raise PlanError("Windows matrix must define two physical shards per Python family")
+
     assignments_path = value.get(_WINDOWS_ASSIGNMENTS_CONFIG_KEY)
     if (
         not isinstance(assignments_path, str)
@@ -640,6 +694,20 @@ def load_config(path: Path, *, repo: Path | None = None) -> dict[str, Any]:
         # Parsing is intentionally lazy. Digest-only and source-only planning
         # does not need the test assignment payload; exact test planning does.
         value[_WINDOWS_ASSIGNMENTS_PATH_KEY] = repo.resolve() / assignments_path
+
+    partitions_path = value.get(_WINDOWS_PARTITIONS_CONFIG_KEY)
+    if (
+        not isinstance(partitions_path, str)
+        or not partitions_path
+        or PurePosixPath(partitions_path).is_absolute()
+        or PurePosixPath(partitions_path).as_posix() != partitions_path
+        or ".." in PurePosixPath(partitions_path).parts
+    ):
+        raise PlanError(
+            f"{_WINDOWS_PARTITIONS_CONFIG_KEY} must be a normalized repository-relative path"
+        )
+    if repo is not None:
+        value[_WINDOWS_PARTITIONS_PATH_KEY] = repo.resolve() / partitions_path
 
     macos_recovery_inputs = _require_string_list(
         value.get(_MACOS_RECOVERY_TEST_INPUTS_KEY),
@@ -924,6 +992,14 @@ def _windows_test_assignments(config: Mapping[str, Any]) -> Mapping[str, str]:
         raise PlanError("Windows test assignment path was not loaded with the contract")
     assignments = _load_windows_test_assignments(
         assignments_path,
+        allowed_shards=set(config["full_python_matrix"]["ubuntu"]),
+    )
+    partitions_path = config.get(_WINDOWS_PARTITIONS_PATH_KEY)
+    if not isinstance(partitions_path, Path):
+        raise PlanError("Windows test partition path was not loaded with the contract")
+    assignments = _load_windows_test_partitions(
+        partitions_path,
+        assignments=assignments,
         allowed_shards=set(config["full_python_matrix"]["windows"]),
     )
     if isinstance(config, dict):
@@ -1495,6 +1571,14 @@ def _execution_matrices(
     """Return canonical Python and all-platform execution matrices."""
 
     suites = set(required_suites)
+    physical_windows_shards: set[str] = set()
+    for shard in targeted_windows_shards:
+        if shard in config["full_python_matrix"]["windows"]:
+            physical_windows_shards.add(shard)
+        elif shard in config["full_python_matrix"]["ubuntu"]:
+            physical_windows_shards.update(f"{shard}-{partition}" for partition in (1, 2))
+        else:
+            raise PlanError(f"unknown Windows execution shard: {shard}")
     python_matrix = {
         "ubuntu": (
             list(config["full_python_matrix"]["ubuntu"])
@@ -1505,7 +1589,7 @@ def _execution_matrices(
             (
                 list(config["full_python_matrix"]["windows"])
                 if windows_full_matrix
-                else sorted(targeted_windows_shards)
+                else sorted(physical_windows_shards)
             )
             if "windows-high-risk" in suites
             else []

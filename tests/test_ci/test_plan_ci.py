@@ -63,6 +63,16 @@ def _platform_cells(plan: dict[str, Any], suite: str) -> set[tuple[str, str]]:
     }
 
 
+def _windows_partitions_for(*paths: str) -> list[str]:
+    snapshot = json.loads(
+        Path(".github/scripts/windows_test_partitions.json").read_text(encoding="utf-8")
+    )
+    ownership = {
+        path: shard for shard, files in snapshot["partitions"].items() for path in files
+    }
+    return sorted({ownership[path] for path in paths})
+
+
 def test_docs_only_plan_is_small_and_canonical(
     tmp_path: Path, suite_config: dict[str, Any]
 ) -> None:
@@ -161,11 +171,7 @@ def test_pr_1347_test_only_change_uses_exact_targets_and_windows_shards(
     assert plan["python_targets"] == sorted([*paths, importing_consumer])
     assert plan["python_matrix"] == {
         "ubuntu": [],
-        "windows": [
-            "desktop-installer-contracts",
-            "gateway-sqlite",
-            "recovery-migration",
-        ],
+        "windows": _windows_partitions_for(*paths, importing_consumer),
     }
     assert plan["desktop_matrix"] == []
     assert set(plan["required_suites"]) == {
@@ -193,8 +199,69 @@ def test_deleted_governed_test_uses_existing_parent_and_keeps_windows_shard(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == ["tests/test_gateway"]
-    assert plan["python_matrix"]["windows"] == ["gateway-sqlite"]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(path)
     assert "deleted_test_targeted" in plan["reason_codes"]
+
+
+def test_test_only_change_selects_one_physical_windows_partition(
+    tmp_path: Path, suite_config: dict[str, Any]
+) -> None:
+    path = "tests/functional/test_gateway_attachment_history_e2e.py"
+    _write_test_module(tmp_path, path)
+
+    plan = plan_changes([path], repo=tmp_path, config=suite_config)
+
+    assert plan["full_fallback"] is False
+    assert plan["python_targets"] == [path]
+    expected = _windows_partitions_for(path)
+    assert len(expected) == 1
+    assert plan["python_matrix"] == {"ubuntu": [], "windows": expected}
+    assert _platform_cells(plan, "windows-high-risk") == {
+        ("windows-latest", expected[0])
+    }
+
+
+def test_windows_family_request_expands_only_its_two_physical_cells(
+    suite_config: dict[str, Any]
+) -> None:
+    python, platforms = MODULE["_execution_matrices"](
+        ["windows-high-risk"], set(), {"gateway-sqlite"}, False, suite_config
+    )
+
+    assert python == {
+        "ubuntu": [], "windows": ["gateway-sqlite-1", "gateway-sqlite-2"]
+    }
+    assert platforms == [
+        {"suite": "windows-high-risk", "os": "windows-latest", "shard": shard}
+        for shard in ("gateway-sqlite-1", "gateway-sqlite-2")
+    ]
+
+
+@pytest.mark.parametrize("invalid", ["missing-cell", "duplicate-file", "wrong-family"])
+def test_windows_partition_contract_rejects_incomplete_or_ambiguous_ownership(
+    tmp_path: Path, suite_config: dict[str, Any], invalid: str
+) -> None:
+    path = "tests/test_gateway/test_rpc_sessions.py"
+    partitions = {
+        shard: [] for shard in suite_config["full_python_matrix"]["windows"]
+    }
+    partitions["gateway-sqlite-1"] = [path]
+    if invalid == "missing-cell":
+        del partitions["core-2"]
+    elif invalid == "duplicate-file":
+        partitions["gateway-sqlite-2"] = [path]
+    else:
+        partitions["gateway-sqlite-1"] = []
+        partitions["core-1"] = [path]
+    snapshot = tmp_path / "partitions.json"
+    snapshot.write_text(json.dumps({"schema_version": 1, "partitions": partitions}))
+
+    with pytest.raises(PlanError):
+        MODULE["_load_windows_test_partitions"](
+            snapshot,
+            assignments={path: "gateway-sqlite"},
+            allowed_shards=set(suite_config["full_python_matrix"]["windows"]),
+        )
 
 
 def test_governed_test_rename_targets_old_parent_and_new_exact_file(
@@ -210,7 +277,7 @@ def test_governed_test_rename_targets_old_parent_and_new_exact_file(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == ["tests/test_gateway", new_path]
-    assert plan["python_matrix"]["windows"] == ["gateway-sqlite"]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(old_path, new_path)
     assert "deleted_test_targeted" in plan["reason_codes"]
 
 
@@ -230,7 +297,7 @@ def test_cross_shard_test_helper_adds_importing_consumer_and_shard(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == [helper, consumer]
-    assert plan["python_matrix"]["windows"] == ["core", "recovery-migration"]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(helper, consumer)
     assert "test_dependency_closure" in plan["reason_codes"]
 
 
@@ -262,7 +329,7 @@ def test_dynamic_import_alias_adds_cross_shard_consumer(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == [helper, consumer]
-    assert plan["python_matrix"]["windows"] == ["core", "recovery-migration"]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(helper, consumer)
     assert "test_dependency_closure" in plan["reason_codes"]
 
 
@@ -282,7 +349,7 @@ def test_pytest_plugins_adds_cross_shard_consumer(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == [helper, consumer]
-    assert plan["python_matrix"]["windows"] == ["core", "recovery-migration"]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(helper, consumer)
 
 
 @pytest.mark.parametrize(
@@ -337,11 +404,7 @@ def test_test_helper_dependency_closure_is_recursive_and_cycle_safe(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == sorted([core, recovery, desktop])
-    assert plan["python_matrix"]["windows"] == [
-        "core",
-        "desktop-installer-contracts",
-        "recovery-migration",
-    ]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(core, desktop, recovery)
     assert "test_dependency_closure" in plan["reason_codes"]
 
 
@@ -394,7 +457,7 @@ def test_deleted_test_helper_keeps_cross_directory_consumer(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == ["tests/test_skills", consumer]
-    assert plan["python_matrix"]["windows"] == ["core", "recovery-migration"]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(helper, consumer)
     assert "deleted_test_targeted" in plan["reason_codes"]
     assert "test_dependency_closure" in plan["reason_codes"]
 
@@ -436,7 +499,9 @@ def test_deleted_governed_test_at_ref_uses_parent_tree(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == ["tests/test_gateway"]
-    assert plan["python_matrix"]["windows"] == ["gateway-sqlite"]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(
+        "tests/test_gateway/test_rpc_sessions.py"
+    )
     assert "deleted_test_targeted" in plan["reason_codes"]
 
 
@@ -1145,6 +1210,12 @@ def test_windows_shard_metadata_does_not_invalidate_unrelated_suites(
     assert assignments["full_fallback"] is True
     assert assignments["required_suites"] == sorted(suite_config["full_suites"])
     assert assignments["reason_codes"] == ["ci_policy_changed"]
+    partitions = _plan(
+        tmp_path, suite_config, ".github/scripts/windows_test_partitions.json"
+    )
+    assert partitions["full_fallback"] is True
+    assert partitions["required_suites"] == sorted(suite_config["full_suites"])
+    assert partitions["reason_codes"] == ["ci_policy_changed"]
 
 
 @pytest.mark.parametrize(
@@ -1236,6 +1307,7 @@ def test_python_dependency_changes_select_reviewed_full_ecosystem_coverage(
         ("ubuntu-latest", "validation"),
         ("ubuntu-latest", "contract-verification"),
         ("windows-latest", "contract-determinism"),
+        ("ubuntu-latest", "contract-compare"),
     }
 
 

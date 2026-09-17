@@ -252,6 +252,7 @@ def test_partial_gate_keeps_shared_frontend_job_and_requires_full_coverage() -> 
     env = _partial_env()
     assert env["RESULT_FRONTEND"] == "success"  # Wheel roundtrip still runs.
     assert env["RESULT_CONTRACT_WINDOWS"] == "skipped"
+    assert env["RESULT_CONTRACT_COMPARE"] == "skipped"
     assert check_ci_results(env) == []
 
 
@@ -265,6 +266,7 @@ def test_partial_gate_keeps_shared_frontend_job_and_requires_full_coverage() -> 
     ("QUEUE_REUSED_SUITES", "null"), ("QUEUE_REUSED_SUITES", '[{}]'),
     ("RESULT_WINDOWS_FULL", "skipped"), ("RESULT_WINDOWS_FULL", "failure"),
     ("RESULT_FRONTEND", "failure"), ("RESULT_CONTRACT_WINDOWS", "failure"),
+    ("RESULT_CONTRACT_COMPARE", "failure"),
     ("RESULT_PLANNER", "cancelled"),
     ("QUEUE_PARTIAL", ""), ("QUEUE_PARTIAL", "false"), ("QUEUE_PARTIAL", "invalid"),
 ])
@@ -291,6 +293,23 @@ def test_frontend_requires_complete_verification_profile(result: str) -> None:
 def test_wheel_only_does_not_require_verification_profile() -> None:
     env = _env_for(BASELINE_SUITES | {"wheel-webui-roundtrip"})
     assert env["RESULT_CONTRACT_VERIFICATION_LINUX"] == "skipped"
+    assert check_ci_results(env) == []
+
+
+@pytest.mark.parametrize("result", ["skipped", "failure", "cancelled", "", None])
+def test_frontend_requires_cross_platform_contract_comparison(result: str | None) -> None:
+    env = _env_for(BASELINE_SUITES | {"frontend-validation"})
+    if result is None:
+        env.pop("RESULT_CONTRACT_COMPARE")
+    else:
+        env["RESULT_CONTRACT_COMPARE"] = result
+    assert any("Gateway Contract cross-platform hashes" in error for error in check_ci_results(env))
+
+
+@pytest.mark.parametrize("suites", [BASELINE_SUITES, BASELINE_SUITES | {"wheel-webui-roundtrip"}])
+def test_non_frontend_plan_skips_cross_platform_contract_comparison(suites: set[str]) -> None:
+    env = _env_for(suites)
+    assert env["RESULT_CONTRACT_COMPARE"] == "skipped"
     assert check_ci_results(env) == []
 
 
