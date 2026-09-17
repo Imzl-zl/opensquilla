@@ -17,9 +17,22 @@ async def test_real_feishu_sdk_reconnects_and_stops_its_worker(
 ) -> None:
     # Substitute endpoint discovery only. Connection setup, receive-loop failure,
     # reconnect, close, and the OpenSquilla worker all use the installed SDK.
+    from lark_oapi import ws as sdk_ws
     from lark_oapi.ws import client as sdk
 
     connections: list[ServerConnection] = []
+    cache_tasks: set[asyncio.Task[Any]] = set()
+    real_client = sdk.Client
+
+    def track_client_cache(*args: Any, **kwargs: Any) -> Any:
+        client = real_client(*args, **kwargs)
+        # The real SDK constructs its cache on the caller loop before the
+        # transport starts its worker. Own that exact task even if start fails
+        # before endpoint discovery; keep the real Client type/module intact.
+        cache_tasks.add(client._cache._cron)
+        return client
+
+    monkeypatch.setattr(sdk_ws, "Client", track_client_cache)
 
     async def accept(connection: ServerConnection) -> None:
         connections.append(connection)
@@ -73,6 +86,11 @@ async def test_real_feishu_sdk_reconnects_and_stops_its_worker(
                 assert (await transport.health_check()).connected
                 worker = transport._thread
         finally:
-            await transport.stop()
+            try:
+                await transport.stop()
+            finally:
+                for task in cache_tasks:
+                    task.cancel()
+                await asyncio.gather(*cache_tasks, return_exceptions=True)
         assert worker is not None and not worker.is_alive()
         assert transport._thread is None
