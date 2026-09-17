@@ -88,6 +88,12 @@ export function projectGoalSnapshot(value: unknown): GoalSnapshot | null {
     activeTimeMs: integer(source.activeTimeMs, source.active_time_ms),
     windowActiveTimeMs: integer(source.windowActiveTimeMs, source.window_active_time_ms),
     usage: source.usage,
+    tokenBudget: integer(source.tokenBudget, source.token_budget) ?? null,
+    usageAccountingStartedAtMs: integer(source.usageAccountingStartedAtMs, source.usage_accounting_started_at_ms) ?? null,
+    budgetTokensUsed: integer(source.budgetTokensUsed, source.budget_tokens_used) ?? 0,
+    usageCoverage: text(source.usageCoverage, source.usage_coverage) === 'complete' ? 'complete'
+      : text(source.usageCoverage, source.usage_coverage) === 'partial_usage' ? 'partial_usage' : 'partial_history',
+    executionPolicy: text(source.executionPolicy, source.execution_policy) === 'background' ? 'background' : 'foreground',
     pauseReason: nullableText(source.pauseReason, source.pause_reason),
     blockedReason: nullableText(source.blockedReason, source.blocked_reason),
     terminalReason: nullableText(source.terminalReason, source.terminal_reason),

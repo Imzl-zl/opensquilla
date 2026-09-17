@@ -149,8 +149,14 @@ class BackgroundCompletionManager:
         self._watch_task_owners: dict[asyncio.Task[None], tuple[str, str]] = {}
         self._parent_fence_refcounts: dict[str, int] = {}
         self._group_admissions: dict[str, dict[str, int]] = {}
+        self._pending_evictions: set[str] = set()
         self._watch_state_changed = asyncio.Event()
         self._closing = False
+        self._idle_listener: Callable[[str], None] | None = None
+
+    def set_idle_listener(self, listener: Callable[[str], None] | None) -> None:
+        """Notify ordinary producers after a completion group releases its parent."""
+        self._idle_listener = listener
 
     @staticmethod
     def group_id(parent_session_key: str, parent_task_id: str) -> str:
@@ -462,6 +468,7 @@ class BackgroundCompletionManager:
             self._watch_task_owners.clear()
             self._parent_fence_refcounts.clear()
             self._group_admissions.clear()
+            self._pending_evictions.clear()
             self._notify_watch_state_changed()
             self._closing = True
 
@@ -504,6 +511,9 @@ class BackgroundCompletionManager:
                 if not groups:
                     self._group_admissions.pop(parent_session_key, None)
             self._notify_watch_state_changed()
+            retry_eviction = group_id in self._pending_evictions
+        if retry_eviction:
+            await self._evict_group(group_id)
 
     async def _finish_quiesce_drain(self, keys: tuple[str, ...]) -> None:
         drain = asyncio.create_task(self._cancel_and_drain_parent_watchers(keys))
@@ -599,6 +609,7 @@ class BackgroundCompletionManager:
         return group_ids
 
     def _cancel_group_locked(self, group_id: str) -> None:
+        self._pending_evictions.discard(group_id)
         self._cancelled_groups.add(group_id)
         self._waiting_groups.discard(group_id)
         self._wake_groups.discard(group_id)
@@ -980,6 +991,7 @@ class BackgroundCompletionManager:
             )
 
     async def _evict_group(self, group_id: str) -> None:
+        released_parent = None
         async with self._state_lock:
             current_task = asyncio.current_task()
             if any(
@@ -988,7 +1000,15 @@ class BackgroundCompletionManager:
             ):
                 return
             if any(groups.get(group_id, 0) > 0 for groups in self._group_admissions.values()):
+                self._pending_evictions.add(group_id)
                 return
+            self._pending_evictions.discard(group_id)
+            if (
+                not self._closing
+                and group_id not in self._cancelled_groups
+                and group_id in self._waiting_groups | self._wake_groups
+            ):
+                released_parent = self._group_parents.get(group_id)
             self._waiting_groups.discard(group_id)
             self._wake_groups.discard(group_id)
             self._delivery_attempted.discard(group_id)
@@ -997,6 +1017,11 @@ class BackgroundCompletionManager:
             self._parent_run_mode_overrides.pop(group_id, None)
             if group_id not in self._cancelled_groups:
                 self._group_parents.pop(group_id, None)
+        if released_parent is not None and self._idle_listener is not None:
+            try:
+                self._idle_listener(released_parent)
+            except Exception:
+                log.exception("background_completion.idle_listener_failed")
 
 
 async def _require_current_parent_owner(

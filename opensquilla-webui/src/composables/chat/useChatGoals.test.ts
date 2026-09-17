@@ -195,6 +195,45 @@ async function flushAsyncWork() {
 }
 
 describe('useChatGoals', () => {
+  it('reuses an unknown Goal set receipt and message identity on retry', async () => {
+    const { api, rpc, currentEpoch } = harness()
+    currentEpoch.value = 1
+    rpc.call.mockRejectedValueOnce(new Error('Connection lost after acceptance'))
+    expect(await api.startGoal('Synthetic uncertain Goal')).toBe(false)
+    const first = rpc.call.mock.calls[0]![1]
+    expect(await api.startGoal('Synthetic uncertain Goal')).toBe(true)
+    expect(rpc.call.mock.calls[1]![1]).toEqual(first)
+    expect(await api.startGoal('Synthetic uncertain Goal')).toBe(true)
+    expect(rpc.call.mock.calls[2]![1].clientRequestId).not.toBe(first.clientRequestId)
+  })
+
+  it('does not replay a removed Goal when the same objective is intentionally created again', async () => {
+    const { api, rpc, currentEpoch } = harness()
+    currentEpoch.value = 1
+    rpc.call.mockRejectedValueOnce(new Error('Connection lost after acceptance'))
+    await api.startGoal('Synthetic clear and recreate')
+    const first = rpc.call.mock.calls[0]![1]
+    api.applyHydration({ key: SESSION_KEY, epoch: 1, goal: goalPayload('active') })
+    rpc.call.mockResolvedValueOnce(mutation(null))
+    await api.clear()
+    await api.startGoal('Synthetic clear and recreate')
+    expect(rpc.call.mock.calls[2]![1].clientRequestId).not.toBe(first.clientRequestId)
+  })
+
+  it('adopts same-revision usage events and preserves pause after late receipts become complete', () => {
+    const { api, handlers } = harness()
+    api.applyHydration({ key: SESSION_KEY, epoch: 1, goalSnapshotStreamSeq: 10,
+      goal: goalPayload('paused', { stateRevision: 3, usageCoverage: 'partial_usage', pauseReason: 'usage_unknown', budgetTokensUsed: 10 }) })
+    const emit = (stream_seq: number, usageCoverage: string, budgetTokensUsed: number) => handlers.get('session.event.goal')?.({
+      session_key: SESSION_KEY, session_id: SESSION_ID, epoch: 1, stream_seq,
+      goal: goalPayload('paused', { stateRevision: 3, usageCoverage, pauseReason: 'usage_unknown', budgetTokensUsed }),
+    })
+    emit(12, 'complete', 45)
+    expect(api.goal.value).toMatchObject({ status: 'paused', usageCoverage: 'complete', budgetTokensUsed: 45 })
+    emit(11, 'partial_usage', 10)
+    expect(api.goal.value).toMatchObject({ status: 'paused', usageCoverage: 'complete', budgetTokensUsed: 45 })
+  })
+
   it.each(['subscribe', 'hydrate', 'retry'] as const)(
     'keeps newer Goal events when %s metadata carries an earlier questionnaire cursor',
     async source => {
@@ -312,6 +351,23 @@ describe('useChatGoals', () => {
     expect(api.draftArmed.value).toBe(true)
     api.disarm()
     expect(api.draftArmed.value).toBe(false)
+  })
+
+  it('applies optional budget and background policy to the initial goal without an extra edit', async () => {
+    const { api, rpc } = harness()
+    api.draftSettings.value = { tokenBudget: 10000, executionPolicy: 'background' }
+    expect(await api.startGoal('Refactor the module')).toBe(true)
+    expect(rpc.call).toHaveBeenCalledOnce()
+    expect(rpc.call.mock.calls[0]?.[1]).toMatchObject({ tokenBudget: 10000, executionPolicy: 'background' })
+    api.disarm()
+    expect(api.draftSettings.value).toEqual({})
+  })
+
+  it.each([0, -1, 1.5, Number.NaN])('does not submit an invalid token budget (%s)', async tokenBudget => {
+    const { api, rpc } = harness()
+    api.draftSettings.value = { tokenBudget }
+    expect(await api.startGoal('Refactor the module')).toBe(false)
+    expect(rpc.call).not.toHaveBeenCalled()
   })
 
   it('starts from the mutation response after subscription without watchers or polling', async () => {

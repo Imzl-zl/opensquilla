@@ -99,6 +99,15 @@ def _build_contract_probe(tmp_path: Path) -> Path:
         REPO_ROOT / "scripts" / "verify_webui_artifact.py",
         scripts / "verify_webui_artifact.py",
     )
+    shutil.copy2(
+        REPO_ROOT / "scripts" / "freeze_migration_registry.py",
+        scripts / "freeze_migration_registry.py",
+    )
+    migrations = probe / "migrations"
+    migrations.mkdir()
+    (migrations / "V001__build_probe.py").write_text(
+        "from yoyo import step\nsteps = [step('SELECT 1')]\n", encoding="utf-8",
+    )
     shutil.copy2(REPO_ROOT / ".gitignore", probe / ".gitignore")
     (probe / "pyproject.toml").write_text(
         """\

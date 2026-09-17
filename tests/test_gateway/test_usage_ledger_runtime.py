@@ -620,3 +620,55 @@ async def test_unknown_provider_receipt_is_explicitly_closed(
     assert storage.unknown[0][0] == "event-1"
     assert storage.unknown[0][1] >= 1_000
     assert storage.unknown[0][2] == expected
+
+
+@pytest.mark.parametrize("observer_error", [RuntimeError, asyncio.CancelledError])
+async def test_goal_usage_observer_failure_does_not_retry_committed_accounting(
+    observer_error: type[BaseException],
+) -> None:
+    from types import SimpleNamespace
+
+    calls = []
+
+    class Storage:
+        async def finalize_usage_event(self, event_id, completion, **kwargs):
+            calls.append(event_id)
+            return SimpleNamespace(
+                goal_id="synthetic-goal", transition_applied=True, event_id=event_id
+            )
+
+    async def observer(goal_id: str) -> None:
+        assert goal_id == "synthetic-goal"
+        raise observer_error("Synthetic disconnected observer")
+
+    sink = SessionUsageEventSink(Storage(), on_goal_usage=observer, retry_delays=(0,))
+    await sink.finalize(_call(), _result())
+    assert calls == ["event-1"]
+    assert sink._tasks == set()
+
+
+async def test_goal_usage_observer_preserves_actual_task_cancellation() -> None:
+    from types import SimpleNamespace
+
+    notified = asyncio.Event()
+    calls = []
+
+    class Storage:
+        async def finalize_usage_event(self, event_id, completion, **kwargs):
+            calls.append(event_id)
+            return SimpleNamespace(
+                goal_id="synthetic-goal", transition_applied=True, event_id=event_id
+            )
+
+    async def observer(goal_id: str) -> None:
+        notified.set()
+        await asyncio.Future()
+
+    sink = SessionUsageEventSink(Storage(), on_goal_usage=observer, retry_delays=(0,))
+    finalizing = asyncio.create_task(sink.finalize(_call(), _result()))
+    await asyncio.wait_for(notified.wait(), 1)
+    finalizing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await finalizing
+    assert calls == ["event-1"]
+    assert sink._tasks == set()

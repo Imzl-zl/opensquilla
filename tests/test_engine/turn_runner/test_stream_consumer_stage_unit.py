@@ -2842,7 +2842,7 @@ async def test_auto_published_artifact_is_adopted_before_public_yield(
             "step-1",
             "in_progress",
             "task-artifact",
-            0,
+            1,
             id="running-current-step",
         ),
         pytest.param(
@@ -2858,7 +2858,7 @@ async def test_auto_published_artifact_is_adopted_before_public_yield(
             None,
             "completed",
             "other-task",
-            0,
+            1,
             id="running-delivery-ready-other-owner",
         ),
         pytest.param(
@@ -2871,7 +2871,7 @@ async def test_auto_published_artifact_is_adopted_before_public_yield(
         ),
     ],
 )
-async def test_plan_run_auto_publish_requires_live_delivery_ready_state(
+async def test_plan_run_auto_publish_uses_normal_delivery_rules_without_checkpoint_reads(
     tmp_path: Path,
     run_status: str,
     current_step_id: str | None,
@@ -2915,7 +2915,7 @@ async def test_plan_run_auto_publish_requires_live_delivery_ready_state(
 
     await _drain(stage, _make_input(state=state, tool_context=ctx))
 
-    assert storage.calls == ["run-artifact"]
+    assert storage.calls == []
     assert len(ctx.published_artifacts) == expected_artifact_count
     assert state.turn_artifacts == ctx.published_artifacts
 

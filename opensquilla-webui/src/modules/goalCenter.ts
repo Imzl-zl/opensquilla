@@ -3,6 +3,11 @@ import type { InjectionKey } from 'vue'
 export type GoalStatus = string
 
 /** Domain projection of a durable goal; wire aliases stay in the adapter. */
+export interface GoalExecutionOptions {
+  readonly tokenBudget?: number | null
+  readonly executionPolicy?: 'foreground' | 'background'
+}
+
 export interface GoalSnapshot {
   readonly goalId?: string
   readonly sessionKey?: string
@@ -29,6 +34,11 @@ export interface GoalSnapshot {
   readonly activeTimeMs?: number
   readonly windowActiveTimeMs?: number
   readonly usage?: unknown
+  readonly tokenBudget?: number | null
+  readonly budgetTokensUsed?: number
+  readonly usageCoverage?: 'complete' | 'partial_history' | 'partial_usage'
+  readonly usageAccountingStartedAtMs?: number | null
+  readonly executionPolicy?: 'foreground' | 'background'
   readonly pauseReason?: string | null
   readonly blockedReason?: string | null
   readonly terminalReason?: string | null
@@ -41,7 +51,7 @@ export interface GoalStatusResult {
   readonly goal: GoalSnapshot | null
 }
 
-export interface GoalSetInput {
+export interface GoalSetInput extends GoalExecutionOptions {
   readonly sessionKey: string
   readonly objective: string
   readonly clientRequestId: string
@@ -132,7 +142,7 @@ export interface GoalCenter {
   capabilities(options?: { signal?: AbortSignal }): Promise<GoalCapabilities>
   status(sessionKey: string, options?: { signal?: AbortSignal }): Promise<GoalStatusResult>
   set(input: GoalSetInput, options?: { signal?: AbortSignal }): Promise<GoalSetResult>
-  edit(input: GoalMutationInput & { objective: string }, options?: { signal?: AbortSignal }): Promise<GoalMutationResult>
+  edit(input: GoalMutationInput & GoalExecutionOptions & { objective: string }, options?: { signal?: AbortSignal }): Promise<GoalMutationResult>
   pause(input: GoalMutationInput, options?: { signal?: AbortSignal }): Promise<GoalMutationResult>
   resume(input: GoalMutationInput, options?: { signal?: AbortSignal }): Promise<GoalMutationResult>
   clear(input: GoalMutationInput, options?: { signal?: AbortSignal }): Promise<GoalMutationResult>

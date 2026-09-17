@@ -8,7 +8,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1211,19 +1211,22 @@ async def test_resume_reuses_an_unsettled_goal_owner_without_duplicate_task(
 async def test_edit_reactivates_complete_goal_and_returns_new_continuity(
     tmp_path: Path,
 ) -> None:
+    async def handler(run: TaskRun) -> None:
+        assert run.goal_context is not None
+        await stack.service.update_progress(
+            run.goal_context,
+            explanation="The original objective was delivered.",
+            steps=[{"step": "Deliver it", "status": "completed"}],
+        )
+
     async with _open_goal_rpc_stack(
-        tmp_path / "goal-edit-complete.sqlite",
+        tmp_path / "goal-edit-complete.sqlite", handler=handler,
     ) as stack:
         created = await _handle_goals_set(_set_params(), stack.context)
         task = await stack.runtime.wait(created["taskId"], timeout=2.0)
         assert task.details is not None
         context = GoalTurnContext.from_task_detail(task.details.get("goal_context"))
         assert context is not None
-        await stack.service.update_progress(
-            context.as_task_detail(),
-            explanation="The original objective was delivered.",
-            steps=[{"step": "Deliver it", "status": "completed"}],
-        )
         await stack.service.commit_model_status(
             context.as_task_detail(),
             status="complete",
@@ -3446,6 +3449,51 @@ async def test_continuation_post_accept_read_failure_compensates_before_provider
 
 
 @pytest.mark.asyncio
+async def test_goal_waits_for_existing_child_completion_group_then_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensquilla.gateway import subagent_announce
+    from opensquilla.gateway.background_completion import BackgroundCompletionManager
+
+    runs: list[TaskRun] = []
+    resumed = asyncio.Event()
+
+    async def handler(run: TaskRun) -> None:
+        runs.append(run)
+        if len(runs) > 1:
+            resumed.set()
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "goal-child-wait.sqlite", handler=handler,
+    ) as stack:
+        manager = BackgroundCompletionManager(session_manager=stack.manager)
+        manager.set_idle_listener(stack.service.schedule_idle_evaluation)
+        monkeypatch.setattr(subagent_announce, "_background_completion_manager", manager)
+        try:
+            created = await _handle_goals_set(_set_params(), stack.context)
+            await _settle_set_task(stack, created)
+            await manager.emit_waiting(
+                parent_session_key=SOURCE_KEY, parent_task_id=created["taskId"], pending_count=1,
+            )
+            await stack.service._kick_if_idle(SOURCE_KEY)
+            assert len(runs) == 1
+            waiting = await stack.storage.get_goal(SOURCE_KEY)
+            assert waiting is not None and waiting.status == "active"
+            assert waiting.continuation_seq == 0
+            assert not await stack.runtime.has_session_work(SOURCE_KEY)
+
+            # The existing group releases the parent only after its result wake.
+            # This event, rather than a polling loop, re-evaluates ordinary work.
+            await manager._evict_group(manager.group_id(SOURCE_KEY, created["taskId"]))
+            await asyncio.wait_for(resumed.wait(), timeout=3)
+            assert len(runs) == 2
+            assert not await manager.active_group_ids(SOURCE_KEY)
+        finally:
+            await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_coalesced_dirty_kick_runs_a_second_idle_evaluation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4289,17 +4337,18 @@ async def test_goal_artifact_loop_commits_and_settles_durable_terminal_state(
             timeout=3.0,
         )
 
-        # The terminal Goal write is authoritative. A failure in the optional
-        # explanatory summary degrades to deterministic terminal text instead
-        # of turning the already-complete task into a System Error.
-        assert task.status == AgentTaskStatus.SUCCEEDED
+        # Goal completion is durable, while subsequent provider calls retain
+        # the ordinary task lifecycle and report their actual failure.
+        expected_task_status = (
+            AgentTaskStatus.SUCCEEDED if final_summary_failure is None else AgentTaskStatus.FAILED
+        )
+        assert task.status == expected_task_status
         assert provider.calls == 3
         assert all(
             {"publish_artifact", "update_goal", "update_goal_progress"}
             <= set(tool_names)
-            for tool_names in provider.tool_names_seen[:2]
+            for tool_names in provider.tool_names_seen
         )
-        assert provider.tool_names_seen[2] == []
         assert publish_calls == ["report.html"]
         assert goal.terminal_task_id == created["taskId"]
         assert goal.terminal_reason == "model_complete"
@@ -4334,7 +4383,10 @@ async def test_goal_artifact_loop_commits_and_settles_durable_terminal_state(
                 if isinstance(artifact, dict) and artifact.get("id")
             )
         assert persisted_artifact_ids == ["art-goal-e2e"]
-        assert persisted_assistant_text[-1] == "The Goal is complete."
+        if final_summary_failure is None:
+            assert persisted_assistant_text[-1] == "The Goal is complete."
+        else:
+            assert "The Goal is complete." not in persisted_assistant_text
 
 
 class _DurableGoalContinuationProvider:
@@ -4397,7 +4449,7 @@ class _DurableGoalContinuationProvider:
             )
             self.second_task_provider_started.set()
         elif call == 3:
-            assert tool_names == []
+            assert goal_tools <= set(tool_names)
         else:
             raise AssertionError("The Goal continuation made an extra provider call")
 
@@ -4618,9 +4670,8 @@ async def test_real_turn_runner_continuation_reuses_durable_goal_context_and_com
         assert provider.calls == 3
         assert all(
             {"update_goal", "update_goal_progress"} <= set(tool_names)
-            for tool_names in provider.tool_names_seen[:2]
+            for tool_names in provider.tool_names_seen
         )
-        assert provider.tool_names_seen[2] == []
         assert goal.status == "complete"
         assert goal.terminal_task_id == second_task_id
         assert goal.terminal_reason == "model_complete"
@@ -4717,7 +4768,7 @@ class _RunningGoalEditProvider:
         elif call == 3:
             assert goal_tools <= set(tool_names)
         elif call == 4:
-            assert tool_names == []
+            assert goal_tools <= set(tool_names)
         else:
             raise AssertionError("Running Goal edit made an extra provider call")
         if call >= 2:
@@ -4920,7 +4971,7 @@ async def test_running_goal_edit_adopts_revision_in_same_task_without_transcript
         assert [run.task_id for run in runs] == [created["taskId"]]
         assert provider.calls == 4
         assert provider.partial_text in provider.request_texts[1]
-        assert provider.tool_names_seen[3] == []
+        assert {"update_goal", "update_goal_progress"} <= set(provider.tool_names_seen[3])
         assert goal.objective_revision == 2
         assert goal.objective == provider.edited_objective
         assert goal.terminal_task_id == created["taskId"]
@@ -5155,3 +5206,591 @@ async def test_goal_reattach_contract_maps_invalid_result_without_running_twice(
     assert calls == 1
     assert error.value.code == "INTERNAL_ERROR"
     assert error.value.message == "goals.reattach response violated its v4 contract"
+
+
+async def test_background_goal_continues_after_disconnect_but_shutdown_pauses(
+    tmp_path: Path,
+) -> None:
+    started = asyncio.Event()
+    release_first = asyncio.Event()
+    continued = asyncio.Event()
+    release_second = asyncio.Event()
+    runs: list[TaskRun] = []
+
+    async def handler(run: TaskRun) -> None:
+        runs.append(run)
+        if len(runs) == 1:
+            started.set()
+            await release_first.wait()
+        elif len(runs) == 2:
+            continued.set()
+            await release_second.wait()
+        else:
+            raise AssertionError("Shutdown must not admit another automatic task")
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "background-goal.sqlite",
+        handler=handler,
+        wire_lifecycle=True,
+    ) as stack:
+        created = await _handle_goals_set(
+            {**_set_params(), "executionPolicy": "background"},
+            stack.context,
+        )
+        await asyncio.wait_for(started.wait(), 2)
+        assert created["goal"]["executionPolicy"] == "background"
+        stack.subscriptions.unsubscribe_messages(stack.context.conn_id, SOURCE_KEY)
+        get_registry().unregister(stack.context.conn_id)
+        await stack.service.on_subscription_lost(stack.context.conn_id, SOURCE_KEY)
+        release_first.set()
+        await asyncio.wait_for(continued.wait(), 2)
+        status = await stack.service.status(SOURCE_KEY)
+        assert status["goal"]["status"] == "active"
+        assert status["goal"]["continuationDeferredReason"] is None
+        await stack.service.prepare_shutdown()
+        paused = await stack.storage.get_goal(SOURCE_KEY)
+        assert paused is not None
+        assert (paused.status, paused.pause_reason) == ("paused", "process_restart")
+        assert paused.background is True
+        release_second.set()
+        await stack.runtime.wait(runs[1].task_id, timeout=2)
+        assert len(runs) == 2
+
+
+@pytest.mark.parametrize("invalid_principal", [None, replace(_PRINCIPAL, scopes=frozenset())])
+async def test_background_goal_cannot_restore_invalid_authority_after_disconnect(
+    tmp_path: Path,
+    invalid_principal: Principal | None,
+) -> None:
+    async with _open_goal_rpc_stack(tmp_path / "background-revoked.sqlite") as stack:
+        await _handle_goals_set(
+            {**_set_params(), "executionPolicy": "background"}, stack.context,
+        )
+        goal = await stack.storage.get_goal(SOURCE_KEY)
+        assert goal is not None
+        assert stack.service._lease_for(goal) is not None
+        connection = get_registry().get(stack.context.conn_id)
+        assert connection is not None
+        connection.principal = invalid_principal
+        assert stack.service._lease_for(goal) is None
+        get_registry().unregister(stack.context.conn_id)
+        assert stack.service._lease_for(goal) is None
+        assert SOURCE_KEY not in stack.service._continuity_grants
+
+
+async def test_natural_create_attaches_to_ordinary_running_rpc_task(tmp_path: Path) -> None:
+    created_goals: list[dict[str, Any]] = []
+    runtime_contexts: list[dict[str, Any]] = []
+
+    async def handler(run: TaskRun) -> None:
+        ctx = SimpleNamespace(
+            session_key=SOURCE_KEY,
+            task_id=run.task_id,
+            session_id=run.envelope.session_id,
+            session_epoch=run.envelope.session_epoch,
+            goal_context=None,
+        )
+        created = await stack.service.create_from_turn(
+            ctx,
+            objective="Complete the synthetic requested work.",
+            token_budget=None,
+        )
+        created_goals.append(created)
+        runtime_contexts.append(ctx.goal_context)
+        await stack.service.commit_model_status(ctx.goal_context, status="complete", reason=None)
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "natural-goal.sqlite",
+        handler=handler,
+        wire_lifecycle=True,
+    ) as stack:
+        accepted = await _handle_sessions_send_contract(
+            {
+                "key": SOURCE_KEY,
+                "message": "Create a goal for this synthetic work.",
+                "clientRequestId": "natural-goal-create",
+            },
+            stack.context,
+        )
+        task = await stack.runtime.wait(accepted["task_id"], timeout=2)
+        assert task.status == AgentTaskStatus.SUCCEEDED
+        assert len(created_goals) == 1
+        assert created_goals[0]["activeTaskId"] == accepted["task_id"]
+        assert created_goals[0]["executionPolicy"] == "foreground"
+        assert runtime_contexts[0]["taskId"] == accepted["task_id"]
+        assert await _table_count(stack.storage, "agent_tasks") == 1
+        assert await _table_count(stack.storage, "transcript_entries") == 1
+        goal = await _wait_for_goal(
+            stack.storage,
+            lambda value: value.status == "complete" and value.active_task_id is None,
+        )
+        assert goal.turns_started == goal.turns_settled == 1
+
+
+async def test_background_opt_in_requires_subscription_before_durable_edit(tmp_path: Path) -> None:
+    async with _open_goal_rpc_stack(tmp_path / "goal-background-authority.sqlite") as stack:
+        created = await _handle_goals_set(_set_params(), stack.context)
+        await stack.runtime.wait(created["taskId"], timeout=2)
+        stack.subscriptions.unsubscribe_messages(stack.context.conn_id, SOURCE_KEY)
+        with pytest.raises(RpcHandlerError) as exc:
+            await _handle_goals_edit(
+                {
+                    **_mutation_params(created["goal"], request_index=2),
+                    "objective": created["goal"]["objective"],
+                    "executionPolicy": "background",
+                },
+                stack.context,
+            )
+        assert exc.value.code == "EXECUTION_LEASE_REQUIRED"
+        goal = await stack.storage.get_goal(SOURCE_KEY)
+        assert goal is not None and goal.background is False
+        assert goal.state_revision == created["goal"]["stateRevision"]
+
+
+async def test_three_empty_automatic_turns_pause_without_counting_user_turn(tmp_path: Path) -> None:
+    runs: list[TaskRun] = []
+
+    async def handler(run: TaskRun) -> None:
+        runs.append(run)
+        task = await stack.storage.get_agent_task(run.task_id)
+        assert task is not None
+        details = dict(task.details)
+        details["activity_snapshot"] = {
+            "version": 2,
+            "task_id": run.task_id,
+            "turn_id": run.task_id,
+            "complete": True,
+            "entries": [
+                {
+                    "type": "phase",
+                    "id": "thinking",
+                    "order": 1,
+                    "kind": "state",
+                    "phase": "thinking",
+                    "at": 1,
+                    "ended_at": 2,
+                },
+            ],
+        }
+        await stack.storage.update_agent_task(run.task_id, details=details)
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "empty-continuations.sqlite",
+        handler=handler,
+        wire_lifecycle=True,
+    ) as stack:
+        await _handle_goals_set(_set_params(), stack.context)
+        goal = await _wait_for_goal(
+            stack.storage,
+            lambda value: value.status == "paused" and value.active_task_id is None,
+        )
+        assert goal.pause_reason == "empty_continuations"
+        assert len(runs) == 4
+        assert [run.goal_context["automatic"] for run in runs] == [False, True, True, True]
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"type": "segment", "segment_type": "text", "text_utf16_length": 1},
+        {"type": "segment", "segment_type": "tool", "name": "wait_agent"},
+        {"type": "interrupt", "interrupt_type": "approval"},
+        {"type": "reasoning"},
+        {"type": "phase", "phase": "retrying"},
+    ],
+)
+def test_goal_empty_guard_excludes_useful_activity_and_waits(entry: dict[str, Any]) -> None:
+    context = GoalTurnContext(
+        session_id="synthetic-session",
+        epoch=0,
+        goal_id="synthetic-goal",
+        objective_revision=1,
+        objective_snapshot="Do synthetic work.",
+        task_id="synthetic-task",
+        continuation_seq=1,
+        automatic=True,
+    )
+    task = SimpleNamespace(
+        status=AgentTaskStatus.SUCCEEDED,
+        details={"activity_snapshot": {"version": 2, "complete": True, "entries": [entry]}},
+    )
+    assert GoalService._empty_automatic_turn(task, context) is False
+    task.details = {}
+    assert GoalService._empty_automatic_turn(task, context) is False
+
+
+async def test_natural_resume_and_edit_reuse_current_ordinary_task(tmp_path: Path) -> None:
+    runs: list[TaskRun] = []
+    snapshots: list[dict[str, Any]] = []
+
+    async def handler(run: TaskRun) -> None:
+        runs.append(run)
+        if len(runs) == 1:
+            await stack.service.commit_model_status(run.goal_context, status="paused", reason=None)
+            return
+        ctx = SimpleNamespace(
+            session_key=SOURCE_KEY,
+            task_id=run.task_id,
+            session_id=run.envelope.session_id,
+            session_epoch=run.envelope.session_epoch,
+            goal_context=None,
+        )
+        snapshot = await stack.service.update_from_turn(
+            ctx,
+            objective="Complete the updated synthetic objective.",
+            settings={"tokenBudget": 1000},
+            resume=True,
+        )
+        snapshots.append(snapshot)
+        assert snapshot["activeTaskId"] == run.task_id
+        await stack.service.commit_model_status(ctx.goal_context, status="complete", reason=None)
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "natural-resume.sqlite",
+        handler=handler,
+        wire_lifecycle=True,
+    ) as stack:
+        created = await _handle_goals_set(_set_params(), stack.context)
+        await stack.runtime.wait(created["taskId"], timeout=2)
+        await _wait_for_goal(
+            stack.storage,
+            lambda value: value.status == "paused" and value.active_task_id is None,
+        )
+        sent = await _handle_sessions_send_contract(
+            {
+                "key": SOURCE_KEY,
+                "message": "Resume and update the synthetic goal.",
+                "clientRequestId": "natural-goal-resume",
+            },
+            stack.context,
+        )
+        task = await stack.runtime.wait(sent["task_id"], timeout=2)
+        assert task.status == AgentTaskStatus.SUCCEEDED
+        assert len(runs) == 2 and len(snapshots) == 1
+        assert snapshots[0]["objectiveRevision"] == 2
+        assert snapshots[0]["tokenBudget"] == 1000
+        goal = await _wait_for_goal(
+            stack.storage,
+            lambda value: value.status == "complete" and value.active_task_id is None,
+        )
+        assert goal.turns_started == goal.turns_settled == 2
+        assert await _table_count(stack.storage, "agent_tasks") == 2
+        assert await _table_count(stack.storage, "transcript_entries") == 2
+
+
+@pytest.mark.parametrize("initial_status", ["active", "paused"])
+@pytest.mark.parametrize("change", ["objective", "token_budget", "pause_only"])
+async def test_natural_dispatch_edits_and_pauses_atomically_in_current_task(
+    tmp_path: Path, initial_status: str, change: str,
+) -> None:
+    from opensquilla.engine.types import ToolCall
+    from opensquilla.tools.dispatch import build_tool_handler
+    from opensquilla.tools.types import CallerKind, ToolContext
+
+    runs: list[str] = []
+    snapshots: list[dict[str, Any]] = []
+
+    async def handler(run: TaskRun) -> None:
+        runs.append(run.task_id)
+        ctx = ToolContext(
+            caller_kind=CallerKind.WEB, run_mode="full", is_owner=True,
+            session_key=SOURCE_KEY, session_id=run.envelope.session_id,
+            session_epoch=run.envelope.session_epoch, task_id=run.task_id,
+            workspace_dir=str(tmp_path / "workspace"), goal_service=stack.service,
+            goal_context=run.goal_context,
+            allowed_tools={"create_goal", "update_goal", "get_goal"},
+        )
+        dispatch = build_tool_handler(get_default_registry(), ctx)
+
+        async def invoke(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+            result = await dispatch(ToolCall(
+                tool_use_id=str(uuid.uuid4()), tool_name=name, arguments=arguments,
+            ))
+            assert not result.is_error, result.content
+            return json.loads(result.content)
+
+        if len(runs) == 1:
+            await invoke("create_goal", {"objective": "Complete the first synthetic objective."})
+            if initial_status == "paused":
+                await invoke("update_goal", {"status": "paused"})
+                return
+        before = await stack.storage.get_goal(SOURCE_KEY)
+        assert before is not None and before.status == initial_status
+        for invalid in (
+            {"objective": "Invalid combined terminal edit.", "status": "complete"},
+            {"objective": "Invalid combined terminal edit.", "status": "blocked",
+             "reason": "Repeated synthetic blocker."},
+            {"token_budget": 1000, "status": "active", "reason": "Invalid reason."},
+            {"objective": "Invalid pause reason.", "status": "paused",
+             "reason": "Invalid reason."},
+        ):
+            rejected = await dispatch(ToolCall(
+                tool_use_id=str(uuid.uuid4()), tool_name="update_goal", arguments=invalid,
+            ))
+            assert rejected.is_error
+            assert json.loads(rejected.content)["error_class"] == "RetryableToolInputError"
+            unchanged = await stack.storage.get_goal(SOURCE_KEY)
+            assert unchanged == before
+        event_count = len(stack.events)
+        arguments: dict[str, Any] = {"status": "paused"}
+        if change != "pause_only":
+            arguments[change] = (
+                "Complete the edited synthetic objective." if change == "objective" else 1200
+            )
+        edited = (await invoke("update_goal", arguments))["goal"]
+        snapshots.append(edited)
+        assert edited["goalId"] == before.goal_id
+        assert edited["status"] == "paused" and edited["pauseReason"] == "user"
+        assert edited["activeTaskId"] == run.task_id
+        assert edited["stateRevision"] == before.state_revision + 1
+        assert len(stack.events) == event_count + 1
+        persisted = await stack.storage.get_goal(SOURCE_KEY)
+        assert persisted is not None and persisted.status == "paused"
+        assert persisted.active_task_id == run.task_id
+        assert persisted.objective == edited["objective"]
+        assert persisted.token_budget == edited["tokenBudget"]
+        read = (await invoke("get_goal", {}))["goal"]
+        assert read["goalId"] == before.goal_id and read["status"] == "paused"
+        for arguments in (
+            {"status": "complete", "reason": "Invalid reason."},
+            {"status": "paused", "reason": "Invalid reason."},
+            {"status": "blocked"},
+        ):
+            rejected = await dispatch(ToolCall(
+                tool_use_id=str(uuid.uuid4()), tool_name="update_goal", arguments=arguments,
+            ))
+            assert rejected.is_error
+            assert json.loads(rejected.content)["error_class"] == "RetryableToolInputError"
+        assert await stack.storage.get_goal(SOURCE_KEY) == persisted
+        task = await stack.storage.get_agent_task(run.task_id)
+        assert task is not None and task.status == AgentTaskStatus.RUNNING
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "natural-edit-pause.sqlite", handler=handler, wire_lifecycle=True,
+    ) as stack:
+        expected_count = 1 if initial_status == "active" else 2
+        for index in range(expected_count):
+            sent = await _handle_sessions_send_contract(
+                {"key": SOURCE_KEY, "message": "Edit and pause this synthetic Goal.",
+                 "clientRequestId": f"natural-edit-pause-{index}"}, stack.context,
+            )
+            task = await stack.runtime.wait(sent["task_id"], timeout=3)
+            assert task.status == AgentTaskStatus.SUCCEEDED
+            await _wait_for_goal(
+                stack.storage, lambda goal: goal.status == "paused" and goal.active_task_id is None,
+            )
+        assert len(snapshots) == 1 and len(runs) == expected_count
+        assert await _table_count(stack.storage, "agent_tasks") == expected_count
+        assert await _table_count(stack.storage, "transcript_entries") == expected_count
+
+
+async def test_owned_background_turn_dispatch_can_pause_after_disconnect(tmp_path: Path) -> None:
+    from opensquilla.engine.types import ToolCall
+    from opensquilla.tools.dispatch import build_tool_handler
+    from opensquilla.tools.types import CallerKind, ToolContext
+
+    paused: list[dict[str, Any]] = []
+
+    async def handler(run: TaskRun) -> None:
+        connection_id = stack.context.conn_id
+        stack.subscriptions.unsubscribe_messages(connection_id, SOURCE_KEY)
+        get_registry().unregister(connection_id)
+        ctx = ToolContext(
+            caller_kind=CallerKind.WEB, run_mode="full", is_owner=True,
+            session_key=SOURCE_KEY, session_id=run.envelope.session_id,
+            session_epoch=run.envelope.session_epoch, task_id=run.task_id,
+            workspace_dir=str(tmp_path / "workspace"), goal_service=stack.service,
+            goal_context=run.goal_context, allowed_tools={"update_goal"},
+        )
+        result = await build_tool_handler(get_default_registry(), ctx)(ToolCall(
+            tool_use_id="pause-disconnected", tool_name="update_goal",
+            arguments={"status": "paused"},
+        ))
+        assert not result.is_error, result.content
+        snapshot = json.loads(result.content)["goal"]
+        assert snapshot["status"] == "paused" and snapshot["activeTaskId"] == run.task_id
+        paused.append(snapshot)
+        task = await stack.storage.get_agent_task(run.task_id)
+        assert task is not None and task.status == AgentTaskStatus.RUNNING
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "background-disconnected-pause.sqlite", handler=handler, wire_lifecycle=True,
+    ) as stack:
+        sent = await _handle_goals_set(
+            {**_set_params(), "executionPolicy": "background"}, stack.context,
+        )
+        task = await stack.runtime.wait(sent["taskId"], timeout=3)
+        assert task.status == AgentTaskStatus.SUCCEEDED
+        goal = await _wait_for_goal(
+            stack.storage, lambda goal: goal.status == "paused" and goal.active_task_id is None,
+        )
+        assert goal.pause_reason == "user" and len(paused) == 1
+        assert await _table_count(stack.storage, "agent_tasks") == 1
+
+
+async def test_queued_gateway_child_and_grandchild_usage_stays_with_root_goal(
+    tmp_path: Path,
+) -> None:
+    from opensquilla.gateway.routing import build_subagent_route_envelope
+    from opensquilla.session.usage_ledger import UsageEventCompletion, UsageEventStart
+
+    root_started = asyncio.Event()
+    release_root = asyncio.Event()
+    child_started = asyncio.Event()
+    release_child = asyncio.Event()
+    calls: list[UsageEventStart] = []
+
+    async def handler(run: TaskRun) -> None:
+        if run.envelope.session_key == SOURCE_KEY:
+            root_started.set()
+            await release_root.wait()
+            await stack.service.commit_model_status(
+                run.goal_context, status="complete", reason=None
+            )
+            return
+        if run.envelope.session_key.endswith(":child"):
+            child_started.set()
+            await release_child.wait()
+        call = UsageEventStart(
+            event_id=f"call-{run.task_id}",
+            execution_id=run.task_id,
+            call_index=1,
+            turn_id=run.task_id,
+            session_id=run.envelope.session_id,
+            session_epoch=run.envelope.session_epoch,
+            root_turn_id=run.envelope.metadata["usage_root_turn_id"],
+            parent_turn_id=run.envelope.metadata["parent_task_id"],
+            started_at_ms=200,
+        )
+        calls.append(call)
+        await stack.storage.start_usage_event(call)
+        await stack.storage.finalize_usage_event(
+            call.event_id,
+            UsageEventCompletion(
+                completed_at_ms=250, input_tokens=7, output_tokens=3, total_tokens=10
+            ),
+        )
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "gateway-child-usage.sqlite",
+        handler=handler,
+        wire_lifecycle=True,
+    ) as stack:
+        created = await _handle_goals_set(_set_params(), stack.context)
+        await asyncio.wait_for(root_started.wait(), 2)
+        parent = await stack.storage.get_session(SOURCE_KEY)
+        assert parent is not None
+        child_key = "agent:main:subagent:child"
+        child_session = await stack.manager.create(child_key, agent_id="main")
+        child = await stack.runtime.enqueue(
+            build_subagent_route_envelope(
+                session_key=child_key,
+                session_id=child_session.session_id,
+                session_epoch=0,
+                parent_session_key=SOURCE_KEY,
+                parent_session_id=parent.session_id,
+                parent_session_epoch=parent.epoch,
+                parent_task_id=created["taskId"],
+                spawn_depth=1,
+            ),
+            "Synthetic child work",
+            run_kind="subagent",
+        )
+        assert child.status == AgentTaskStatus.QUEUED
+        release_root.set()
+        await stack.runtime.wait(created["taskId"], timeout=2)
+        await asyncio.wait_for(child_started.wait(), 2)
+        grandchild_key = "agent:main:subagent:grandchild"
+        grandchild_session = await stack.manager.create(grandchild_key, agent_id="main")
+        grandchild = await stack.runtime.enqueue(
+            build_subagent_route_envelope(
+                session_key=grandchild_key,
+                session_id=grandchild_session.session_id,
+                session_epoch=0,
+                parent_session_key=child_key,
+                parent_session_id=child_session.session_id,
+                parent_session_epoch=0,
+                parent_task_id=child.task_id,
+                spawn_depth=2,
+            ),
+            "Synthetic grandchild work",
+            run_kind="subagent",
+        )
+        release_child.set()
+        child_result = await stack.runtime.wait(child.task_id, timeout=2)
+        assert child_result.status == AgentTaskStatus.SUCCEEDED, child_result.model_dump()
+        assert (
+            await stack.runtime.wait(grandchild.task_id, timeout=2)
+        ).status == AgentTaskStatus.SUCCEEDED
+        assert len(calls) == 2
+        assert {call.root_turn_id for call in calls} == {created["taskId"]}
+        assert {call.session_id for call in calls} == {
+            child_session.session_id,
+            grandchild_session.session_id,
+        }
+        goal = await stack.storage.get_goal(SOURCE_KEY)
+        assert goal is not None and goal.status == "complete"
+        assert goal.total_tokens == goal.budget_tokens_used == 20
+        for call in calls:
+            record = await stack.storage.start_usage_event(call)
+            assert record is not None and record.goal_id == goal.goal_id
+
+
+async def test_late_goal_usage_emits_once_after_commit_and_never_recreates_clear(
+    tmp_path: Path,
+) -> None:
+    from opensquilla.engine.usage_accounting import UsageCallResult, UsageCallStart
+    from opensquilla.gateway.usage_ledger_runtime import SessionUsageEventSink
+
+    async with _open_goal_rpc_stack(tmp_path / "goal-usage-events.sqlite") as stack:
+        created = await _handle_goals_set({**_set_params(), "tokenBudget": 5}, stack.context)
+        await stack.runtime.wait(created["taskId"], timeout=2)
+        session = await stack.storage.get_session(SOURCE_KEY)
+        assert session is not None
+        sink = SessionUsageEventSink(stack.storage, on_goal_usage=stack.service.on_usage_changed)
+        call = UsageCallStart(
+            event_id="late-visible",
+            execution_id="late-child-execution",
+            call_index=1,
+            agent_run_id="late-child-execution",
+            turn_id="inline-child",
+            parent_turn_id=created["taskId"],
+            root_turn_id=created["taskId"],
+            session_id=session.session_id,
+            session_epoch=session.epoch,
+            agent_id="main",
+            run_kind="subagent",
+            provider="synthetic",
+            model="synthetic",
+            started_at_ms=1,
+        )
+        await sink.start(call)
+        stack.events.clear()
+        result = UsageCallResult(
+            completed_at_ms=2,
+            input_tokens=4,
+            output_tokens=2,
+            reasoning_tokens=0,
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+            billed_cost_nanos=0,
+            estimated_cost_nanos=0,
+            cost_source="none",
+            estimate_basis=None,
+            price_source=None,
+            items=(),
+        )
+        await sink.finalize(call, result)
+        await sink.finalize(call, result)
+        assert len(stack.events) == 1
+        snapshot = stack.events[0][2]["goal"]
+        assert snapshot["budgetTokensUsed"] == 6
+        assert (snapshot["status"], snapshot["pauseReason"]) == ("paused", "token_budget")
+        second_call = replace(call, event_id="cleared-late", call_index=2)
+        await sink.start(second_call)
+        await _handle_goals_clear(_mutation_params(snapshot, request_index=2), stack.context)
+        stack.events.clear()
+        await sink.finalize(second_call, result)
+        assert stack.events == []
+        assert await stack.storage.get_goal(SOURCE_KEY) is None
+        await sink.close()

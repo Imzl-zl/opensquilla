@@ -274,7 +274,6 @@ from opensquilla.tools.types import (
     ToolResultSnapshotReference,
     ToolResultSnapshotWriter,
     current_tool_context,
-    is_goal_owned_main_default_turn,
 )
 from opensquilla.usage_reasons import (
     normalize_usage_unknown_reason,
@@ -340,47 +339,6 @@ _PROVIDER_OUTPUT_CONTINUE_PROMPT = (
     "been written. If a tool call was interrupted or incomplete, regenerate a complete "
     "tool call from scratch."
 )
-_PLAN_RUN_RECONCILIATION_LIMIT = 1
-PLAN_RUN_DELIVERY_TOOLS = frozenset({"publish_artifact", "open_workspace_preview"})
-
-
-def _plan_run_steps_ready_for_delivery(run: Any) -> bool:
-    """Whether every bounded step is done while task delivery is still pending."""
-
-    if run is None:
-        return False
-    if isinstance(run, Mapping):
-        status = str(run.get("status") or "")
-        current_step_id = run.get("currentStepId", run.get("current_step_id"))
-        raw_steps = run.get("steps", run.get("step_states"))
-    else:
-        status = str(getattr(run, "status", "") or "")
-        current_step_id = getattr(run, "current_step_id", None)
-        raw_steps = getattr(run, "step_states", None)
-    if status not in {"running", "completed"} or current_step_id:
-        return False
-    steps = list(raw_steps or [])
-    if not steps:
-        return False
-    statuses = [
-        str(step.get("status") if isinstance(step, Mapping) else getattr(step, "status", ""))
-        for step in steps
-    ]
-    return all(status in {"completed", "skipped"} for status in statuses)
-
-
-def _plan_run_checkpoint_enters_delivery_phase(result: ToolResult | None) -> bool:
-    if result is None or result.tool_name != "plan_run_checkpoint" or result.is_error:
-        return False
-    try:
-        payload = json.loads(result.content)
-    except (TypeError, ValueError):
-        return False
-    if not isinstance(payload, Mapping):
-        return False
-    return _plan_run_steps_ready_for_delivery(payload.get("plan_run"))
-
-
 _CLEAN_TEST_SUMMARY_RE = re.compile(
     r"\btests run:\s*\d+,\s*failures:\s*0,\s*errors:\s*0"
     r"(?:,\s*skipped:\s*\d+)?\b",
@@ -6016,9 +5974,7 @@ class Agent:
         install_turn = SkillInstallTurn(semantic_message or message)
         if self._tool_context is not None:
             self._tool_context.skill_install_turn = install_turn
-            install_turn.finalization_allowed = not (
-                self._tool_context.goal_context or self._tool_context.plan_run_id
-            )
+            install_turn.finalization_allowed = not self._tool_context.goal_context
         _meta_invoke_turn_count.set(0)
         usage_scope = current_usage_accounting_scope()
         reasoning_block_index = 0
@@ -6428,19 +6384,13 @@ class Agent:
         router_model_call_id = ""
         router_iteration = 0
         final_reasoning_parts: list[str] = []
+        goal_budget_notice: tuple[Any, ...] | None = None
         replay_boundary_notified = False
-        goal_terminal_final_response_pending = False
-        goal_terminal_final_status: str | None = None
         max_iterations_finalization_attempted = False
         max_iterations_finalization_pending = False
         max_iterations_finalization_message: Message | None = None
         reasoning_only_act_now_message: Message | None = None
         post_tool_empty_recovery_attempted = False
-        plan_run_reconciliation_attempts = 0
-        attached_plan_run_id = str(getattr(self._tool_context, "plan_run_id", "") or "").strip()
-        plan_run_delivery_only = _plan_run_steps_ready_for_delivery(
-            getattr(self._tool_context, "plan_run", None)
-        )
         reasoning_prefill_recovery_attempted = False
         runtime_recovery_scaffolding_pending = False
         runtime_recovery_mode: RuntimeRecoveryMode = getattr(
@@ -6945,65 +6895,34 @@ class Agent:
             staged_pending_input_message = None
             staged_claimed_goal_context = None
 
-        def _goal_terminal_final_response_text() -> str:
-            return (
-                "The Goal is complete."
-                if goal_terminal_final_status == "complete"
-                else "The Goal is blocked."
-            )
-
-        def _record_goal_terminal_synthesized_response(
-            *,
-            reason: str,
-            code: str,
-        ) -> str:
-            final_response_text = _goal_terminal_final_response_text()
-            self._write_turn_call_log(
-                "goal_terminal_final_response_synthesized",
-                reason=reason,
-                code=code,
-                status=goal_terminal_final_status,
-            )
-            return final_response_text
-
-        def _finish_goal_terminal_without_provider(*, reason: str, code: str) -> None:
-            """Finish an already-durable Goal when no summary call has headroom."""
-
-            nonlocal goal_terminal_final_response_pending
-            nonlocal goal_terminal_final_status
-            final_response_text = _record_goal_terminal_synthesized_response(
-                reason=reason,
-                code=code,
-            )
-            current_text = "".join(final_text_parts)
-            if final_response_text not in current_text:
-                prefix = "\n\n" if current_text.strip() else ""
-                final_text_parts.append(prefix + final_response_text)
-            goal_terminal_final_response_pending = False
-            goal_terminal_final_status = None
-
         try:
             while True:
-                if goal_terminal_final_response_pending:
-                    terminal_headroom_error = _turn_budget_error()
-                    if terminal_headroom_error is None:
-                        terminal_headroom_error = _turn_llm_call_budget_error(turn_llm_calls + 1)
-                    if terminal_headroom_error is not None:
-                        _finish_goal_terminal_without_provider(
-                            reason=terminal_headroom_error.message,
-                            code=terminal_headroom_error.code,
+                goal_service = getattr(self._tool_context, "goal_service", None)
+                goal_context = getattr(self._tool_context, "goal_context", None)
+                build_goal_context = getattr(goal_service, "build_prompt_context", None)
+                if isinstance(goal_context, Mapping) and callable(build_goal_context):
+                    current_goal = await build_goal_context(goal_context)
+                    if current_goal is not None and current_goal.get("pauseReason") in {
+                        "token_budget", "usage_unknown",
+                    }:
+                        notice = (
+                            current_goal.get("goalId"), current_goal.get("pauseReason"),
+                            current_goal.get("tokenBudget"),
                         )
-                        break
-                    if _total_deadline is not None and _loop.time() > _total_deadline:
-                        _finish_goal_terminal_without_provider(
-                            reason="The total turn deadline expired after Goal terminalization.",
-                            code="total_timeout",
-                        )
-                        break
+                        if notice != goal_budget_notice:
+                            goal_budget_notice = notice
+                            turn_messages.append(Message(
+                                role="user",
+                                content=(
+                                    "Goal automatic continuation is paused because its token "
+                                    "budget is exhausted or usage coverage is incomplete. "
+                                    "Wrap up the current work safely, preserve results and "
+                                    "report what remains. Started work and this finalization "
+                                    "still count toward usage. Do not resume automatically."
+                                ),
+                            ))
                 if (
-                    self.config.max_iterations > 0
-                    and iterations >= self.config.max_iterations
-                    and not goal_terminal_final_response_pending
+                    self.config.max_iterations > 0 and iterations >= self.config.max_iterations
                 ):
                     max_iterations_source = str(
                         self.config.metadata.get("agent_max_iterations_source", "agent_config")
@@ -7190,12 +7109,7 @@ class Agent:
 
                     request_suffix_messages: list[Message] = []
                     reasoning_only_act_now_for_call: Message | None = None
-                    if goal_terminal_final_response_pending:
-                        # The terminal Goal ToolResult is sufficient context for
-                        # one ordinary summary. Do not splice work/recovery
-                        # directives after the durable terminal decision.
-                        request_suffix_messages = []
-                    elif (
+                    if (
                         max_iterations_finalization_pending
                         and max_iterations_finalization_message is not None
                     ):
@@ -7274,18 +7188,11 @@ class Agent:
                                 )
                     provider_tools_for_call = (
                         None
-                        if goal_terminal_final_response_pending
-                        or max_iterations_finalization_pending
+                        if max_iterations_finalization_pending
                         else provider_tool_definitions
                     )
-                    if plan_run_delivery_only:
-                        provider_tools_for_call = self._plan_run_delivery_tool_definitions(
-                            provider_tools_for_call
-                        )
                     tools_supported_for_call = (
-                        tools_supported
-                        and not goal_terminal_final_response_pending
-                        and not max_iterations_finalization_pending
+                        tools_supported and (not max_iterations_finalization_pending)
                     )
                     base_recovery_available = self._tool_result_recovery_available()
                     call_retrieval_available = bool(
@@ -7324,23 +7231,6 @@ class Agent:
                             runtime_context_message=runtime_context_message,
                             runtime_context_insert_index=active_runtime_context_insert_index,
                         )
-                    except Exception as exc:
-                        if not goal_terminal_final_response_pending:
-                            raise
-                        response_text = _record_goal_terminal_synthesized_response(
-                            reason=(
-                                "Goal terminal summary request assembly failed after "
-                                f"terminalization ({type(exc).__name__})."
-                            ),
-                            code="goal_terminal_summary_request_assembly_failed",
-                        )
-                        assistant_text_parts.append(response_text)
-                        provider_done_for_log = ProviderDoneEvent(stop_reason="stop")
-                        _got_done_event = True
-                        _got_error = False
-                        terminal_error = None
-                        yield TextDeltaEvent(text=response_text)
-                        break
                     finally:
                         self._provider_call_tool_result_retrieval_available = (
                             previous_call_retrieval
@@ -7484,58 +7374,46 @@ class Agent:
                             message=validation_error.message,
                             code=validation_error.code,
                         )
-                        if goal_terminal_final_response_pending:
-                            response_text = _record_goal_terminal_synthesized_response(
-                                reason=terminal_error.message,
-                                code=terminal_error.code,
+                        if validation_image_failure.is_unsupported:
+                            exact_image_count = count_provider_image_blocks(
+                                request_messages
                             )
-                            assistant_text_parts.append(response_text)
-                            provider_done_for_log = ProviderDoneEvent(stop_reason="stop")
-                            _got_done_event = True
-                            _got_error = False
-                            terminal_error = None
-                            yield TextDeltaEvent(text=response_text)
-                        else:
-                            if validation_image_failure.is_unsupported:
-                                exact_image_count = count_provider_image_blocks(
-                                    request_messages
-                                )
-                                self.config.metadata["image_input_mode"] = "rejected"
-                                self.config.metadata.setdefault(
-                                    "image_input_reason",
-                                    "model_vision_unsupported",
-                                )
-                                self.config.metadata["image_input_count"] = exact_image_count
-                                self.config.metadata.setdefault(
-                                    "image_input_stage",
-                                    "primary",
-                                )
-                                self._write_turn_call_log(
-                                    "image_input_preflight",
-                                    action="reject",
-                                    reason=str(
-                                        self.config.metadata.get("image_input_reason")
-                                        or "model_vision_unsupported"
-                                    ),
-                                    stage=str(
-                                        self.config.metadata.get("image_input_stage") or "primary"
-                                    ),
-                                    image_count=int(
-                                        self.config.metadata.get("image_input_count") or 0
-                                    ),
-                                    iteration=iterations,
-                                    attempt=_call_attempt,
-                                )
+                            self.config.metadata["image_input_mode"] = "rejected"
+                            self.config.metadata.setdefault(
+                                "image_input_reason",
+                                "model_vision_unsupported",
+                            )
+                            self.config.metadata["image_input_count"] = exact_image_count
+                            self.config.metadata.setdefault(
+                                "image_input_stage",
+                                "primary",
+                            )
                             self._write_turn_call_log(
-                                "turn_policy_decision",
-                                action="stop",
-                                reason=terminal_error.message,
-                                code=terminal_error.code,
+                                "image_input_preflight",
+                                action="reject",
+                                reason=str(
+                                    self.config.metadata.get("image_input_reason")
+                                    or "model_vision_unsupported"
+                                ),
+                                stage=str(
+                                    self.config.metadata.get("image_input_stage") or "primary"
+                                ),
+                                image_count=int(
+                                    self.config.metadata.get("image_input_count") or 0
+                                ),
                                 iteration=iterations,
                                 attempt=_call_attempt,
                             )
-                            yield self._transition(AgentState.ERROR)
-                            yield terminal_error
+                        self._write_turn_call_log(
+                            "turn_policy_decision",
+                            action="stop",
+                            reason=terminal_error.message,
+                            code=terminal_error.code,
+                            iteration=iterations,
+                            attempt=_call_attempt,
+                        )
+                        yield self._transition(AgentState.ERROR)
+                        yield terminal_error
                         break
                     self._write_context_stage(
                         "stream:context",
@@ -7559,28 +7437,11 @@ class Agent:
                             iteration=iterations,
                             attempt=_call_attempt,
                         )
-                        if goal_terminal_final_response_pending:
-                            response_text = _goal_terminal_final_response_text()
-                            assistant_text_parts.append(response_text)
-                            provider_done_for_log = ProviderDoneEvent(stop_reason="stop")
-                            _got_done_event = True
-                            _got_error = False
-                            terminal_error = None
-                            self._write_turn_call_log(
-                                "turn_policy_decision",
-                                action="terminal_without_summary_retry_headroom",
-                                reason="goal_terminal",
-                                code="turn_llm_call_budget_exceeded",
-                            )
-                            yield TextDeltaEvent(text=response_text)
-                        else:
-                            yield self._transition(AgentState.ERROR)
-                            yield terminal_error
+                        yield self._transition(AgentState.ERROR)
+                        yield terminal_error
                         break
 
                     call_chat_cfg = chat_cfg
-                    if goal_terminal_final_response_pending:
-                        call_chat_cfg = call_chat_cfg.model_copy(update={"tool_choice": None})
                     forced_tool_choice = self.config.metadata.get("meta_match_tool_choice")
                     if (
                         forced_tool_choice is not None
@@ -7698,29 +7559,17 @@ class Agent:
                                 ),
                                 code="provider_request_budget_exhausted",
                             )
-                            if goal_terminal_final_response_pending:
-                                response_text = _record_goal_terminal_synthesized_response(
-                                    reason=terminal_error.message,
-                                    code=terminal_error.code,
-                                )
-                                assistant_text_parts.append(response_text)
-                                provider_done_for_log = ProviderDoneEvent(stop_reason="stop")
-                                _got_done_event = True
-                                _got_error = False
-                                terminal_error = None
-                                yield TextDeltaEvent(text=response_text)
-                            else:
-                                self._write_turn_call_log(
-                                    "turn_policy_decision",
-                                    action="stop",
-                                    reason=terminal_error.message,
-                                    code=terminal_error.code,
-                                    admission_source=admission_source,
-                                    iteration=iterations,
-                                    attempt=_call_attempt,
-                                )
-                                yield self._transition(AgentState.ERROR)
-                                yield terminal_error
+                            self._write_turn_call_log(
+                                "turn_policy_decision",
+                                action="stop",
+                                reason=terminal_error.message,
+                                code=terminal_error.code,
+                                admission_source=admission_source,
+                                iteration=iterations,
+                                attempt=_call_attempt,
+                            )
+                            yield self._transition(AgentState.ERROR)
+                            yield terminal_error
                             break
 
                     self._compaction_request_context = CompactionRequestContext(
@@ -8278,8 +8127,7 @@ class Agent:
                                     yield reasoning_end
                                 if not tools_supported_for_call:
                                     if (
-                                        goal_terminal_final_response_pending
-                                        or max_iterations_finalization_pending
+                                        max_iterations_finalization_pending
                                     ):
                                         ignored_post_delivery_tool_use = True
                                     continue
@@ -8399,8 +8247,7 @@ class Agent:
                                     yield reasoning_end
                                 if not tools_supported_for_call:
                                     if (
-                                        goal_terminal_final_response_pending
-                                        or max_iterations_finalization_pending
+                                        max_iterations_finalization_pending
                                     ):
                                         ignored_post_delivery_tool_use = True
                                     continue
@@ -8959,20 +8806,6 @@ class Agent:
                         # record the failed call, then propagate unchanged.
                         usage_unknown_reason = "total_timeout"
                         _notify_call_outcome(ok=False, failure_kind="total_timeout")
-                        if goal_terminal_final_response_pending:
-                            response_text = _goal_terminal_final_response_text()
-                            assistant_text_parts.append(response_text)
-                            provider_done_for_log = ProviderDoneEvent(stop_reason="stop")
-                            _got_done_event = True
-                            _got_error = False
-                            self._write_turn_call_log(
-                                "turn_policy_decision",
-                                action="terminal_after_summary_timeout",
-                                reason="goal_terminal",
-                                code="total_timeout",
-                            )
-                            yield TextDeltaEvent(text=response_text)
-                            break
                         raise
                     except ModelRepetitionLoopError as exc:
                         usage_unknown_reason = MODEL_REPETITION_LOOP_CODE
@@ -9029,20 +8862,6 @@ class Agent:
                             ok=False,
                             failure_kind=ProviderFailureKind.TRANSPORT_TRANSIENT.value,
                         )
-                        if goal_terminal_final_response_pending:
-                            response_text = _goal_terminal_final_response_text()
-                            assistant_text_parts.append(response_text)
-                            provider_done_for_log = ProviderDoneEvent(stop_reason="stop")
-                            _got_done_event = True
-                            _got_error = False
-                            self._write_turn_call_log(
-                                "turn_policy_decision",
-                                action="terminal_after_summary_provider_error",
-                                reason="goal_terminal",
-                                code="provider_exception",
-                            )
-                            yield TextDeltaEvent(text=response_text)
-                            break
                         provider_error = ProviderErrorEvent(
                             message=(
                                 "The connection to the model provider ended before "
@@ -9170,7 +8989,7 @@ class Agent:
                         )
                         break
                     terminal_error = (
-                        None if goal_terminal_final_response_pending else _turn_budget_error()
+                        _turn_budget_error()
                     )
                     if terminal_error is not None:
                         yield self._transition(AgentState.ERROR)
@@ -9184,13 +9003,7 @@ class Agent:
                         # canned finalization text first would surface it
                         # before the retried attempt's real answer.
                     ):
-                        if goal_terminal_final_response_pending:
-                            response_text = (
-                                "The Goal is complete."
-                                if goal_terminal_final_status == "complete"
-                                else "The Goal is blocked."
-                            )
-                        elif max_iterations_finalization_pending:
+                        if max_iterations_finalization_pending:
                             response_text = (
                                 "I reached the configured iteration limit after completing "
                                 "the available tool step. Here is the best partial result so far."
@@ -9247,23 +9060,6 @@ class Agent:
                         user_visible_emitted=attempt_user_visible_emitted,
                     )
                     if not _got_error and attempt_classification.kind != _ProviderAttemptKind.OK:
-                        if goal_terminal_final_response_pending:
-                            fallback_text = _goal_terminal_final_response_text()
-                            if fallback_text not in response_text:
-                                prefix = "\n\n" if response_text.strip() else ""
-                                appended_text = prefix + fallback_text
-                                assistant_text_parts.append(appended_text)
-                                yield TextDeltaEvent(text=appended_text)
-                            provider_done_for_log = ProviderDoneEvent(stop_reason="stop")
-                            _got_done_event = True
-                            _got_error = False
-                            self._write_turn_call_log(
-                                "turn_policy_decision",
-                                action="terminal_after_invalid_summary_response",
-                                reason="goal_terminal",
-                                code=attempt_classification.kind.value,
-                            )
-                            break
                         logger.warning(
                             "provider.invalid_response",
                             session_key=self._session_key,
@@ -10197,21 +9993,6 @@ class Agent:
                                 failure_kind=failure_kind.value,
                             )
                             yield terminal_error
-                            break
-                        if goal_terminal_final_response_pending:
-                            response_text = _goal_terminal_final_response_text()
-                            assistant_text_parts.append(response_text)
-                            provider_done_for_log = ProviderDoneEvent(stop_reason="stop")
-                            _got_done_event = True
-                            _got_error = False
-                            self._write_turn_call_log(
-                                "turn_policy_decision",
-                                action="terminal_after_summary_provider_error",
-                                reason="goal_terminal",
-                                code=goal_terminal_final_status or "goal_terminal",
-                                provider_error_code=safe_provider_error_code,
-                            )
-                            yield TextDeltaEvent(text=response_text)
                             break
                         message_limit_proof = provider_error.message_limit_proof
                         if message_limit_proof is not None:
@@ -11432,56 +11213,12 @@ class Agent:
 
                 # No tool calls → we're done
                 if not tool_calls:
-                    if goal_terminal_final_response_pending:
-                        goal_terminal_final_response_pending = False
-                        goal_terminal_final_status = None
-                        break
                     if await _claim_pending_inputs_for_next_call():
                         # A plain response is also a safe same-turn boundary.
                         # Keep the assistant output already emitted above, then
                         # continue with the claimed steer in this turn.
                         yield self._transition(AgentState.THINKING)
                         continue
-                    plan_run_reconciliation = (
-                        await self._unfinished_plan_run_reconciliation_message()
-                    )
-                    if plan_run_reconciliation is not None:
-                        if visible_text and final_text_parts:
-                            final_text_parts.pop()
-                        if plan_run_reconciliation_attempts < _PLAN_RUN_RECONCILIATION_LIMIT:
-                            plan_run_reconciliation_attempts += 1
-                            turn_messages.append(
-                                Message(role="user", content=plan_run_reconciliation)
-                            )
-                            self.config.metadata["plan_run_reconciliations"] = (
-                                self.config.metadata.get("plan_run_reconciliations", 0) + 1
-                            )
-                            self._write_turn_call_log(
-                                "plan_run_reconciliation",
-                                action="nudge",
-                                reason="final_response_before_terminal_checkpoint",
-                                iteration=iterations,
-                                provider_call_count=turn_llm_calls,
-                            )
-                            yield WarningEvent(
-                                code="plan_run_reconciliation",
-                                message=(
-                                    "The model attempted to finish before the PlanRun "
-                                    "reached a terminal checkpoint; asking it to reconcile "
-                                    "the current step once."
-                                ),
-                            )
-                            continue
-                        yield self._transition(AgentState.ERROR)
-                        terminal_error = ErrorEvent(
-                            message=(
-                                "The implementation turn ended without completing or "
-                                "blocking its attached PlanRun."
-                            ),
-                            code="plan_run_checkpoint_required",
-                        )
-                        yield terminal_error
-                        break
                     max_iterations_finalization_pending = False
                     break
                 tool_calls = [self._coerce_meta_tool_call(tc) for tc in tool_calls]
@@ -11938,8 +11675,8 @@ class Agent:
                     """Pair an undispatched tail call after a hard tool boundary.
 
                     Providers may emit more than one tool call in a response. Once
-                    a serial control tool ends the turn (for example a terminal
-                    PlanRun checkpoint), later calls must still receive matching
+                    a serial control tool ends the turn (for example submit_plan),
+                    later calls must still receive matching
                     tool-result blocks for transcript validity, but they must not
                     reach dispatch.
                     """
@@ -11960,25 +11697,6 @@ class Agent:
                         execution_status=runtime_execution_status(
                             "cancelled",
                             reason="turn_terminated",
-                        ),
-                    )
-
-                def _not_executed_during_plan_delivery(tc: ToolCall) -> ToolResult:
-                    return ToolResult(
-                        tool_use_id=tc.tool_use_id,
-                        tool_name=tc.tool_name,
-                        content=json.dumps(
-                            {
-                                "status": "not_executed",
-                                "reason": "plan_run_delivery_only",
-                                "allowed_tools": sorted(PLAN_RUN_DELIVERY_TOOLS),
-                            },
-                            ensure_ascii=False,
-                        ),
-                        is_error=True,
-                        execution_status=runtime_execution_status(
-                            "error",
-                            reason="plan_run_delivery_only",
                         ),
                     )
 
@@ -12045,29 +11763,6 @@ class Agent:
                         )
                         _record_completed_tool_result(results_by_id[tc.tool_use_id])
                         continue
-                    if plan_run_delivery_only and tc.tool_name not in PLAN_RUN_DELIVERY_TOOLS:
-                        results_by_id[tc.tool_use_id] = _not_executed_during_plan_delivery(tc)
-                        _record_completed_tool_result(results_by_id[tc.tool_use_id])
-                        continue
-                    if attached_plan_run_id and tc.tool_name == "submit":
-                        results_by_id[tc.tool_use_id] = ToolResult(
-                            tool_use_id=tc.tool_use_id,
-                            tool_name=tc.tool_name,
-                            content=json.dumps(
-                                {
-                                    "status": "not_executed",
-                                    "reason": "plan_run_checkpoint_required",
-                                },
-                                ensure_ascii=False,
-                            ),
-                            is_error=True,
-                            execution_status=runtime_execution_status(
-                                "error",
-                                reason="plan_run_checkpoint_required",
-                            ),
-                        )
-                        _record_completed_tool_result(results_by_id[tc.tool_use_id])
-                        continue
                     if tc.tool_name == "meta_invoke":
                         async for event in _flush_parallel_batch(parallel_batch):
                             yield event
@@ -12127,27 +11822,8 @@ class Agent:
                             or _pending_approval_payload(mutex_result.content) is not None
                         ):
                             dispatch_boundary = mutex_result
-                        if (
-                            mutex_result is not None
-                            and tc.tool_name == "update_goal"
-                            and is_goal_owned_main_default_turn(
-                                self._tool_context or current_tool_context.get()
-                            )
-                            and self._accepted_goal_terminal_status(
-                                [tc],
-                                [mutex_result],
-                            )
-                            is not None
-                        ):
-                            # A durable Goal terminal decision owns the rest of
-                            # this provider batch. Pair every later tool call
-                            # with a not-executed result, then perform exactly
-                            # one tool-free final-summary model call.
-                            dispatch_boundary = mutex_result
                         if mutex_result is not None and install_turn.complete:
                             dispatch_boundary = mutex_result
-                        if _plan_run_checkpoint_enters_delivery_phase(mutex_result):
-                            plan_run_delivery_only = True
 
                 async for event in _flush_parallel_batch(parallel_batch):
                     yield event
@@ -12182,49 +11858,54 @@ class Agent:
                         and self._session_key
                         and task_id
                     ):
-                        public_request = user_input_provider.open_request(
-                            session_key=self._session_key,
-                            task_id=task_id,
-                            tool_use_id=tc.tool_use_id,
-                            payload=pending_user_input,
-                        )
-                        request_id = str(public_request["request_id"])
+                        suspend = getattr(self._tool_context, "suspend_compute_slot", None)
                         user_input_wait_started = _loop.time()
                         try:
-                            pending_result = ToolResult(
-                                tool_use_id=tc.tool_use_id,
-                                tool_name=tc.tool_name,
-                                content=json.dumps(public_request, ensure_ascii=False),
-                                is_error=False,
-                            )
-                            projected_pending = await self._project_tool_result_for_delivery(
-                                pending_result,
-                                tool_call=tc,
-                            )
-                            yield ToolResultEvent(
-                                tool_use_id=projected_pending.tool_use_id,
-                                tool_name=projected_pending.tool_name,
-                                result=projected_pending.content,
-                                execution_log_handle=projected_pending.execution_log_handle,
-                                is_error=projected_pending.is_error,
-                                arguments=tc.arguments,
-                                execution_status=projected_pending.execution_status,
-                                effect_outcome=projected_pending.effect_outcome,
-                                generation_epoch=generation_epoch,
-                            )
-                            answers = await user_input_provider.wait_for_response(request_id)
+                            async with suspend() if callable(suspend) else contextlib.nullcontext():
+                                public_request = user_input_provider.open_request(
+                                    session_key=self._session_key,
+                                    task_id=task_id,
+                                    tool_use_id=tc.tool_use_id,
+                                    payload=pending_user_input,
+                                )
+                                request_id = str(public_request["request_id"])
+                                try:
+                                    pending_result = ToolResult(
+                                        tool_use_id=tc.tool_use_id,
+                                        tool_name=tc.tool_name,
+                                        content=json.dumps(public_request, ensure_ascii=False),
+                                        is_error=False,
+                                    )
+                                    projected_pending = (
+                                        await self._project_tool_result_for_delivery(
+                                            pending_result, tool_call=tc,
+                                        )
+                                    )
+                                    yield ToolResultEvent(
+                                        tool_use_id=projected_pending.tool_use_id,
+                                        tool_name=projected_pending.tool_name,
+                                        result=projected_pending.content,
+                                        execution_log_handle=projected_pending.execution_log_handle,
+                                        is_error=projected_pending.is_error,
+                                        arguments=tc.arguments,
+                                        execution_status=projected_pending.execution_status,
+                                        effect_outcome=projected_pending.effect_outcome,
+                                        generation_epoch=generation_epoch,
+                                    )
+                                    answers = await user_input_provider.wait_for_response(
+                                        request_id,
+                                    )
+                                finally:
+                                    # Also close requests when projection, waiting, or
+                                    # the event consumer fails or cancels the turn.
+                                    user_input_provider.cancel_request(request_id)
                         finally:
-                            # Human input suspends execution, including time the
-                            # consumer spends showing the yielded questionnaire.
-                            user_input_wait_duration = max(
-                                0.0,
-                                _loop.time() - user_input_wait_started,
-                            )
+                            # Both human input and fair capacity reacquisition suspend
+                            # the active-turn deadline, while retaining this task.
                             if _total_deadline is not None:
-                                _total_deadline += user_input_wait_duration
-                            # Also close requests when projection, waiting, or
-                            # the event consumer fails or cancels the turn.
-                            user_input_provider.cancel_request(request_id)
+                                _total_deadline += max(
+                                    0.0, _loop.time() - user_input_wait_started,
+                                )
                         result = ToolResult(
                             tool_use_id=tc.tool_use_id,
                             tool_name=tc.tool_name,
@@ -12296,14 +11977,17 @@ class Agent:
                                     generation_epoch=generation_epoch,
                                 )
                             approval_wait_started = _loop.time()
-                            await _wait_for_pending_approval_resolution(pending_approval)
-                            approval_wait_duration = max(
-                                0.0,
-                                _loop.time() - approval_wait_started,
-                            )
-                            # Human review is suspended state, not execution time.
-                            if _total_deadline is not None:
-                                _total_deadline += approval_wait_duration
+                            suspend = getattr(self._tool_context, "suspend_compute_slot", None)
+                            try:
+                                async with (
+                                    suspend() if callable(suspend) else contextlib.nullcontext()
+                                ):
+                                    await _wait_for_pending_approval_resolution(pending_approval)
+                            finally:
+                                if _total_deadline is not None:
+                                    _total_deadline += max(
+                                        0.0, _loop.time() - approval_wait_started,
+                                    )
                             approval_entry = None
                             from opensquilla.gateway.approval_queue import (
                                 get_approval_queue,
@@ -12325,6 +12009,11 @@ class Agent:
                                     tool_use_id=tc.tool_use_id,
                                     result=result,
                                 )
+                                terminal_error = ErrorEvent(
+                                    code="approval_required",
+                                    message="The action is waiting for user approval.",
+                                )
+                                yield terminal_error
                                 turn_yielded = True
                                 break
                             if not approval_entry.approved:
@@ -12406,6 +12095,11 @@ class Agent:
                                 # expired record or an internal rule decision must
                                 # still reach the model as a non-terminal tool result.
                                 if explicit_human_denial:
+                                    terminal_error = ErrorEvent(
+                                        code="approval_required",
+                                        message="The user declined the action; execution stopped.",
+                                    )
+                                    yield terminal_error
                                     turn_yielded = True
                                 break
 
@@ -12480,14 +12174,6 @@ class Agent:
                         projected_result, images=_tool_result_images(tc.tool_use_id, consume=True)
                     )
 
-                accepted_goal_terminal_status = (
-                    self._accepted_goal_terminal_status(tool_calls, executed_results)
-                    if is_goal_owned_main_default_turn(
-                        self._tool_context or current_tool_context.get()
-                    )
-                    else None
-                )
-
                 actual_tool_errors = [
                     result
                     for result in executed_results
@@ -12551,7 +12237,7 @@ class Agent:
                     )
                     break
                 budget_error = (
-                    None if accepted_goal_terminal_status is not None else _turn_budget_error()
+                    _turn_budget_error()
                 )
                 if terminal_error is None:
                     terminal_error = budget_error
@@ -12560,7 +12246,7 @@ class Agent:
                     yield terminal_error
                     break
 
-                if accepted_goal_terminal_status is None and any(
+                if any(
                     _is_threshold_denial(result) for result in executed_results
                 ):
                     yield self._transition(AgentState.ERROR)
@@ -12575,13 +12261,6 @@ class Agent:
                     break
 
                 # Completed results are already in the canonical user message.
-                if accepted_goal_terminal_status is not None:
-                    if turn_yielded:
-                        break
-                    goal_terminal_final_response_pending = True
-                    goal_terminal_final_status = accepted_goal_terminal_status
-                    yield self._transition(AgentState.THINKING)
-                    continue
                 await _claim_pending_inputs_for_next_call()
                 peek_installs = getattr(pending_input_provider, "peek_pending", None)
                 if callable(peek_installs) and peek_installs():
@@ -13027,58 +12706,6 @@ class Agent:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _unfinished_plan_run_reconciliation_message(self) -> str | None:
-        """Return one bounded correction when a PlanRun tries to finish early."""
-
-        ctx = self._tool_context or current_tool_context.get()
-        run_id = str(getattr(ctx, "plan_run_id", "") or "").strip() if ctx else ""
-        if not run_id:
-            return None
-        storage = getattr(ctx, "plan_storage", None)
-        get_plan_run = getattr(storage, "get_plan_run", None)
-        if not callable(get_plan_run):
-            raise RuntimeError("PlanRun storage is unavailable at turn finalization")
-        run = await get_plan_run(run_id)
-        if run is None:
-            raise RuntimeError("The attached PlanRun no longer exists")
-        if str(getattr(run, "driver_kind", "manual") or "manual") == "goal":
-            # Goal controllers own bounded continuation across turns. A Goal
-            # turn may intentionally yield with the run still active; its
-            # driver, not this single-turn guard, decides whether to continue.
-            return None
-        if str(getattr(run, "status", "") or "") != "running":
-            return None
-        if _plan_run_steps_ready_for_delivery(run):
-            return None
-        progress = {
-            "runId": run_id,
-            "stateRevision": int(getattr(run, "state_revision", 0) or 0),
-            "currentStepId": (
-                str(getattr(run, "current_step_id"))
-                if getattr(run, "current_step_id", None)
-                else None
-            ),
-            "steps": [
-                {
-                    "stepId": str(state.get("step_id") or ""),
-                    "status": str(state.get("status") or ""),
-                }
-                for state in list(getattr(run, "step_states", []) or [])
-                if isinstance(state, Mapping)
-            ],
-        }
-        return (
-            "[PlanRun reconciliation]\n"
-            "The attached PlanRun is still running, so a final assistant response "
-            "cannot complete this implementation turn. Do not guess or retroactively "
-            "claim progress. Continue from currentStepId. If that step is truthfully "
-            "completed or skipped, call plan_run_checkpoint for that exact step and "
-            "follow the returned currentStepId. If work cannot continue, checkpoint "
-            "the current step as blocked with the truthful reason. Only finish after "
-            "the run is completed or blocked.\n"
-            + json.dumps(progress, ensure_ascii=False, sort_keys=True)
-        )
-
     def _workspace_write_records(self) -> list[dict[str, Any]]:
         ctx = self._tool_context or current_tool_context.get()
         if ctx is None:
@@ -13348,18 +12975,6 @@ class Agent:
         arguments = dict(tc.arguments)
         arguments["patch"] = patch
         return replace(tc, arguments=arguments)
-
-
-    @staticmethod
-    def _plan_run_delivery_tool_definitions(
-        tools: list[ToolDefinition] | None,
-    ) -> list[ToolDefinition] | None:
-        """Expose only prepared preview registration or final artifact delivery."""
-
-        if not tools:
-            return None
-        delivery_tools = [tool for tool in tools if tool.name in PLAN_RUN_DELIVERY_TOOLS]
-        return delivery_tools or None
 
 
     def _record_tool_context_runtime_event(self, event: dict[str, Any]) -> None:
@@ -15019,37 +14634,6 @@ class Agent:
             and payload.get("status") == "not_executed"
             and payload.get("reason") == "prior_tool_dispatch_boundary"
         )
-
-    @staticmethod
-    def _accepted_goal_terminal_status(
-        tool_calls: list[ToolCall],
-        results: list[ToolResult],
-    ) -> str | None:
-        """Return the durably accepted Goal terminal status from one tool batch."""
-
-        for tool_call, result in zip(tool_calls, results, strict=False):
-            if (
-                tool_call.tool_name != "update_goal"
-                or result.tool_name != "update_goal"
-                or result.is_error
-            ):
-                continue
-            requested_status = str(tool_call.arguments.get("status") or "").strip().lower()
-            if requested_status not in {"complete", "blocked"}:
-                continue
-            try:
-                payload = json.loads(result.content)
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(payload, Mapping) or payload.get("status") != "accepted":
-                continue
-            goal = payload.get("goal")
-            if not isinstance(goal, Mapping):
-                continue
-            persisted_status = str(goal.get("status") or "").strip().lower()
-            if persisted_status == requested_status:
-                return requested_status
-        return None
 
     def _build_compaction_config(self) -> CompactionConfig:
         compaction_plan = self.config.compaction_execution_plan
@@ -17509,6 +17093,7 @@ class Agent:
         depth: int,
         execution_id: str | None = None,
     ) -> Agent:
+        from opensquilla.engine.collaboration_prompt import collaboration_instructions
         from opensquilla.sandbox.run_context import (
             RunContext,
             normalize_scope,
@@ -17580,6 +17165,12 @@ class Agent:
                 execution_id=child_execution_id,
                 agent_run_id=child_execution_id,
                 turn_id=child_execution_id,
+                root_turn_id=(
+                    parent_usage_context.root_turn_id
+                    or parent_usage_context.turn_id
+                    or parent_usage_context.execution_id
+                    if parent_usage_context is not None else None
+                ),
                 parent_turn_id=(
                     parent_usage_context.turn_id or parent_usage_context.execution_id
                     if parent_usage_context is not None
@@ -17602,6 +17193,7 @@ class Agent:
         # Schema-time filtering: subagents cannot see dangerous tools
         filtered_defs = [td for td in self.tool_definitions if td.name not in SUBAGENT_TOOL_DENY]
         subagent_ctx = ToolContext(
+            collaboration_mode=getattr(parent_ctx, "collaboration_mode", "default"),
             is_owner=True,
             caller_kind=CallerKind.SUBAGENT,
             interaction_mode=InteractionMode.UNATTENDED,
@@ -17700,6 +17292,10 @@ class Agent:
                 parent_explicit_request_cap,
             )
         child_cfg = AgentConfig(
+            system_prompt=(
+                collaboration_instructions(subagent_ctx)
+                if subagent_ctx.collaboration_mode == "plan" else None
+            ),
             max_iterations=spec.max_iterations,
             timeout=spec.timeout,
             provider_id=child_target.provider_id,

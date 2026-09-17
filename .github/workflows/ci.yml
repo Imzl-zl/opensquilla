@@ -797,6 +797,8 @@ jobs:
           ensemble-new-task-legacy-turn.spec.ts
           goal-mode.spec.ts
           plan-questionnaire-lifecycle.spec.ts
+          plan-presentation.spec.ts
+          task-progress.spec.ts
           queue-steer.spec.ts
           share.spec.ts
           --project=chromium
@@ -1104,6 +1106,19 @@ jobs:
         shell: bash
         run: uv sync --extra dev --extra recommended --extra mcp --frozen
 
+      - name: Preflight offline test environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run python -c "import pathlib, subprocess, sys, opensquilla; print('cwd:', pathlib.Path.cwd().resolve()); print('git:', subprocess.check_output(['git', 'rev-parse', '--show-toplevel', 'HEAD'], text=True).strip()); print('python:', sys.executable); print('package:', pathlib.Path(opensquilla.__file__).resolve())"
+          uv run pytest \
+            tests/test_sandbox/test_trusted_sandbox_execution.py \
+            tests/test_tools/test_approval_unification.py \
+            tests/test_live_multi_provider_matrix.py \
+            tests/test_live_provider_profile_smoke.py \
+            -q --maxfail=3 \
+            2>&1 | tee "${CI_REPORT_DIR}/preflight.log"
+
       - name: Test Ubuntu full shard
         shell: bash
         run: |
@@ -1323,6 +1338,19 @@ jobs:
             throw
           }
 
+      - name: Preflight offline test environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run python -c "import pathlib, subprocess, sys, opensquilla; print('cwd:', pathlib.Path.cwd().resolve()); print('git:', subprocess.check_output(['git', 'rev-parse', '--show-toplevel', 'HEAD'], text=True).strip()); print('python:', sys.executable); print('package:', pathlib.Path(opensquilla.__file__).resolve())"
+          uv run pytest \
+            tests/test_sandbox/test_trusted_sandbox_execution.py \
+            tests/test_tools/test_approval_unification.py \
+            tests/test_live_multi_provider_matrix.py \
+            tests/test_live_provider_profile_smoke.py \
+            -q --maxfail=3 \
+            2>&1 | tee "${CI_REPORT_DIR}/preflight.log"
+
       - name: Test Windows shard
         shell: bash
         run: |
@@ -1451,6 +1479,19 @@ jobs:
         shell: bash
         run: uv sync --extra dev --extra recommended --extra mcp --frozen
 
+      - name: Preflight offline test environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run python -c "import pathlib, subprocess, sys, opensquilla; print('cwd:', pathlib.Path.cwd().resolve()); print('git:', subprocess.check_output(['git', 'rev-parse', '--show-toplevel', 'HEAD'], text=True).strip()); print('python:', sys.executable); print('package:', pathlib.Path(opensquilla.__file__).resolve())"
+          uv run pytest \
+            tests/test_sandbox/test_trusted_sandbox_execution.py \
+            tests/test_tools/test_approval_unification.py \
+            tests/test_live_multi_provider_matrix.py \
+            tests/test_live_provider_profile_smoke.py \
+            -q --maxfail=3 \
+            2>&1 | tee "${CI_REPORT_DIR}/preflight.log"
+
       - name: Test native profile recovery contracts
         shell: bash
         run: |
@@ -1463,6 +1504,21 @@ jobs:
             tests/test_gateway/test_session_model_routing_rpc.py
             tests/test_tools/test_execution_status.py
             tests/test_provider_ensemble.py
+            tests/test_gateway/test_goal_rpc.py
+            tests/test_gateway/test_plan_rpc.py
+            tests/test_gateway/test_task_runtime_wait_slots.py
+            tests/test_gateway/test_task_progress_projection.py
+            tests/test_gateway/test_usage_ledger_runtime.py
+            tests/test_engine/test_plan_run_reconciliation.py
+            tests/test_engine/test_goal_context_prompt.py
+            tests/test_session/test_goal_storage.py
+            tests/test_session/test_plan_storage.py
+            tests/test_session/test_plan_presentation.py
+            tests/test_session/test_task_progress.py
+            tests/test_persistence/test_usage_ledger.py
+            tests/test_persistence/test_migration_compatibility.py
+            tests/test_migrations/test_v045_goal_runtime_accounting.py
+            tests/test_tools/test_plan_access.py
             -q
             --durations=50
             --junitxml="${CI_REPORT_DIR}/junit.xml"
@@ -1662,6 +1718,11 @@ jobs:
             --grep "@session-hang-recovery" \
             --retries=0 \
             2>&1 | tee "${CI_REPORT_DIR}/session-hang-recovery.log"
+          npm run test:e2e -- \
+            plan-presentation.spec.ts task-progress.spec.ts goal-mode.spec.ts \
+            --project=chromium --workers=1 --retries=0 \
+            --grep "@plan-goal-runtime" \
+            2>&1 | tee "${CI_REPORT_DIR}/plan-goal-runtime.log"
 
       - name: Install Desktop workbench browser
         if: ${{ matrix.shard == 'all' || matrix.shard == 'ownership-workbench' || matrix.shard == 'workbench' }}

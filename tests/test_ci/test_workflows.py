@@ -1748,6 +1748,12 @@ def test_desktop_recovery_e2e_runs_compiled_flows_on_all_release_platforms() -> 
     # Select by a stable contract tag, not the scenario's human-readable title.
     # Renaming the test must not silently leave this release-platform gate empty.
     assert '--grep "@session-hang-recovery"' in session_recovery["run"]
+    assert '--grep "@plan-goal-runtime"' in session_recovery["run"]
+    for spec in ("plan-presentation.spec.ts", "task-progress.spec.ts", "goal-mode.spec.ts"):
+        assert spec in session_recovery["run"]
+        assert "@plan-goal-runtime" in Path("opensquilla-webui/e2e", spec).read_text(
+            encoding="utf-8"
+        )
     assert "--retries=0" in session_recovery["run"]
     recovery_spec = Path("opensquilla-webui/e2e/history-hydration.spec.ts").read_text(
         encoding="utf-8"
@@ -2182,6 +2188,8 @@ def test_webui_chat_recovery_runs_the_verified_dist_through_gateway() -> None:
         "history-hydration.spec.ts",
         "new-task-ensemble-race.spec.ts",
         "plan-questionnaire-lifecycle.spec.ts",
+        "plan-presentation.spec.ts",
+        "task-progress.spec.ts",
         "provider-error-experience.spec.ts",
         "queue-steer.spec.ts",
         "session-created-card.spec.ts",
@@ -2372,6 +2380,11 @@ def test_macos_recovery_planner_inputs_match_workflow_pytest_targets() -> None:
         for line in array.group("body").splitlines()
         if line.strip().startswith("tests/")
     }
+    preflight_step = next(
+        step for step in job["steps"]
+        if step.get("name") == "Preflight offline test environment"
+    )
+    workflow_targets.update(re.findall(r"tests/[a-zA-Z0-9_/.]+\.py", preflight_step["run"]))
     assert workflow_targets == expected_targets
 
 
@@ -2749,3 +2762,27 @@ def test_desktop_cleanup_flow_allows_windows_helper_release_latency() -> None:
 
     assert "process.platform === 'win32' ? 90_000 : 30_000" in source
     assert "pending synthetic targets" in source
+
+
+@pytest.mark.parametrize(("job_name", "test_step_name"), [
+    ("ubuntu-full", "Test Ubuntu full shard"),
+    ("windows-full", "Test Windows shard"),
+    ("macos-recovery", "Test native profile recovery contracts"),
+])
+def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_name):
+    steps = _workflow("ci.yml")["jobs"][job_name]["steps"]
+    preflight = next(step for step in steps if step.get("name") == (
+        "Preflight offline test environment"
+    ))
+    main = next(step for step in steps if step.get("name") == test_step_name)
+    assert steps.index(preflight) < steps.index(main)
+    assert preflight.get("continue-on-error") is not True
+    assert "set -euo pipefail" in preflight["run"]
+    assert "sys.executable" in preflight["run"]
+    assert "opensquilla.__file__" in preflight["run"]
+    assert set(re.findall(r"tests/[a-zA-Z0-9_/.]+\.py", preflight["run"])) == {
+        "tests/test_sandbox/test_trusted_sandbox_execution.py",
+        "tests/test_tools/test_approval_unification.py",
+        "tests/test_live_multi_provider_matrix.py",
+        "tests/test_live_provider_profile_smoke.py",
+    }

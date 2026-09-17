@@ -3843,6 +3843,8 @@
       }
     },
     "plan": {
+      "hidePlan": "Ocultar plan",
+      "showPlan": "Mostrar plan",
       "label": "Plan",
       "process": "Proceso de planificación",
       "revision": "Revisión {id}",
@@ -3941,6 +3943,23 @@
       }
     },
     "goal": {
+      "settings": "Configuración del objetivo",
+      "tokenBudget": "Presupuesto de tokens",
+      "noTokenBudget": "Sin límite de tokens",
+      "invalidTokenBudget": "Introduce un número entero positivo.",
+      "partialUsageHistory": "El uso anterior está incompleto. Inicia un objetivo nuevo para fijar un presupuesto.",
+      "pendingUsageReceipts": "Esperando los datos de uso. Reanuda el objetivo cuando el uso esté completo.",
+      "usageReceiptsRecovered": "Los datos de uso están completos. Reanuda el objetivo cuando estés listo.",
+      "usageAccountingSince": "El registro de uso comenzó el {time}.",
+      "emptyContinuations": "En pausa tras varios turnos sin salida ni actividad de herramientas. Revisa el objetivo y reanúdalo cuando estés listo.",
+      "removeTokenBudget": "Eliminar el presupuesto de tokens",
+      "executionPolicy": "Seguir ejecutando",
+      "foreground": "Mientras haya conexión",
+      "background": "En segundo plano",
+      "backgroundHint": "Continúa tras desconectarse. Reiniciar el servidor pausa el objetivo.",
+      "backgroundActive": "Segundo plano",
+      "tokenBudgetReached": "Presupuesto de tokens alcanzado",
+      "tokenBudgetUsage": "{used} / {budget} tokens",
       "placeholder": "Describe el objetivo y envía para empezar a trabajar en él",
       "modeLabel": "Modo objetivo",
       "modeDescription": "Iniciar un objetivo de larga duración",

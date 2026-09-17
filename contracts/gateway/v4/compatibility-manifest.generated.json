@@ -29,7 +29,7 @@
       "delivery": "live-only-best-effort",
       "family": "conversation.events",
       "schema": "conversation/conversation-events.schema.json",
-      "schemaSha256": "3a853963ea7b33c87edef960338dd1e181f6e5140a49762a9e345fea8b6bc37c",
+      "schemaSha256": "35b616b613fd89449267b973846a8c345630d1ed3525174ec7c65f7c7d4882e8",
       "schemaVersion": 1,
       "wireNames": [
         "chat.done",
@@ -53,6 +53,8 @@
         "session.event.meta_step_state",
         "session.event.plan_revision",
         "session.event.plan_run",
+        "session.event.progress",
+        "session.event.plan_presentation",
         "session.event.provider_activity",
         "session.event.router_control_replay",
         "session.event.router_decision",
@@ -554,7 +556,7 @@
       "lifecycle": "stable",
       "name": "goals.edit",
       "schema": "goals/goals-edit.schema.json",
-      "schemaSha256": "5d613b7aba7558ba2f974ab84363b46d6493b93128e8aa8cc8750839dc429655"
+      "schemaSha256": "8f021f059d5e95754e5b7d231c447a386c4a355d66f763f2d684f20a08f4cafe"
     },
     {
       "lifecycle": "stable",
@@ -566,7 +568,7 @@
       "lifecycle": "stable",
       "name": "goals.reattach",
       "schema": "goals/goals-reattach.schema.json",
-      "schemaSha256": "a1e95d8b99a2bcc2e3986a6f6a464a8020c9ef9f58fb4d7efe2fc0d3b4ef0d27"
+      "schemaSha256": "54fc28d228135f2d4fcf228bdcee780adbbec449e002958524156bc2112b1fc6"
     },
     {
       "lifecycle": "stable",
@@ -578,13 +580,13 @@
       "lifecycle": "stable",
       "name": "goals.set",
       "schema": "goals/goals-set.schema.json",
-      "schemaSha256": "d90e7a12aa6d31fda9c38736b9ab8da7837e20c2b4ac2836c8cf2436a8a389e9"
+      "schemaSha256": "c5be789886d22f2acd1edc28541db45e78fad765af103f406b82c42cdc33e011"
     },
     {
       "lifecycle": "stable",
       "name": "goals.status",
       "schema": "goals/goals-status.schema.json",
-      "schemaSha256": "205a9e4cea7413f760cc7b56b1d385dd71e37e3ac9b2d0d5da0e0d54fe81b7e4"
+      "schemaSha256": "0e1fa6c3164e1eaa78c02b3625432c9054e5edd03bb9ccad4ca75948771ddb48"
     },
     {
       "lifecycle": "stable",
@@ -959,6 +961,12 @@
       "schemaSha256": "2db551e448ed9bd6118b6f8e73ebdc9dfbc332bc4cba641b921f443747c30456"
     },
     {
+      "lifecycle": "stable",
+      "name": "plans.setPresentation",
+      "schema": "plans/plans-set-presentation.schema.json",
+      "schemaSha256": "c36dd7d4bac83ed9bbcef6a2dc3f7d34f434791d88d1607763be8e4626c0739c"
+    },
+    {
       "canonicalName": "exec.approval.extend",
       "lifecycle": "legacy",
       "name": "plugin.approval.extend",
@@ -1151,7 +1159,7 @@
       "lifecycle": "stable",
       "name": "sessions.messages.hydrate",
       "schema": "sessions/sessions-messages-hydrate.schema.json",
-      "schemaSha256": "57e664a72a0557c5f6d1f3920c98cef41bb3f4e655230f9c5095f659a2ff74b0"
+      "schemaSha256": "8cc8665da56f039c62076d690d6c77d3d7742663f64af93ec441f26d5f96182c"
     },
     {
       "lifecycle": "stable",
@@ -1169,7 +1177,7 @@
       "lifecycle": "stable",
       "name": "sessions.messages.subscribe",
       "schema": "sessions/sessions-messages-subscribe.schema.json",
-      "schemaSha256": "3cd9dc014552f9f959d1e4f6aac8bc9621b994c645b7d43030651e4e8b28cedb"
+      "schemaSha256": "6fac1275f4c29f9ffa02af20b741ce19a028fec2124468ea0d04cba3fba0106a"
     },
     {
       "lifecycle": "stable",
@@ -1463,10 +1471,10 @@
   "protocol": "opensquilla-websocket-json",
   "source": {
     "eventFamilyCount": 10,
-    "generatorSha256": "f781c6d8e31b336c2d2e342784935b3d327c9947cb35e56de8e44a0a83bffae6",
-    "methodCount": 215,
-    "schemaCount": 225,
-    "schemaTreeSha256": "840fa1aabc2cf9ec62fb500bbe7771c49a00a5f54e367cabc3865fa57fb63579"
+    "generatorSha256": "db0dc136a3862dbc79662ba17cd6445730437ac2f33027389cb0cece1d17fec5",
+    "methodCount": 216,
+    "schemaCount": 226,
+    "schemaTreeSha256": "9a18906d1491af9546de1e9e3e0371e362ac1bd4e8e8070da266f56772e60483"
   },
   "wireVersion": 4
 }

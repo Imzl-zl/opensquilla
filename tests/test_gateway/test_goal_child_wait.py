@@ -1,0 +1,286 @@
+"""Goal/child-completion integration with event-controlled ordinary runtime turns."""
+
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+
+import pytest
+
+from opensquilla.gateway import background_completion, subagent_announce
+from opensquilla.gateway.background_completion import BackgroundCompletionManager
+from opensquilla.gateway.rpc_goals import (
+    _handle_goals_clear,
+    _handle_goals_pause,
+    _handle_goals_set,
+)
+from opensquilla.gateway.task_runtime import TaskRun
+from opensquilla.session.goals import GoalTurnContext
+from opensquilla.session.usage_ledger import UsageEventCompletion, UsageEventStart
+from tests.test_gateway.test_goal_rpc import SOURCE_KEY, _open_goal_rpc_stack, _set_params
+
+
+@asynccontextmanager
+async def _child_group_stack(tmp_path, monkeypatch, *, record_usage=False):
+    parent_started = asyncio.Event()
+    release_parent = asyncio.Event()
+    synthesis_started = asyncio.Event()
+    release_synthesis = asyncio.Event()
+    continuation_started = asyncio.Event()
+    release_continuation = asyncio.Event()
+    group_released = asyncio.Event()
+    runs: list[TaskRun] = []
+    group_events: list[str] = []
+    manager = None
+
+    async def handler(run):
+        runs.append(run)
+        if len(runs) == 1:
+            assert manager is not None
+            await manager.emit_waiting(
+                parent_session_key=SOURCE_KEY,
+                parent_task_id=run.task_id,
+                pending_count=1,
+                parent_envelope=run.envelope,
+            )
+            parent_started.set()
+            await release_parent.wait()
+        elif run.run_kind == "runtime_send":
+            synthesis_started.set()
+            await release_synthesis.wait()
+            if record_usage:
+                context = GoalTurnContext.from_task_detail(run.goal_context)
+                assert context is not None
+                call = UsageEventStart(
+                    event_id=f"call-{run.task_id}",
+                    execution_id=run.task_id,
+                    call_index=1,
+                    turn_id=run.task_id,
+                    session_id=run.envelope.session_id,
+                    session_epoch=run.envelope.session_epoch,
+                    started_at_ms=200,
+                    root_turn_id=run.envelope.metadata["usage_root_turn_id"],
+                    goal_id=context.goal_id,
+                )
+                await stack.storage.start_usage_event(call)
+                await stack.storage.finalize_usage_event(
+                    call.event_id,
+                    UsageEventCompletion(
+                        completed_at_ms=250, input_tokens=7, output_tokens=3, total_tokens=10
+                    ),
+                )
+        else:
+            continuation_started.set()
+            await release_continuation.wait()
+
+    async def group_event(_session_key, name, _payload):
+        group_events.append(name)
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "goal-child-wait.sqlite",
+        handler=handler,
+        wire_lifecycle=True,
+        max_turns=3,
+    ) as stack:
+        manager = BackgroundCompletionManager(
+            session_manager=stack.manager, event_emitter=group_event
+        )
+
+        def released(session_key):
+            # Re-entrant consumers must never be invoked under the manager lock.
+            assert not manager._state_lock.locked()
+            stack.service.schedule_idle_evaluation(session_key)
+            group_released.set()
+
+        manager.set_idle_listener(released)
+        monkeypatch.setattr(subagent_announce, "_background_completion_manager", manager)
+
+        async def wake():
+            await manager.send_parent_wake(
+                parent_session_key=SOURCE_KEY,
+                parent_task_id=runs[0].task_id,
+                payloads=[{"task_id": "synthetic-child", "status": "succeeded"}],
+                task_runtime=stack.runtime,
+                message="Summarize the completed synthetic child result.",
+                provenance={
+                    "kind": "internal_system",
+                    "source_tool": "subagent_completion",
+                    "parent_task_id": runs[0].task_id,
+                },
+                parent_envelope=runs[0].envelope,
+            )
+
+        try:
+            created = await _handle_goals_set(_set_params(), stack.context)
+            await asyncio.wait_for(parent_started.wait(), timeout=3)
+            yield SimpleNamespace(
+                stack=stack,
+                manager=manager,
+                created=created,
+                runs=runs,
+                group_events=group_events,
+                group_released=group_released,
+                release_parent=release_parent,
+                synthesis_started=synthesis_started,
+                release_synthesis=release_synthesis,
+                continuation_started=continuation_started,
+                wake=wake,
+            )
+        finally:
+            release_parent.set()
+            release_synthesis.set()
+            release_continuation.set()
+            await manager.close(timeout=3)
+
+
+async def test_child_synthesis_group_releases_before_goal_continuation(tmp_path, monkeypatch):
+    async with _child_group_stack(tmp_path, monkeypatch) as state:
+        await state.wake()
+        state.release_parent.set()
+        await asyncio.wait_for(state.synthesis_started.wait(), timeout=3)
+        assert [run.run_kind for run in state.runs] == ["session_turn", "runtime_send"]
+        assert await state.manager.active_group_ids(SOURCE_KEY)
+        await state.stack.service._kick_if_idle(SOURCE_KEY)
+        assert len(state.runs) == 2
+        assert not state.continuation_started.is_set()
+
+        state.release_synthesis.set()
+        await asyncio.wait_for(state.group_released.wait(), timeout=3)
+        await asyncio.wait_for(state.continuation_started.wait(), timeout=3)
+        await state.manager.drain(timeout=3)
+        assert not await state.manager.active_group_ids(SOURCE_KEY)
+        assert state.group_events == [
+            "session.event.task_group.waiting",
+            "session.event.task_group.synthesizing",
+            "session.event.task_group.done",
+        ]
+        assert len(state.runs) == 3
+        context = GoalTurnContext.from_task_detail(state.runs[-1].goal_context)
+        assert context is not None and context.automatic
+        assert context.goal_id == state.created["goal"]["goalId"]
+
+
+async def test_child_synthesis_claims_current_goal_through_normal_runtime(tmp_path, monkeypatch):
+    async with _child_group_stack(tmp_path, monkeypatch) as state:
+        await state.wake()
+        state.release_parent.set()
+        await asyncio.wait_for(state.synthesis_started.wait(), timeout=3)
+        synthesis = state.runs[-1]
+        assert synthesis.run_kind == "runtime_send"
+        context = GoalTurnContext.from_task_detail(synthesis.goal_context)
+        assert context is not None
+        assert context.goal_id == state.created["goal"]["goalId"]
+        assert context.task_id == synthesis.task_id
+        goal = await state.stack.storage.get_goal(SOURCE_KEY)
+        assert goal is not None and goal.active_task_id == synthesis.task_id
+        assert goal.turns_started == 2 and goal.turns_settled == 1
+        assert synthesis.envelope.metadata["usage_root_turn_id"] == synthesis.task_id
+        assert synthesis.task_id != state.runs[0].task_id
+
+
+async def test_child_synthesis_usage_settles_under_its_own_goal_root(tmp_path, monkeypatch):
+    async with _child_group_stack(tmp_path, monkeypatch, record_usage=True) as state:
+        await state.wake()
+        state.release_parent.set()
+        await asyncio.wait_for(state.synthesis_started.wait(), timeout=3)
+        state.release_synthesis.set()
+        await asyncio.wait_for(state.continuation_started.wait(), timeout=3)
+        goal = await state.stack.storage.get_goal(SOURCE_KEY)
+        assert goal is not None
+        assert goal.total_tokens == goal.budget_tokens_used == 10
+        assert goal.turns_started == 3 and goal.turns_settled == 2
+        await state.manager.drain(timeout=3)
+        assert not await state.manager.active_group_ids(SOURCE_KEY)
+
+
+async def test_duplicate_wake_admission_cannot_leave_finished_group_blocking_goal(
+    tmp_path, monkeypatch
+):
+    duplicate_lookup_started = asyncio.Event()
+    release_duplicate_lookup = asyncio.Event()
+    original_capture = background_completion._capture_delivery_target
+    lookups = 0
+
+    async def capture(**kwargs):
+        nonlocal lookups
+        lookups += 1
+        if lookups == 2:
+            duplicate_lookup_started.set()
+            await release_duplicate_lookup.wait()
+        return await original_capture(**kwargs)
+
+    monkeypatch.setattr(background_completion, "_capture_delivery_target", capture)
+    async with _child_group_stack(tmp_path, monkeypatch) as state:
+        await state.wake()
+        state.release_parent.set()
+        await asyncio.wait_for(state.synthesis_started.wait(), timeout=3)
+        duplicate = asyncio.create_task(state.wake())
+        try:
+            await asyncio.wait_for(duplicate_lookup_started.wait(), timeout=3)
+            state.release_synthesis.set()
+            await state.manager.drain(timeout=3)
+            assert "session.event.task_group.done" in state.group_events
+            assert not state.continuation_started.is_set()
+            release_duplicate_lookup.set()
+            await asyncio.wait_for(duplicate, timeout=3)
+
+            assert not await state.manager.active_group_ids(SOURCE_KEY)
+            await asyncio.wait_for(state.continuation_started.wait(), timeout=3)
+            assert len(state.runs) == 3
+        finally:
+            release_duplicate_lookup.set()
+            await asyncio.wait_for(duplicate, timeout=3)
+
+
+@pytest.mark.parametrize("case", ["ordinary", "paused", "replaced", "wrong_parent"])
+async def test_completion_candidate_does_not_grant_unrelated_goal_authority(tmp_path, case):
+    runs = []
+
+    async def handler(run):
+        runs.append(run)
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "goal-completion-authority.sqlite",
+        handler=handler,
+        wire_lifecycle=True,
+        wire_idle=False,
+    ) as stack:
+        created = await _handle_goals_set(_set_params(), stack.context)
+        await stack.runtime.wait(created["taskId"], timeout=3)
+        parent = runs[0]
+        current = await stack.storage.get_goal(SOURCE_KEY)
+        assert current is not None
+        mutation = {
+            "sessionKey": SOURCE_KEY,
+            "expectedGoalId": current.goal_id,
+            "expectedStateRevision": current.state_revision,
+            "clientRequestId": "00000000-0000-4000-8000-000000000002",
+        }
+        if case == "paused":
+            await _handle_goals_pause(mutation, stack.context)
+        elif case == "replaced":
+            await _handle_goals_clear(mutation, stack.context)
+            second = await _handle_goals_set(
+                _set_params(
+                    objective="A distinct synthetic Goal.", request_index=3, message_index=103
+                ),
+                stack.context,
+            )
+            await stack.runtime.wait(second["taskId"], timeout=3)
+            assert second["goal"]["goalId"] != created["goal"]["goalId"]
+        before = await stack.storage.get_goal(SOURCE_KEY)
+        provenance = {
+            "kind": "internal_system",
+            "source_tool": "other" if case == "ordinary" else "subagent_completion",
+            "parent_task_id": "missing-parent" if case == "wrong_parent" else parent.task_id,
+        }
+        handle = await stack.runtime.send_with_envelope(
+            parent.envelope,
+            "Summarize the prior result without new Goal authority.",
+            provenance=provenance,
+        )
+        await stack.runtime.wait(handle.task_id, timeout=3)
+        assert runs[-1].run_kind == "runtime_send"
+        assert runs[-1].goal_context is None
+        assert await stack.storage.get_goal(SOURCE_KEY) == before
