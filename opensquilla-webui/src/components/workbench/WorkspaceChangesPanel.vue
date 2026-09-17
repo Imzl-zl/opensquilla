@@ -1,5 +1,5 @@
 <template>
-  <div class="wb-changes">
+  <div class="wb-changes" :class="{ 'is-wrapped': wrapLines }">
     <header class="wb-changes__bar">
       <div class="wb-changes__meta">
         <span v-if="branchLabel" class="wb-changes__branch">{{ branchLabel }}</span>
@@ -18,41 +18,17 @@
         </span>
       </div>
       <div class="wb-changes__bar-actions">
-        <!-- The arrow keys already step through the list; these are the same
-             step as a button, so a pointer user does not have to hunt for the
-             next file in a long list. -->
-        <div
-          v-if="orderedEntries.length > 0"
-          class="wb-changes__nav"
-          role="group"
-          :aria-label="t('workbench.changes.fileNav')"
+        <button
+          type="button"
+          class="wb-changes__nav-button"
+          :aria-pressed="wrapLines"
+          :aria-label="t('workbench.changes.wrapLines')"
+          :title="t('workbench.changes.wrapLines')"
+          data-testid="changes-wrap-lines"
+          @click="wrapLines = !wrapLines"
         >
-          <button
-            type="button"
-            class="wb-changes__nav-button"
-            :disabled="!canSelectPrevious"
-            :aria-label="t('workbench.changes.previousFile')"
-            :title="t('workbench.changes.previousFile')"
-            data-testid="changes-previous-file"
-            @click="stepFile(-1)"
-          >
-            <Icon name="chevronDown" :size="12" class="wb-changes__nav-glyph--previous" />
-          </button>
-          <span class="wb-changes__nav-position" data-testid="changes-file-position">
-            {{ positionLabel }}
-          </span>
-          <button
-            type="button"
-            class="wb-changes__nav-button"
-            :disabled="!canSelectNext"
-            :aria-label="t('workbench.changes.nextFile')"
-            :title="t('workbench.changes.nextFile')"
-            data-testid="changes-next-file"
-            @click="stepFile(1)"
-          >
-            <Icon name="chevronDown" :size="12" />
-          </button>
-        </div>
+          <Icon name="wrapText" :size="12" />
+        </button>
         <button
           type="button"
           class="wb-changes__action"
@@ -178,6 +154,57 @@
         :aria-busy="diffLoading"
         :aria-label="t('workbench.changes.diffLabel')"
       >
+        <!-- The toolbar exists as soon as there are changed files, so the file
+             arrows are reachable before anything is selected. The path and the
+             counts join it only when there is a patch to describe. -->
+        <div v-if="orderedEntries.length > 0" class="wb-changes__diff-head">
+          <template v-if="showDiffHead">
+            <span class="wb-changes__diff-path">{{ diff?.path }}</span>
+            <span class="wb-changes__diff-side">
+              {{ diff?.staged ? t('workbench.changes.staged') : t('workbench.changes.unstaged') }}
+            </span>
+            <span
+              class="wb-changes__diff-lines"
+              :title="t('workbench.changes.diffStats', { added: addedLines, removed: removedLines })"
+              :aria-label="t('workbench.changes.diffStats', { added: addedLines, removed: removedLines })"
+            >
+              <span class="wb-changes__added">+{{ addedLines }}</span>
+              <span class="wb-changes__removed">-{{ removedLines }}</span>
+            </span>
+          </template>
+          <!-- The arrow keys already step through the list; these are the same
+               step as a button, so a pointer user does not have to hunt for the
+               next file in a long list. Right-aligned in both states, so the
+               controls never move when a file is selected. -->
+          <div class="wb-changes__nav" role="group" :aria-label="t('workbench.changes.fileNav')">
+            <button
+              type="button"
+              class="wb-changes__nav-button"
+              :disabled="!canSelectPrevious"
+              :aria-label="t('workbench.changes.previousFile')"
+              :title="t('workbench.changes.previousFile')"
+              data-testid="changes-previous-file"
+              @click="stepFile(-1)"
+            >
+              <Icon name="chevronDown" :size="12" class="wb-changes__nav-glyph--previous" />
+            </button>
+            <span class="wb-changes__nav-position" data-testid="changes-file-position">
+              {{ positionLabel }}
+            </span>
+            <button
+              type="button"
+              class="wb-changes__nav-button"
+              :disabled="!canSelectNext"
+              :aria-label="t('workbench.changes.nextFile')"
+              :title="t('workbench.changes.nextFile')"
+              data-testid="changes-next-file"
+              @click="stepFile(1)"
+            >
+              <Icon name="chevronDown" :size="12" />
+            </button>
+          </div>
+        </div>
+
         <p v-if="!selectedEntry" class="wb-changes__note">{{ t('workbench.changes.selectPrompt') }}</p>
         <p v-else-if="diffLoading" class="wb-changes__note" role="status">
           {{ t('workbench.changes.diffLoading') }}
@@ -192,34 +219,10 @@
           {{ t('workbench.changes.diffEmpty') }}
         </p>
         <template v-else-if="diff">
-          <div class="wb-changes__diff-head" :class="{ 'is-wrapped': wrapLines }">
-            <span class="wb-changes__diff-path">{{ diff.path }}</span>
-            <span class="wb-changes__diff-side">
-              {{ diff.staged ? t('workbench.changes.staged') : t('workbench.changes.unstaged') }}
-            </span>
-            <button
-              type="button"
-              class="wb-changes__action"
-              :aria-pressed="wrapLines"
-              :title="t('workbench.changes.wrapLines')"
-              @click="wrapLines = !wrapLines"
-            >
-              <Icon name="fileText" :size="12" />
-              <span>{{ t('workbench.changes.wrapLines') }}</span>
-            </button>
-            <span
-              class="wb-changes__diff-lines"
-              :title="t('workbench.changes.diffStats', { added: addedLines, removed: removedLines })"
-              :aria-label="t('workbench.changes.diffStats', { added: addedLines, removed: removedLines })"
-            >
-              <span class="wb-changes__added">+{{ addedLines }}</span>
-              <span class="wb-changes__removed">-{{ removedLines }}</span>
-            </span>
-          </div>
           <p v-if="diff.truncated" class="wb-changes__note" role="status">
             {{ t('workbench.changes.diffTruncated') }}
           </p>
-          <div class="wb-changes__code" :class="{ 'is-wrapped': wrapLines }">
+          <div class="wb-changes__code">
             <div
               v-for="(line, index) in diffLines"
               :key="index"
@@ -515,6 +518,13 @@ const diffLines = computed<DiffLine[]>(() => {
   return rows
 })
 
+// The header describes a patch, so it only claims space once there is a text
+// patch to describe: a binary or empty diff has no counts to report, and the
+// toolbar would show a path it cannot speak for.
+const showDiffHead = computed(() => Boolean(
+  diff.value && !diff.value.binary && diff.value.text.trim(),
+))
+
 const addedLines = computed(() => countLines(diff.value?.text, '+'))
 const removedLines = computed(() => countLines(diff.value?.text, '-'))
 
@@ -679,8 +689,11 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 .wb-changes__bar {
   display: flex;
   flex: none;
+  /* The dock is narrow and the bar carries the whole panel's controls. When
+     they no longer fit beside the branch and the totals, the controls move to
+     their own row instead of squeezing the text into a clipped box. */
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
   gap: 0.5rem;
   min-height: 1.75rem;
 }
@@ -713,12 +726,18 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   flex: none;
   gap: 0.375rem;
   align-items: center;
+  /* Keeps the controls at the trailing edge both on their own row and beside
+     the branch text. */
+  margin-inline-start: auto;
 }
 
 .wb-changes__nav {
   display: flex;
   gap: 0.125rem;
   align-items: center;
+  /* Trailing edge of the diff toolbar, so the arrows keep one position whether
+     or not a file is currently selected. */
+  margin-inline-start: auto;
 }
 
 /* The previous/next glyphs are one chevron, so a step up and a step down stay
@@ -752,7 +771,7 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 }
 
 .wb-changes__nav-position {
-  min-width: 3ch;
+  min-width: 5ch;
   color: var(--text-muted);
   font-family: var(--font-mono);
   font-size: 0.6875rem;
@@ -992,10 +1011,37 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   white-space: nowrap;
 }
 
-/* With wrapping on, the path takes the same wrapping the patch body does. A
-   header that truncates a path the body wraps is one inconsistency the reader
-   has to decode, and the full path is the one thing the header is for. */
-.wb-changes__diff-head.is-wrapped .wb-changes__diff-path {
+/* One wrap preference governs the whole panel: the file rows, the diff header,
+   and the patch body. A path long enough to need wrapping is long in whichever
+   column shows it, and a header that truncates what the body wraps is one more
+   inconsistency to decode. */
+.wb-changes.is-wrapped .wb-changes__entry {
+  align-items: flex-start;
+}
+
+.wb-changes.is-wrapped .wb-changes__path {
+  overflow: visible;
+  flex-wrap: wrap;
+  white-space: normal;
+}
+
+/* min-width has to be released with overflow: the automatic minimum size of a
+   flex item is its content unless it clips, which would push the row wide
+   instead of breaking it. */
+.wb-changes.is-wrapped .wb-changes__path-dir {
+  overflow: visible;
+  min-width: 0;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+}
+
+.wb-changes.is-wrapped .wb-changes__path-base {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.wb-changes.is-wrapped .wb-changes__diff-path {
   overflow: visible;
   text-overflow: clip;
   white-space: normal;
@@ -1014,7 +1060,6 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   display: flex;
   flex: none;
   gap: 0.375rem;
-  margin-left: auto;
 }
 
 /* The +N/-N counts are metadata; the patch itself carries the add/remove
@@ -1049,8 +1094,8 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 
 /* Wrapping is the default because the dock is often narrower than the patch;
    horizontal scrolling stays available by turning it off. */
-.wb-changes__code.is-wrapped .wb-changes__line,
-.wb-changes__code.is-wrapped .wb-changes__line-code {
+.wb-changes.is-wrapped .wb-changes__line,
+.wb-changes.is-wrapped .wb-changes__line-code {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

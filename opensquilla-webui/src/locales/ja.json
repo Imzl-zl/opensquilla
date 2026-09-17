@@ -183,7 +183,7 @@
       "fileNav": "変更ファイルの移動",
       "previousFile": "前のファイル",
       "nextFile": "次のファイル",
-      "filePosition": "{total} 件中 {current} 件目",
+      "filePosition": "{current} / {total} 件",
       "diffLabel": "ファイルの差分",
       "wrapLines": "折り返し",
       "oldLineNumber": "旧行番号",

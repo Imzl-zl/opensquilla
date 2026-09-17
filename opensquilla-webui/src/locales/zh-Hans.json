@@ -183,7 +183,7 @@
       "fileNav": "已更改文件导航",
       "previousFile": "上一个文件",
       "nextFile": "下一个文件",
-      "filePosition": "第 {current} 个，共 {total} 个",
+      "filePosition": "{current} / {total} 项",
       "diffLabel": "文件差异",
       "wrapLines": "自动换行",
       "oldLineNumber": "旧行号",

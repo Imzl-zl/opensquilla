@@ -529,8 +529,14 @@ onBeforeUnmount(() => {
   min-width: 0;
   height: 100%;
   overflow: hidden;
-  border-inline-start: 1px solid var(--border);
+  /* The dock is a layer, not a flush slab: the chat pane beside it is a card
+     (border + radius + shadow), and a single hairline on one side left this
+     surface reading as a hard cut out of the page. Same vocabulary, so both
+     side surfaces look inserted rather than truncated. */
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
   background: var(--bg);
+  box-shadow: var(--shadow-sm);
   color: var(--text);
 }
 
@@ -544,6 +550,9 @@ onBeforeUnmount(() => {
 
 .workbench-host--overlay {
   position: fixed;
+  /* Floats above the page instead of sitting in the row, so it takes the
+     overlay elevation rather than the card one. */
+  box-shadow: var(--shadow-lg);
   z-index: 220;
   inset:
     var(--workbench-container-top)
@@ -560,7 +569,10 @@ onBeforeUnmount(() => {
   inset: 0;
   width: 100%;
   height: 100dvh;
-  border-inline-start: 0;
+  /* A full-screen dialog is the page, not a card on it. */
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 .workbench-host__chrome {
@@ -721,7 +733,8 @@ onBeforeUnmount(() => {
 
 @media (forced-colors: active) {
   .workbench-host {
-    border-inline-start-color: CanvasText;
+    border-color: CanvasText;
+    box-shadow: none;
   }
 
   .workbench-host__chrome {

@@ -291,17 +291,18 @@ describe('WorkspaceChangesPanel', () => {
     clickEntry(mounted.element, 'src/a.ts')
     await settle()
 
-    const code = mounted.element.querySelector('.wb-changes__code')
-    const toggle = [...mounted.element.querySelectorAll<HTMLButtonElement>('.wb-changes__action')]
-      .find(button => button.textContent?.includes('Wrap lines'))
+    const root = mounted.element.querySelector('.wb-changes')
+    const toggle = mounted.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-wrap-lines"]',
+    )
     expect(toggle?.getAttribute('aria-pressed')).toBe('true')
-    expect(code?.classList.contains('is-wrapped')).toBe(true)
+    expect(root?.classList.contains('is-wrapped')).toBe(true)
 
     toggle?.click()
     await nextTick()
 
     expect(toggle?.getAttribute('aria-pressed')).toBe('false')
-    expect(mounted.element.querySelector('.wb-changes__code')?.classList.contains('is-wrapped'))
+    expect(mounted.element.querySelector('.wb-changes')?.classList.contains('is-wrapped'))
       .toBe(false)
     mounted.unmount()
   })
@@ -470,7 +471,7 @@ describe('WorkspaceChangesPanel', () => {
     // Nothing is selected yet, so the first step is a step forward.
     expect(previous?.disabled).toBe(true)
     expect(next?.disabled).toBe(false)
-    expect(position?.textContent?.trim()).toBe('0 of 2')
+    expect(position?.textContent?.trim()).toBe('0 / 2')
 
     next?.click()
     await settle()
@@ -479,7 +480,7 @@ describe('WorkspaceChangesPanel', () => {
       path: 'src/a.ts',
       staged: false,
     })
-    expect(position?.textContent?.trim()).toBe('1 of 2')
+    expect(position?.textContent?.trim()).toBe('1 / 2')
 
     next?.click()
     await settle()
@@ -494,7 +495,7 @@ describe('WorkspaceChangesPanel', () => {
 
     previous?.click()
     await settle()
-    expect(position?.textContent?.trim()).toBe('1 of 2')
+    expect(position?.textContent?.trim()).toBe('1 / 2')
     expect(previous?.disabled).toBe(true)
     mounted.unmount()
   })
@@ -509,28 +510,35 @@ describe('WorkspaceChangesPanel', () => {
     mounted.unmount()
   })
 
-  it('wraps the diff header path with the patch body', async () => {
+  it('applies one wrap preference to the file rows, the header, and the patch', async () => {
     const longPath = `src/${'nested-directory/'.repeat(6)}file.ts`
     const mounted = mountPanel(reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [entry({ path: longPath, changeType: 'modified' })],
+      })),
       readDiff: vi.fn(async () => diff({ path: longPath })),
     }))
     await settle()
-    clickEntry(mounted.element, 'src/a.ts')
+    clickEntry(mounted.element, longPath)
     await settle()
 
-    const head = mounted.element.querySelector('.wb-changes__diff-head')
-    // The header used to truncate a path the body wraps; with wrapping on it
-    // takes the same treatment, so the full path stays readable.
-    expect(head?.classList.contains('is-wrapped')).toBe(true)
-    expect(head?.textContent).toContain(longPath)
+    const root = () => mounted.element.querySelector('.wb-changes')
+    // The header and the rows used to truncate a path the body wraps. One
+    // preference now governs all three, so the full path stays readable
+    // whichever column shows it.
+    expect(root()?.classList.contains('is-wrapped')).toBe(true)
+    expect(mounted.element.querySelector('.wb-changes__diff-head')?.textContent)
+      .toContain(longPath)
+    expect(mounted.element.querySelector('.wb-changes__path')?.textContent)
+      .toContain(longPath)
 
-    const toggle = [...mounted.element.querySelectorAll<HTMLButtonElement>('.wb-changes__action')]
-      .find(button => button.textContent?.includes('Wrap lines'))
+    const toggle = mounted.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-wrap-lines"]',
+    )
     toggle?.click()
     await nextTick()
 
-    expect(mounted.element.querySelector('.wb-changes__diff-head')?.classList
-      .contains('is-wrapped')).toBe(false)
+    expect(root()?.classList.contains('is-wrapped')).toBe(false)
     mounted.unmount()
   })
 

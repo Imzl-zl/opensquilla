@@ -184,7 +184,7 @@
       "fileNav": "Changed file navigation",
       "previousFile": "Previous file",
       "nextFile": "Next file",
-      "filePosition": "{current} of {total}",
+      "filePosition": "{current} / {total}",
       "diffLabel": "File diff",
       "wrapLines": "Wrap lines",
       "oldLineNumber": "Old line",

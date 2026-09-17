@@ -183,7 +183,7 @@
       "fileNav": "Navegación entre archivos modificados",
       "previousFile": "Archivo anterior",
       "nextFile": "Archivo siguiente",
-      "filePosition": "{current} de {total}",
+      "filePosition": "{current} / {total}",
       "diffLabel": "Diferencias del archivo",
       "wrapLines": "Ajustar líneas",
       "oldLineNumber": "Línea antigua",
