@@ -316,6 +316,32 @@ def test_bundle_masks_custom_header_and_cli_credentials(tmp_path, _hermetic_conf
     assert b"-credential" not in b"".join(entries.values())
 
 
+@pytest.mark.parametrize("header", [
+    "X-AuthToken", "x-authtoken", "X-AUTHTOKEN", "x-accesstoken", "X-ACCESSTOKEN",
+])
+def test_bundle_masks_compound_credentials_with_case_insensitive_headers(
+    tmp_path, _hermetic_config, header,
+) -> None:
+    _hermetic_config.write_text(
+        '[memory.embedding.remote.headers]\n'
+        f'"{header}" = "synthetic-opaque-credential"\n',
+        encoding="utf-8",
+    )
+    home, log_dir = _make_home(tmp_path)
+    dest = tmp_path / "bundle.zip"
+    result = collect_bundle(
+        dest, home_dir=home, log_dir=log_dir,
+        extra={"headers": {header: "synthetic-opaque-credential"}},
+    )
+    entries = _read_zip(dest)
+    assert not result.manifest["collection_errors"]
+    assert json.loads(entries["config.redacted.json"])["memory"]["embedding"]["remote"] == {
+        "headers": {header: "[redacted]"},
+    }
+    assert json.loads(entries["live/headers.json"]) == {header: "[redacted]"}
+    assert b"synthetic-opaque-credential" not in b"".join(entries.values())
+
+
 def test_manifest_encoding_failure_fails_the_bundle(tmp_path, monkeypatch) -> None:
     from opensquilla.observability import bundle
 

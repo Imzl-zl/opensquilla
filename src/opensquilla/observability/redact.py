@@ -19,11 +19,14 @@ _REDACTED = "[redacted]"
 # names; restricting them to ASCII would weaken existing config redaction.
 # No blanket `_key` suffix: benign identifiers like `session_key` must stay
 # readable in diagnostics.
+# Known compound credentials must also match without camel-case boundaries:
+# HTTP header casing alone must not change whether an auth token is masked.
 _SECRET_KEY_RE = re.compile(
     r"(?:^|[._])"
     r"(?:api_?key|token|secret_?access_?key|secret_?key|secret|password"
     r"|authorization|signing[_-]?secret|private[_-]?key"
     r"|app[_-]?secret|verification[_-]?token|encrypt[_-]?key|encoding[_-]?aes[_-]?key"
+    r"|(?:api|auth|access|refresh|id|bearer|app)_?token|client_?secret"
     r"|corp_?secret)\Z",
     re.IGNORECASE,
 )

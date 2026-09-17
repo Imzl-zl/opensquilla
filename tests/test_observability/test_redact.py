@@ -39,6 +39,34 @@ def test_complete_secret_assignments_remain_redacted(key: str) -> None:
 
 
 @pytest.mark.parametrize("key", [
+    "X-AuthToken", "X-AccessToken", "refreshToken", "idToken", "bearerToken",
+    "apiToken", "appToken", "clientSecret",
+])
+@pytest.mark.parametrize("case", ["original", "lower", "upper", "swapcase"])
+def test_compound_credentials_are_case_insensitive(key: str, case: str) -> None:
+    key = key if case == "original" else getattr(key, case)()
+    assert scrub_json({"headers": [{key: "synthetic-opaque-credential"}]}) == {
+        "headers": [{key: "[redacted]"}],
+    }
+    assert scrub_text(f'{key}: "synthetic-opaque-credential"') == f'{key}: "[redacted]"'
+    assert scrub_text(f'helper --{key}=synthetic-opaque-credential') == (
+        f'helper --{key}=[redacted]'
+    )
+
+
+@pytest.mark.parametrize("key", [
+    "requiresAuthToken", "requires_auth_token", "requiresaccesstoken", "hasAccessToken",
+    "authTokenCount", "accessTokenEnv", "refreshTokenConfigured", "idTokenRequired",
+    "clientSecretEnv", "notasecret",
+])
+def test_compound_credential_metadata_keeps_case_insensitive_boundaries(key: str) -> None:
+    for spelling in (key, key.lower(), key.upper()):
+        payload = {"metadata": {spelling: [True, False, 3, 1.25, None]}}
+        assert scrub_json(payload) == payload
+        assert scrub_text(f"{spelling}=true") == f"{spelling}=true"
+
+
+@pytest.mark.parametrize("key", [
     "X.Provider-Token", "Vendor.Key-Api-Key", "定制_api_key", "厂商.Password",
     "corpsecret", "CORPSECRET", "this_is_app_secret", "service_has_token",
 ])
