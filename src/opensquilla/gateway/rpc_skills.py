@@ -1091,9 +1091,10 @@ async def _handle_skills_set_enabled(params: dict | None, ctx: RpcContext) -> di
         or is_user_invocable_ordinary(skill, coding_mode=False)
     ):
         raise KeyError(f"Skill not found: {name}")
-    from opensquilla.gateway.rpc_config import _app_settings
+    from opensquilla.gateway.adapters.app_settings import app_settings_for_rpc
 
-    result = await _app_settings(ctx, source="skills.setEnabled").set_skill_enabled(name, enabled)
+    settings = app_settings_for_rpc(ctx, source="skills.setEnabled")
+    result = await settings.set_skill_enabled(name, enabled)
     if result["refreshed"]:
         try:
             from opensquilla.engine.steps.skill_catalog_projection import (
