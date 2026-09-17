@@ -17,6 +17,10 @@ from pathlib import Path
 
 import pytest
 
+# Every case starts a real PowerShell process. Run this harness outside the
+# worker-saturated phase while keeping its 30-second subprocess deadline.
+pytestmark = pytest.mark.ci_serial
+
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / ".github/scripts/verify-windows-signatures.ps1"
 POLICY = ROOT / ".github/signing/windows-signing-policy.json"
@@ -207,7 +211,6 @@ if ($parseErrors.Count) { $parseErrors | Out-String | Write-Error; exit 1 }
 
 
 @pytest.mark.parametrize("source", ["parameter", "environment", "path", "sdk", "native-sdk"])
-@pytest.mark.ci_serial
 def test_signtool_discovery_and_precedence(verifier: VerifierFixture, source: str) -> None:
     # The newest directory may not contain an x64 verifier; compare SDK versions
     # numerically (10.0.10000.0 is newer than 10.0.9999.0).
@@ -234,12 +237,9 @@ def test_signtool_discovery_and_precedence(verifier: VerifierFixture, source: st
 
 @pytest.mark.parametrize("source", ["parameter", "environment"])
 @pytest.mark.parametrize("invalid", ["missing", "directory", "whitespace"])
-@pytest.mark.ci_serial
 def test_explicit_invalid_signtool_fails_without_fallback(
     verifier: VerifierFixture, source: str, invalid: str
 ) -> None:
-    # Keep real PowerShell startup out of the worker-saturated phase, as for
-    # discovery above. Invalid-path rejection retains the 30-second deadline.
     verifier.tool(verifier.path_bin / "signtool.exe")
     verifier.sdk_tool("10.0.10000.0")
     path = {

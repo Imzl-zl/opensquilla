@@ -466,6 +466,7 @@ def _function_decorators(path: Path, function_name: str) -> set[str]:
 @pytest.mark.parametrize(
     "test_file",
     [
+        "tests/test_ci/test_windows_signatures.py",
         "tests/test_sandbox/test_windows_shell_process_runtime.py",
         "tests/test_scripts/test_gateway_ux.py",
     ],
@@ -539,10 +540,6 @@ def test_runner_saturated_subprocess_contracts_are_marked_ci_serial() -> None:
     assert "pytest.mark.ci_serial" in _function_decorators(
         Path("tests/functional/test_gateway_silent_reply_process_e2e.py"),
         "test_real_gateway_suppresses_goal_sentinel_everywhere",
-    )
-    assert "pytest.mark.ci_serial" in _function_decorators(
-        Path("tests/test_ci/test_windows_signatures.py"),
-        "test_explicit_invalid_signtool_fails_without_fallback",
     )
     assert "pytest.mark.ci_serial" in _function_decorators(
         Path("tests/test_desktop/test_gateway_functional_probes.py"),
