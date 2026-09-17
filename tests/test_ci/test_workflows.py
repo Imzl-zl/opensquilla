@@ -38,6 +38,34 @@ def _workflow_texts() -> list[str]:
     return [path.read_text(encoding="utf-8") for path in WORKFLOW_DIR.glob("*.yml")]
 
 
+def test_release_jobs_cannot_write_shared_caches() -> None:
+    workflow = _workflow("wheelhouse-release.yml")
+    assert workflow["cache-mode"] == "read"
+    assert all("cache-mode" not in job for job in workflow["jobs"].values())
+
+
+def test_release_cache_mode_lint_exception_is_narrow() -> None:
+    config = yaml.safe_load(Path(".github/actionlint.yaml").read_text(encoding="utf-8"))
+    assert set(config) == {"paths"}
+    assert set(config["paths"]) == {".github/workflows/wheelhouse-release.yml"}
+    rule = config["paths"][".github/workflows/wheelhouse-release.yml"]
+    assert set(rule) == {"ignore"}
+    assert len(rule["ignore"]) == 1
+    pattern = re.compile(rule["ignore"][0])
+    message = (
+        'unexpected key "cache-mode" for "workflow" section. expected one of '
+        '"concurrency", "defaults", "env", "jobs", "name", "on", "permissions", "run-name"'
+    )
+    assert pattern.fullmatch(message)
+    for other in (
+        message.replace('"cache-mode"', '"cache-modes"'),
+        message.replace('"workflow"', '"job"'),
+        'invalid value "write" for cache-mode',
+        'shellcheck reported issue in this script: SC2086',
+    ):
+        assert pattern.search(other) is None
+
+
 def test_only_diagnostic_uploads_can_fail_without_failing_ci() -> None:
     expected = {
         "webui-chat-recovery": {"chat-traces"},
