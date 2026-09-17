@@ -63,10 +63,6 @@ jobs:
         run: |
           npm ci
           if ($LASTEXITCODE -ne 0) { throw 'Electron npm ci failed' }
-          node scripts/test-packaged-first-send-cleanup.mjs
-          if ($LASTEXITCODE -ne 0) { throw 'Packaged cleanup contract failed' }
-          node --test scripts/test-packaged-first-send-evidence.mjs
-          if ($LASTEXITCODE -ne 0) { throw 'Packaged renderer evidence contract failed' }
           npm run test:nsis-upgrade
           if ($LASTEXITCODE -ne 0) { throw 'NSIS template and native environment tests failed' }
           npm run test:installer-progress
@@ -77,6 +73,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Gateway build failed' }
           npm run build
           if ($LASTEXITCODE -ne 0) { throw 'Electron build failed' }
+          node scripts/test-packaged-first-send-cleanup.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged cleanup contract failed' }
+          node --test scripts/test-packaged-first-send-evidence.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged renderer evidence contract failed' }
           npm run verify:prepared
           if ($LASTEXITCODE -ne 0) { throw 'Prepared package verification failed' }
           node -e "const b=require('electron-builder'); b.build({targets:b.Platform.WINDOWS.createTarget('nsis'),publish:'never',config:{win:{signExecutable:false},forceCodeSigning:false}}).catch(e=>{console.error(e);process.exitCode=1})"

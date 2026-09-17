@@ -170,6 +170,32 @@ def test_partial_queue_wiring_preserves_canary_gate_and_does_not_mint_root_evide
     )["if"]
 
 
+@pytest.mark.parametrize("workflow_name,job_name", [
+    ("windows-nsis-upgrade-regression.yml", "build"),
+    ("ci.yml", "desktop-check"),
+])
+def test_packaged_contract_probes_run_after_desktop_compilation(
+    workflow_name: str, job_name: str,
+) -> None:
+    job = _workflow(workflow_name)["jobs"][job_name]
+    # The helpers import compiled desktop modules. An earlier WebUI build does
+    # not satisfy that dependency on a fresh checkout.
+    commands = [
+        line.strip()
+        for step in job["steps"]
+        if step.get("working-directory") == "desktop/electron"
+        for line in step.get("run", "").splitlines()
+    ]
+    assert commands.count("npm run build") == 1
+    build_index = commands.index("npm run build")
+    for probe in (
+        "node scripts/test-packaged-first-send-cleanup.mjs",
+        "node --test scripts/test-packaged-first-send-evidence.mjs",
+    ):
+        assert commands.count(probe) == 1
+        assert build_index < commands.index(probe), f"{job_name}: {probe} needs desktop dist"
+
+
 def test_windows_acceptance_is_required_through_the_caller_and_all_native_jobs() -> None:
     jobs = _workflow("ci.yml")["jobs"]
     call = jobs["windows-nsis-regression"]
