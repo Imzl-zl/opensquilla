@@ -830,6 +830,8 @@ jobs:
           ensemble-new-task-legacy-turn.spec.ts
           goal-mode.spec.ts
           plan-questionnaire-lifecycle.spec.ts
+          plan-presentation.spec.ts
+          task-progress.spec.ts
           queue-steer.spec.ts
           share.spec.ts
           --project=chromium
@@ -1614,6 +1616,25 @@ jobs:
             tests/test_gateway/test_session_model_routing_rpc.py
             tests/test_tools/test_execution_status.py
             tests/test_provider_ensemble.py
+            tests/test_gateway/test_goal_rpc.py
+            tests/test_gateway/test_goal_child_wait.py
+            tests/test_gateway/test_goal_plan_rpc_admission.py
+            tests/test_gateway/test_plan_cancel_tree.py
+            tests/test_gateway/test_plan_rpc.py
+            tests/test_gateway/test_task_runtime_wait_slots.py
+            tests/test_gateway/test_task_progress_projection.py
+            tests/test_gateway/test_usage_ledger_runtime.py
+            tests/test_engine/test_plan_run_reconciliation.py
+            tests/test_engine/test_goal_context_prompt.py
+            tests/test_session/test_goal_storage.py
+            tests/test_session/test_goal_plan_admission.py
+            tests/test_session/test_plan_storage.py
+            tests/test_session/test_plan_presentation.py
+            tests/test_session/test_task_progress.py
+            tests/test_persistence/test_usage_ledger.py
+            tests/test_persistence/test_migration_compatibility.py
+            tests/test_migrations/test_v045_goal_runtime_accounting.py
+            tests/test_tools/test_plan_access.py
             -vv
             --tb=short
             -o faulthandler_timeout=60
@@ -1815,6 +1836,11 @@ jobs:
             --grep "@session-hang-recovery" \
             --retries=0 \
             2>&1 | tee "${CI_REPORT_DIR}/session-hang-recovery.log"
+          npm run test:e2e -- \
+            plan-presentation.spec.ts task-progress.spec.ts goal-mode.spec.ts \
+            --project=chromium --workers=1 --retries=0 \
+            --grep "@plan-goal-runtime" \
+            2>&1 | tee "${CI_REPORT_DIR}/plan-goal-runtime.log"
 
       - name: Install Desktop workbench browser
         if: ${{ matrix.shard == 'all' || matrix.shard == 'ownership-workbench' || matrix.shard == 'workbench' }}

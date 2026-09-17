@@ -1784,6 +1784,12 @@ def test_desktop_recovery_e2e_runs_compiled_flows_on_all_release_platforms() -> 
     # Select by a stable contract tag, not the scenario's human-readable title.
     # Renaming the test must not silently leave this release-platform gate empty.
     assert '--grep "@session-hang-recovery"' in session_recovery["run"]
+    assert '--grep "@plan-goal-runtime"' in session_recovery["run"]
+    for spec in ("plan-presentation.spec.ts", "task-progress.spec.ts", "goal-mode.spec.ts"):
+        assert spec in session_recovery["run"]
+        assert "@plan-goal-runtime" in Path("opensquilla-webui/e2e", spec).read_text(
+            encoding="utf-8"
+        )
     assert "--retries=0" in session_recovery["run"]
     recovery_spec = Path("opensquilla-webui/e2e/history-hydration.spec.ts").read_text(
         encoding="utf-8"
@@ -2236,6 +2242,8 @@ def test_webui_chat_recovery_runs_the_verified_dist_through_gateway() -> None:
         "idle-chat-recovery.spec.ts",
         "new-task-ensemble-race.spec.ts",
         "plan-questionnaire-lifecycle.spec.ts",
+        "plan-presentation.spec.ts",
+        "task-progress.spec.ts",
         "provider-error-experience.spec.ts",
         "router-physical-model.spec.ts",
         "queue-steer.spec.ts",
