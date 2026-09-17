@@ -24,6 +24,7 @@ from opensquilla.workspace_git_changes import (
     WorkspaceStatusParseError,
     is_untracked_path,
     normalize_repo_path,
+    parse_numstat,
     parse_porcelain_status,
     read_workspace_changes,
     read_workspace_diff,
@@ -151,6 +152,49 @@ def test_parse_status_rejects_unknown_records() -> None:
     # the review list.
     with pytest.raises(WorkspaceStatusParseError):
         parse_porcelain_status("x unexpected record\x00")
+
+
+# Captured from `git diff --numstat HEAD -z` after modifying a file, turning
+# another into binary, and staging a rename.
+NUMSTAT_WITH_RENAME = "2\t1\ta.ts\x00-\t-\tblob.bin\x000\t0\t\x00rename-me.ts\x00renamed.ts\x00"
+
+
+def test_parse_numstat_reads_counts_and_keeps_binary_unknown() -> None:
+    counts = parse_numstat(NUMSTAT_WITH_RENAME)
+
+    assert counts["a.ts"] == (2, 1)
+    # `-` means "no countable lines"; it must not become 0.
+    assert counts["blob.bin"] == (None, None)
+    # A rename record leaves its path field empty and carries both paths in the
+    # following NUL fields, so either spelling resolves.
+    assert counts["renamed.ts"] == (0, 0)
+    assert counts["rename-me.ts"] == (0, 0)
+
+
+def test_parse_numstat_ignores_stray_tokens() -> None:
+    assert parse_numstat("\x00not-a-record\x00\x00") == {}
+
+
+def test_read_workspace_changes_reports_counts_and_keeps_unknowns_unknown(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    (repository / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repository, git_environment)
+    (repository / "tracked.txt").write_text("two\n", encoding="utf-8")
+    (repository / "untracked.txt").write_text("new\n", encoding="utf-8")
+
+    changes = read_workspace_changes(str(repository), environment=git_environment)
+
+    counted = {entry.path: (entry.added_lines, entry.removed_lines) for entry in changes.entries}
+    assert counted == {
+        "tracked.txt": (1, 1),
+        "untracked.txt": (None, None),
+    }
+    # Totals sum only what is known, so one unknown file cannot fake a zero.
+    assert (changes.added_lines, changes.removed_lines) == (1, 1)
 
 
 @pytest.mark.parametrize(
@@ -438,13 +482,20 @@ def test_read_only_reads_apply_the_shared_git_hardening(
 
     monkeypatch.setattr(workspace_git_changes, "run_git", _capture)
 
-    read_workspace_changes(".")
+    read_workspace_changes(".")           # status + numstat
     read_workspace_diff(".", "file.txt")
     is_untracked_path(".", "file.txt")
 
-    assert len(captured) == 3
     for args in captured:
         assert args[:3] == ("--no-optional-locks", "-c", "core.fsmonitor=false"), args
-    diff_args = captured[1]
-    assert diff_args[3:5] == ("diff", "--no-ext-diff"), diff_args
-    assert "--no-textconv" in diff_args
+
+    def find(marker: str) -> tuple[str, ...]:
+        return next(args for args in captured if marker in args)
+
+    # Both diff-shaped reads must disable repository-controlled helpers.
+    for marker in ("--numstat", "--unified=3"):
+        args = find(marker)
+        assert args[3:5] == ("diff", "--no-ext-diff"), args
+        assert "--no-textconv" in args
+    assert "ls-files" in find("ls-files")
+    assert "status" in find("status")

@@ -11,6 +11,9 @@ export interface WorkspaceChangeEntry {
   readonly changeType: WorkspaceChangeType
   readonly staged: boolean
   readonly unstaged: boolean
+  /** Null when lines are not countable (binary, or no stats for the path). */
+  readonly addedLines: number | null
+  readonly removedLines: number | null
 }
 
 export type WorkspaceChangeType =
@@ -45,6 +48,8 @@ export interface WorkspaceChanges {
   readonly behind: number
   readonly totalCount: number
   readonly truncated: boolean
+  readonly addedLines: number
+  readonly removedLines: number
   readonly entries: readonly WorkspaceChangeEntry[]
 }
 

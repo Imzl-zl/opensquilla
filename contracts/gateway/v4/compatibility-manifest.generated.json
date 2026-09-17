@@ -1433,7 +1433,7 @@
       "lifecycle": "stable",
       "name": "workspaces.git.status",
       "schema": "workspaces/workspaces-git-status.schema.json",
-      "schemaSha256": "5b795cf4793505e98e23ac5908a0ba720b3a19adb0ffe8ac47acc1162008c805"
+      "schemaSha256": "0aa786c679293de05e9be2f5f568bc2214e4154f1aea683458ca8d0174a6594c"
     },
     {
       "lifecycle": "stable",
@@ -1478,7 +1478,7 @@
     "generatorSha256": "dff249871f7d15f32fa4cb3803a4edaf3ee41cefc5bb0a40fe1f4602bb7e3211",
     "methodCount": 217,
     "schemaCount": 227,
-    "schemaTreeSha256": "ca2baf594affcd03726c37c6645a2e66690f7f4babb2701f014570772a0cee87"
+    "schemaTreeSha256": "755e18c5c4c79b03b965fe0575cc1f775efe89f60d1b290db37c1df0ef6194ff"
   },
   "wireVersion": 4
 }

@@ -24,6 +24,8 @@ function changes(overrides: Partial<WorkspaceChanges> = {}): WorkspaceChanges {
     behind: 0,
     totalCount: 1,
     truncated: false,
+    addedLines: 1,
+    removedLines: 1,
     entries: [
       {
         path: 'src/a.ts',
@@ -31,8 +33,25 @@ function changes(overrides: Partial<WorkspaceChanges> = {}): WorkspaceChanges {
         changeType: 'modified',
         staged: false,
         unstaged: true,
+        addedLines: 1,
+        removedLines: 1,
       },
     ],
+    ...overrides,
+  }
+}
+
+/** Entries built by a test need the same shape the Contract requires. */
+function entry(
+  overrides: Partial<WorkspaceChanges['entries'][number]> & { path: string },
+): WorkspaceChanges['entries'][number] {
+  return {
+    previousPath: null,
+    changeType: 'modified',
+    staged: false,
+    unstaged: true,
+    addedLines: 1,
+    removedLines: 0,
     ...overrides,
   }
 }
@@ -101,8 +120,8 @@ describe('WorkspaceChangesPanel', () => {
     const port = reader({
       readChanges: vi.fn(async () => changes({
         entries: [
-          { path: 'src/a.ts', previousPath: null, changeType: 'modified', staged: false, unstaged: true },
-          { path: 'src/new.ts', previousPath: null, changeType: 'untracked', staged: false, unstaged: true },
+          entry({ path: 'src/a.ts', changeType: 'modified', staged: false, unstaged: true }),
+          entry({ path: 'src/new.ts', changeType: 'untracked', staged: false, unstaged: true }),
         ],
         totalCount: 2,
       })),
@@ -133,7 +152,7 @@ describe('WorkspaceChangesPanel', () => {
     const port = reader({
       readChanges: vi.fn(async () => changes({
         entries: [
-          { path: 'src/staged.ts', previousPath: null, changeType: 'added', staged: true, unstaged: false },
+          entry({ path: 'src/staged.ts', changeType: 'added', staged: true, unstaged: false }),
         ],
       })),
     })
@@ -237,8 +256,8 @@ describe('WorkspaceChangesPanel', () => {
     const mounted = mountPanel(reader({
       readChanges: vi.fn(async () => changes({
         entries: [
-          { path: 'src/a.ts', previousPath: null, changeType: 'modified', staged: false, unstaged: true },
-          { path: 'src/b.ts', previousPath: null, changeType: 'modified', staged: false, unstaged: true },
+          entry({ path: 'src/a.ts', changeType: 'modified', staged: false, unstaged: true }),
+          entry({ path: 'src/b.ts', changeType: 'modified', staged: false, unstaged: true }),
         ],
         totalCount: 2,
       })),
@@ -262,12 +281,35 @@ describe('WorkspaceChangesPanel', () => {
     mounted.unmount()
   })
 
+  it('shows per-file line stats and keeps unknown counts unknown', async () => {
+    const mounted = mountPanel(reader({
+      readChanges: vi.fn(async () => changes({
+        addedLines: 7,
+        removedLines: 2,
+        totalCount: 2,
+        entries: [
+          entry({ path: 'src/a.ts', addedLines: 5, removedLines: 2 }),
+          // A binary file has no countable lines; it must not claim 0/0.
+          entry({ path: 'src/blob.bin', addedLines: null, removedLines: null }),
+        ],
+      })),
+    }))
+    await settle()
+
+    const rowFor = (path: string) => [...mounted.element.querySelectorAll('.wb-changes__entry')]
+      .find(node => node.textContent?.includes(path))
+    expect(rowFor('src/a.ts')?.querySelector('.wb-changes__stats')?.textContent).toBe('+5-2')
+    expect(rowFor('src/blob.bin')?.querySelector('.wb-changes__stats')).toBeNull()
+    expect(mounted.element.querySelector('.wb-changes__bar')?.textContent).toContain('+7-2')
+    mounted.unmount()
+  })
+
   it('moves between files with the arrow keys', async () => {
     const mounted = mountPanel(reader({
       readChanges: vi.fn(async () => changes({
         entries: [
-          { path: 'src/a.ts', previousPath: null, changeType: 'modified', staged: false, unstaged: true },
-          { path: 'src/b.ts', previousPath: null, changeType: 'modified', staged: false, unstaged: true },
+          entry({ path: 'src/a.ts', changeType: 'modified', staged: false, unstaged: true }),
+          entry({ path: 'src/b.ts', changeType: 'modified', staged: false, unstaged: true }),
         ],
         totalCount: 2,
       })),

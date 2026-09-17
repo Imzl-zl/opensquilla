@@ -13,19 +13,21 @@
     "WorkspacesGitStatusChangeEntry": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "previousPath", "changeType", "staged", "unstaged"],
+      "required": ["path", "previousPath", "changeType", "staged", "unstaged", "addedLines", "removedLines"],
       "properties": {
         "path": {"type": "string", "minLength": 1},
         "previousPath": {"type": ["string", "null"]},
         "changeType": {"type": "string", "enum": ["added", "modified", "deleted", "renamed", "copied", "typeChanged", "unmerged", "untracked", "unknown"]},
         "staged": {"type": "boolean"},
-        "unstaged": {"type": "boolean"}
+        "unstaged": {"type": "boolean"},
+        "addedLines": {"type": ["integer", "null"], "minimum": 0},
+        "removedLines": {"type": ["integer", "null"], "minimum": 0}
       }
     },
     "WorkspacesGitStatusResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["available", "availabilityReason", "branch", "detached", "upstream", "ahead", "behind", "totalCount", "truncated", "entries"],
+      "required": ["available", "availabilityReason", "branch", "detached", "upstream", "ahead", "behind", "totalCount", "truncated", "addedLines", "removedLines", "entries"],
       "properties": {
         "available": {"type": "boolean"},
         "availabilityReason": {"type": ["string", "null"], "enum": ["git_unavailable", "not_repository", "timed_out", "failed", null]},
@@ -36,6 +38,8 @@
         "behind": {"type": "integer", "minimum": 0},
         "totalCount": {"type": "integer", "minimum": 0},
         "truncated": {"type": "boolean"},
+        "addedLines": {"type": "integer", "minimum": 0},
+        "removedLines": {"type": "integer", "minimum": 0},
         "entries": {"type": "array", "items": {"$ref": "#/$defs/WorkspacesGitStatusChangeEntry"}}
       }
     },

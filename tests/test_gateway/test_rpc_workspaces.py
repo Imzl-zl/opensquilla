@@ -2025,6 +2025,9 @@ async def test_git_status_projects_a_real_repository(
             "changeType": "untracked",
             "staged": False,
             "unstaged": True,
+            # An untracked file has no line stats yet: unknown, not zero.
+            "addedLines": None,
+            "removedLines": None,
         },
         {
             "path": "tracked.txt",
@@ -2032,8 +2035,11 @@ async def test_git_status_projects_a_real_repository(
             "changeType": "modified",
             "staged": False,
             "unstaged": True,
+            "addedLines": 1,
+            "removedLines": 1,
         },
     ]
+    assert (result["addedLines"], result["removedLines"]) == (1, 1)
 
 
 @pytest.mark.asyncio

@@ -25,7 +25,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from opensquilla.git_runtime import (
@@ -94,13 +94,21 @@ class WorkspaceStatusParseError(RuntimeError):
 
 @dataclass(frozen=True)
 class WorkspaceChangeEntry:
-    """One changed path, with staged/unstaged state kept separate."""
+    """One changed path, with staged/unstaged state kept separate.
+
+    ``added_lines`` / ``removed_lines`` are ``None`` when the count is genuinely
+    unknown (a binary file, or a path Git reports no line stats for). They are
+    never reported as ``0`` for those cases, because a confident zero is a
+    different claim from "not countable".
+    """
 
     path: str
     previous_path: str | None
     change_type: ChangeType
     staged: bool
     unstaged: bool
+    added_lines: int | None = None
+    removed_lines: int | None = None
 
 
 @dataclass(frozen=True)
@@ -116,6 +124,8 @@ class WorkspaceChanges:
     behind: int
     total_count: int
     truncated: bool
+    added_lines: int
+    removed_lines: int
     entries: tuple[WorkspaceChangeEntry, ...]
 
 
@@ -295,6 +305,67 @@ def parse_porcelain_status(output: str) -> tuple[_StatusHeader, list[WorkspaceCh
     return header, entries
 
 
+def _numstat_value(raw: str) -> int | None:
+    """`git diff --numstat` prints `-` when a file has no countable lines."""
+
+    return int(raw) if raw.isdigit() else None
+
+
+def parse_numstat(output: str) -> dict[str, tuple[int | None, int | None]]:
+    """Parse ``git diff --numstat HEAD -z`` into ``path -> (added, removed)``.
+
+    With ``-z`` a rename/copy record leaves its path field empty and carries the
+    original and new path in the following two NUL fields, so the scan is
+    index-based. Both paths of a rename are registered, because callers looking
+    up counts may hold either spelling.
+    """
+
+    counts: dict[str, tuple[int | None, int | None]] = {}
+    tokens = output.split("\x00")
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if not token:
+            continue
+        added_raw, separator, remainder = token.partition("\t")
+        if not separator:
+            continue
+        removed_raw, separator, path = remainder.partition("\t")
+        if not separator:
+            # Not a numstat record (a stray token); skip rather than invent one.
+            continue
+        value = (_numstat_value(added_raw), _numstat_value(removed_raw))
+        if path:
+            counts[path] = value
+            continue
+        previous = tokens[index] if index < len(tokens) else ""
+        current = tokens[index + 1] if index + 1 < len(tokens) else ""
+        index += 2
+        for candidate in (current, previous):
+            if candidate:
+                counts[candidate] = value
+    return counts
+
+
+def _apply_line_counts(
+    entries: list[WorkspaceChangeEntry],
+    counts: dict[str, tuple[int | None, int | None]],
+) -> list[WorkspaceChangeEntry]:
+    return [
+        replace(
+            entry,
+            added_lines=counts[entry.path][0] if entry.path in counts else None,
+            removed_lines=counts[entry.path][1] if entry.path in counts else None,
+        )
+        for entry in entries
+    ]
+
+
+def _total(values: tuple[int | None, ...]) -> int:
+    return sum(value for value in values if value is not None)
+
+
 def _availability_reason(result_state: GitRunState) -> AvailabilityReason | None:
     if result_state is GitRunState.UNAVAILABLE:
         return "git_unavailable"
@@ -347,9 +418,12 @@ def read_workspace_changes(
             behind=0,
             total_count=0,
             truncated=False,
+            added_lines=0,
+            removed_lines=0,
             entries=(),
         )
     header, entries = parse_porcelain_status(result.stdout_text)
+    entries = _apply_line_counts(entries, _read_line_counts(workspace_path, timeout, environment))
     kept = entries[: max(0, max_entries)]
     return WorkspaceChanges(
         available=True,
@@ -361,8 +435,32 @@ def read_workspace_changes(
         behind=header.behind,
         total_count=len(entries),
         truncated=len(entries) > len(kept),
+        added_lines=_total(tuple(entry.added_lines for entry in entries)),
+        removed_lines=_total(tuple(entry.removed_lines for entry in entries)),
         entries=tuple(kept),
     )
+
+
+def _read_line_counts(
+    workspace_path: str,
+    timeout: float,
+    environment: Mapping[str, str] | None,
+) -> dict[str, tuple[int | None, int | None]]:
+    """Per-file line counts against HEAD, or an empty map when unavailable.
+
+    A missing count is reported as unknown rather than failing the whole read:
+    the change list itself is still correct and useful without stats.
+    """
+
+    result = run_git(
+        harden_read_only_git_args(("diff", "--numstat", "HEAD", "-z")),
+        cwd=workspace_path,
+        timeout=timeout,
+        environment=environment,
+    )
+    if result.state is not GitRunState.OK:
+        return {}
+    return parse_numstat(result.stdout_text)
 
 
 def _null_device() -> str:
@@ -479,6 +577,7 @@ __all__ = [
     "WorkspaceStatusParseError",
     "is_untracked_path",
     "normalize_repo_path",
+    "parse_numstat",
     "parse_porcelain_status",
     "read_workspace_changes",
     "read_workspace_diff",

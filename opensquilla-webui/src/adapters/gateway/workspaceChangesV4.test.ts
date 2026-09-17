@@ -32,6 +32,8 @@ function statusResult(overrides: Record<string, unknown> = {}) {
     behind: 0,
     totalCount: 1,
     truncated: false,
+    addedLines: 1,
+    removedLines: 1,
     entries: [
       {
         path: 'src/a.ts',
@@ -39,6 +41,8 @@ function statusResult(overrides: Record<string, unknown> = {}) {
         changeType: 'modified',
         staged: false,
         unstaged: true,
+        addedLines: 1,
+        removedLines: 1,
       },
     ],
     ...overrides,
@@ -71,6 +75,8 @@ describe('createV4WorkspaceChanges', () => {
       behind: 0,
       totalCount: 1,
       truncated: false,
+      addedLines: 1,
+      removedLines: 1,
       entries: [
         {
           path: 'src/a.ts',
@@ -78,6 +84,8 @@ describe('createV4WorkspaceChanges', () => {
           changeType: 'modified',
           staged: false,
           unstaged: true,
+          addedLines: 1,
+          removedLines: 1,
         },
       ],
     })
@@ -94,6 +102,8 @@ describe('createV4WorkspaceChanges', () => {
       availabilityReason: 'not_repository',
       branch: null,
       totalCount: 0,
+      addedLines: 0,
+      removedLines: 0,
       entries: [],
     }))
     const changes = createV4WorkspaceChanges({ request })

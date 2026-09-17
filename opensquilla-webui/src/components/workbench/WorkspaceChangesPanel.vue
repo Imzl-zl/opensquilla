@@ -7,6 +7,15 @@
         <span v-if="changes?.available" class="wb-changes__count">
           {{ t('workbench.changes.fileCount', { count: changes.totalCount }) }}
         </span>
+        <span
+          v-if="changes?.available"
+          class="wb-changes__count"
+          :title="t('workbench.changes.diffStats', { added: changes.addedLines, removed: changes.removedLines })"
+          :aria-label="t('workbench.changes.diffStats', { added: changes.addedLines, removed: changes.removedLines })"
+        >
+          <span class="wb-changes__added">+{{ changes.addedLines }}</span>
+          <span class="wb-changes__removed">-{{ changes.removedLines }}</span>
+        </span>
       </div>
       <button
         type="button"
@@ -81,6 +90,10 @@
             <span class="wb-changes__path">
               <span v-if="pathParts(entry.path).dir" class="wb-changes__path-dir">{{ pathParts(entry.path).dir }}</span>
               <span class="wb-changes__path-base">{{ pathParts(entry.path).base }}</span>
+            </span>
+            <span v-if="entryStats(entry)" class="wb-changes__stats">
+              <span class="wb-changes__added">+{{ entry.addedLines }}</span>
+              <span class="wb-changes__removed">-{{ entry.removedLines }}</span>
             </span>
             <span v-if="entry.staged && entry.unstaged" class="wb-changes__both">
               {{ t('workbench.changes.bothHalves') }}
@@ -358,6 +371,12 @@ function countLines(text: string | undefined, marker: '+' | '-'): number {
     total += 1
   }
   return total
+}
+
+/** Counts are shown only when both halves are known; `0/0` for a binary file
+ * would claim a measurement Git did not make. */
+function entryStats(entry: WorkspaceChangeEntry): boolean {
+  return Number.isFinite(entry.addedLines) && Number.isFinite(entry.removedLines)
 }
 
 /** File headers and hunk bands span the row: an empty gutter reads as a
@@ -653,6 +672,20 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 .wb-changes__path-base {
   flex: none;
   color: var(--text);
+}
+
+.wb-changes__stats {
+  display: flex;
+  flex: none;
+  gap: 0.25rem;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+}
+
+.wb-changes__stats + .wb-changes__both,
+.wb-changes__stats + .wb-changes__check {
+  margin-left: 0.375rem;
 }
 
 .wb-changes__both {

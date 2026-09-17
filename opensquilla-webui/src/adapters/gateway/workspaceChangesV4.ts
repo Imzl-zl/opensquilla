@@ -58,12 +58,16 @@ export function createV4WorkspaceChanges(
         behind: result.behind,
         totalCount: result.totalCount,
         truncated: result.truncated,
+        addedLines: result.addedLines,
+        removedLines: result.removedLines,
         entries: result.entries.map(entry => ({
           path: entry.path,
           previousPath: entry.previousPath,
           changeType: entry.changeType,
           staged: entry.staged,
           unstaged: entry.unstaged,
+          addedLines: entry.addedLines,
+          removedLines: entry.removedLines,
         })),
       }
     },

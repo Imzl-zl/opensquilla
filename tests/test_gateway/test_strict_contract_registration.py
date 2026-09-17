@@ -204,6 +204,8 @@ _VALID_REGISTRATION_RESULTS: dict[str, dict[str, Any]] = {
         "behind": 0,
         "totalCount": 0,
         "truncated": False,
+        "addedLines": 0,
+        "removedLines": 0,
         "entries": [],
     },
     "workspaces.git.diff": {

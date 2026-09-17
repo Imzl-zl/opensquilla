@@ -351,6 +351,8 @@ async def _handle_workspaces_git_status(
         "behind": changes.behind,
         "totalCount": changes.total_count,
         "truncated": changes.truncated,
+        "addedLines": changes.added_lines,
+        "removedLines": changes.removed_lines,
         "entries": [
             {
                 "path": entry.path,
@@ -358,6 +360,8 @@ async def _handle_workspaces_git_status(
                 "changeType": entry.change_type,
                 "staged": entry.staged,
                 "unstaged": entry.unstaged,
+                "addedLines": entry.added_lines,
+                "removedLines": entry.removed_lines,
             }
             for entry in changes.entries
         ],
