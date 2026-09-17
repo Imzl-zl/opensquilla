@@ -90,6 +90,27 @@ describe('native chat attachment intake', () => {
     expect(attachments.pendingAttachments.value).toEqual([])
   })
 
+  it('does not persist drop bytes while the native import decision is still pending', async () => {
+    const imported = deferred<NativeAttachmentReceipt>()
+    const store = { load: vi.fn(async () => []), save: vi.fn(async () => {}) }
+    const attachments = useChatAttachments(undefined, {
+      native: { selectAttachmentFile: async () => selection, importAttachmentSelection: () => imported.promise },
+      nativeContext: () => context,
+      draftScope: () => ({ identity: 'fixture-owner', sessionKey: 'fixture-session' }), draftStore: store,
+    })
+    await vi.waitFor(() => expect(attachments.hasPendingAttachmentWork()).toBe(false))
+    const file = new File(['text'], selection.name)
+    const adding = attachments.addAttachments([file])
+    await vi.waitFor(() => expect(attachments.pendingAttachments.value[0]?.kind).toBe('uploading'))
+    await attachments.flushAttachmentDraft()
+    expect(store.save).toHaveBeenLastCalledWith(expect.anything(), [expect.not.objectContaining({ file })])
+    expect(attachments.pendingAttachments.value[0].file).toBeUndefined()
+    imported.resolve(receipt)
+    await adding
+    await attachments.flushAttachmentDraft()
+    expect(await attachments.pendingAttachments.value[0].file?.text()).toBe('text')
+  })
+
   it('native permission denial remains a failed attachment and never becomes a byte upload', async () => {
     const { attachments, uploadAttachment } = fixture({
       importAttachmentSelection: vi.fn(async () => { throw new Error('Permission denied') }),
@@ -121,6 +142,39 @@ describe('native chat attachment intake', () => {
     expect(await attachments.prepareAttachmentsForSend()).toBe(true)
     expect(uploadAttachment).not.toHaveBeenCalled()
   })
+  it('automatically prepares restored browser Blob bytes without restoring native authority', async () => {
+    const native = { selectAttachmentFile: vi.fn(async () => null),
+      importAttachmentSelection: vi.fn(async () => receipt) }
+    const store = { load: vi.fn(async () => [{ kind: 'failed' as const, local_id: 1,
+      name: 'draft.txt', mime: 'text/plain', size: 4, file: new File(['text'], 'draft.txt'),
+      error: 'Draft restored; retry to prepare the file' }]), save: vi.fn(async () => {}) }
+    const attachments = useChatAttachments(undefined, { native, nativeContext: () => context,
+      draftScope: () => ({ identity: 'gateway-user-test', sessionKey: context.sessionKey }), draftStore: store })
+    await vi.waitFor(() => expect(attachments.pendingAttachments.value[0]?.kind).toBe('inline'))
+    await attachments.flushAttachmentDraft()
+    expect(attachments.pendingAttachments.value[0]).toMatchObject({ name: 'draft.txt', data: 'dGV4dA==' })
+    expect(native.importAttachmentSelection).not.toHaveBeenCalled()
+    expect(attachments.hasPendingAttachmentWork()).toBe(false)
+  })
+
+  it('saves a new file after retiring a draft while the session scope stays the same', async () => {
+    const store = { load: vi.fn(async () => []), save: vi.fn(async () => {}) }
+    const attachments = useChatAttachments(undefined, {
+      draftScope: () => ({ identity: 'fixture-owner', sessionKey: 'fixture-session' }), draftStore: store,
+    })
+    await vi.waitFor(() => expect(attachments.hasPendingAttachmentWork()).toBe(false))
+    await attachments.addAttachments([new File(['old'], 'old.txt', { type: 'text/plain' })])
+    await vi.waitFor(() => expect(attachments.pendingAttachments.value[0]?.kind).toBe('inline'))
+    attachments.retireAttachments()
+    await attachments.addAttachments([new File(['new'], 'new.txt', { type: 'text/plain' })])
+    await vi.waitFor(() => expect(attachments.pendingAttachments.value[0]?.kind).toBe('inline'))
+    await attachments.flushAttachmentDraft()
+    expect(store.save).toHaveBeenLastCalledWith(
+      { identity: 'fixture-owner', sessionKey: 'fixture-session' },
+      [expect.objectContaining({ name: 'new.txt', data: 'bmV3' })],
+    )
+  })
+
   it('a new task without durable native session identity uses the ordinary picker and content path', async () => {
     const native = { chooseAttachments: vi.fn(async () => [selection]),
       selectAttachmentFile: vi.fn(async () => selection), importAttachmentSelection: vi.fn(async () => receipt) }

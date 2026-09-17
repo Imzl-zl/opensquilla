@@ -306,6 +306,16 @@ Behavior notes:
   Unknown capacity, a failed compaction, or new material that cannot fit still
   produces an explicit admission failure.
 
+The WebUI and Desktop composer can recover unsent attachments from local browser
+storage when IndexedDB is available. Drafts are scoped to the authenticated
+Gateway/account or verified Desktop profile and conversation. They expire 24 hours
+after their latest save and allow at most 10 items and 60 MiB per draft, with a
+120 MiB aggregate limit across at most 20 drafts. Storage or quota failures are
+reported in the composer. An expired staged upload can be re-uploaded only when
+the draft retained its file bytes; otherwise the user must select it again.
+Native file-selection capabilities are never saved in drafts. Removing a draft
+only removes the unsent selection, not accepted or queued attachment material.
+
 ## Memory Configuration
 
 Useful commands:

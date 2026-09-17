@@ -20,6 +20,7 @@ type CapturedSend = {
 type HistoryAttachmentFixture = 'send' | 'html' | 'image' | 'staged'
 
 type MockRpcOptions = {
+  durableDraftIdentity?: boolean
   replayHistoryAfterSend?: boolean
   historyAttachmentFixture?: HistoryAttachmentFixture
   historyRequests?: Array<Record<string, unknown>>
@@ -63,6 +64,8 @@ async function mockRpc(page: Page, capturedSends: CapturedSend[], options: MockR
         if (method === 'connect') {
           ws.send(helloOkResponse({
             auth: { principal: { isOwner: true, authenticated: true, authState: 'authenticated',
+              ...(options.durableDraftIdentity ? { role: 'operator',
+                scopes: ['operator.read', 'operator.write'], capabilities: ['chat.read', 'chat.write'] } : {}),
             } },
           }))
           return
@@ -498,6 +501,49 @@ test.describe('attachment drag upload', () => {
     expect(JSON.stringify(params)).not.toContain('/Users/')
     expect(JSON.stringify(params)).not.toContain('small.txt/')
   })
+  }
+
+  for (const durableDraftIdentity of [true, false]) {
+    test(`recovers attachment bytes after refresh only with a proven draft identity (${durableDraftIdentity})`, async ({ page }) => {
+      const capturedSends: CapturedSend[] = []
+      await openMockedChat(page, capturedSends, { durableDraftIdentity },
+        '/control/chat?session=agent%3Amain%3Awebchat%3Afixture-draft-reload')
+      await dropFiles(page, [{ name: 'draft.txt', type: 'text/plain', text: 'recover these attachment bytes' }])
+      await expect(page.locator('.attachment-chip')).toContainText('draft.txt')
+      await expect(page.locator('.attachment-chip--busy')).toHaveCount(0)
+      if (durableDraftIdentity) {
+        await expect.poll(() => page.evaluate(async () => {
+          const databases = await indexedDB.databases()
+          if (!databases.some(db => db.name === 'opensquilla-attachment-drafts')) return false
+          return new Promise<boolean>((resolve, reject) => {
+            const opening = indexedDB.open('opensquilla-attachment-drafts', 1)
+            opening.onerror = () => reject(opening.error)
+            opening.onsuccess = () => {
+              const db = opening.result
+              const request = db.transaction('drafts').objectStore('drafts').getAll()
+              request.onsuccess = () => {
+                resolve(request.result.some(record => record.attachments.some((item: { name: string }) => item.name === 'draft.txt')))
+                db.close()
+              }
+              request.onerror = () => reject(request.error)
+            }
+          })
+        })).toBe(true)
+      }
+      await page.reload()
+      await expect(page.locator('.chat-textarea')).toBeVisible()
+      await expect(page.locator('.conn-pill.connected')).toBeVisible()
+      if (!durableDraftIdentity) {
+        await expect(page.locator('.attachment-chip')).toHaveCount(0)
+        return
+      }
+      await expect(page.locator('.attachment-chip')).toContainText('draft.txt')
+      await expect(page.locator('.attachment-chip--busy')).toHaveCount(0)
+      await page.locator('.chat-send-btn[aria-label="Send"]').click()
+      await expect.poll(() => capturedSends.length).toBe(1)
+      expect(Buffer.from(String(capturedSends[0]?.attachments?.[0]?.data), 'base64').toString())
+        .toBe('recover these attachment bytes')
+    })
   }
 
   test('keeps non-image history replay attachments as file chips', async ({ page }) => {

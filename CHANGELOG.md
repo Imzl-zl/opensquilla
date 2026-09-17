@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- The WebUI and Desktop composer can recover unsent attachment drafts across
+  reloads, with conversation and account/profile scoping, local storage limits,
+  expiry, and explicit recovery errors for unavailable file bytes.
 - Desktop file selection can reference files in the active project without
   uploading a snapshot; queued use rechecks the current workspace and permissions.
 

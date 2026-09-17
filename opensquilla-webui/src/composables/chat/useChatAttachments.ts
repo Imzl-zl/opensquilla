@@ -1,4 +1,6 @@
 import { computed, ref } from 'vue'
+import { useAttachmentDraftPersistence } from './useAttachmentDraftPersistence'
+import type { AttachmentDraftScope, AttachmentDraftStore } from '@/utils/chat/attachmentDrafts'
 import i18n from '@/i18n'
 import { useToasts } from '@/composables/useToasts'
 import type { Attachment } from '@/types/chat'
@@ -114,6 +116,9 @@ async function fileLooksLikeUtf8Text(file: File): Promise<boolean> {
 }
 
 interface ChatAttachmentOptions {
+  draftScope?: () => AttachmentDraftScope | null
+  draftScopePending?: () => boolean
+  draftStore?: AttachmentDraftStore | null
   native?: PlatformFilesApi
   nativeContext?: () => NativeAttachmentContext | null | Promise<NativeAttachmentContext | null>
   nativeIsCurrent?: (context: NativeAttachmentContext) => boolean
@@ -127,7 +132,9 @@ export function useChatAttachments(artifactContent?: ArtifactContentAccess, opti
   const refreshInFlightAttachmentCount = ref(0)
   let attachmentGeneration = 0
   const intakeInFlightCount = ref(0)
+  let draftPersistence: ReturnType<typeof useAttachmentDraftPersistence> | undefined
   const attachmentWorkBusy = computed(() =>
+    options.draftScopePending?.() || draftPersistence?.restoring.value ||
     intakeInFlightCount.value > 0 || refreshInFlightAttachmentCount.value > 0
     || pendingAttachments.value.some(
       attachment => attachment.kind === 'inline_pending' || attachment.kind === 'uploading',
@@ -197,6 +204,7 @@ export function useChatAttachments(artifactContent?: ArtifactContentAccess, opti
     if (!isAttachmentGenerationCurrent(batch.generation)) return
     if (reservedId !== undefined && !pendingAttachments.value.some(a => a.local_id === reservedId)) return
     if (reservedId === undefined && !canAcceptAttachment(selection.name, selection.size, batch)) return
+    draftPersistence?.resume()
     const localId = reservedId ?? nextAttachmentId.value++
     if (reservedId === undefined) pendingAttachments.value.push({ kind: 'uploading', local_id: localId,
       name: selection.name, mime: selection.mime, size: selection.size, file })
@@ -235,6 +243,7 @@ export function useChatAttachments(artifactContent?: ArtifactContentAccess, opti
     const native = options.native
     if (!native?.selectAttachmentFile || !native.importAttachmentSelection || !options.nativeContext) return false
     if (!canAcceptAttachment(file.name, file.size, batch)) return true
+    draftPersistence?.resume()
     const localId = nextAttachmentId.value++
     const mime = resolveAttachmentMime(file)
     // Pending native authority must not become a persisted Blob before the
@@ -300,6 +309,7 @@ export function useChatAttachments(artifactContent?: ArtifactContentAccess, opti
     }
     if (!canAcceptAttachment(fileName, file.size, batch)) return
 
+    draftPersistence?.resume()
     const localId = nextAttachmentId.value++
 
     if (file.size <= INLINE_THRESHOLD_BYTES) {
@@ -372,6 +382,7 @@ export function useChatAttachments(artifactContent?: ArtifactContentAccess, opti
   }
 
   function retireAttachments() {
+    draftPersistence?.retire()
     clearAttachmentState()
   }
 
@@ -516,6 +527,24 @@ export function useChatAttachments(artifactContent?: ArtifactContentAccess, opti
     return generation === attachmentGeneration
   }
 
+  if (options.draftScope) {
+    draftPersistence = useAttachmentDraftPersistence({
+      attachments: pendingAttachments,
+      scope: options.draftScope,
+      store: options.draftStore,
+      beforeScopeChange: clearAttachmentState,
+      onError: message => pushToast(message, { tone: 'danger' }),
+      restore: async restored => {
+        const generation = attachmentGeneration
+        const automatic = restored.filter(attachment => attachment.kind === 'failed'
+          && attachment.file && attachment.error === 'Draft restored; retry to prepare the file')
+        pendingAttachments.value = restored.filter(attachment => !automatic.includes(attachment))
+        nextAttachmentId.value = Math.max(nextAttachmentId.value, ...restored.map(a => a.local_id + 1))
+        if (isAttachmentGenerationCurrent(generation)) await addAttachments(automatic.map(a => a.file!))
+      },
+    })
+  }
+
   return {
     pendingAttachments,
     attachmentWorkBusy,
@@ -528,6 +557,7 @@ export function useChatAttachments(artifactContent?: ArtifactContentAccess, opti
     retryAttachment,
     hasPendingAttachmentWork,
     prepareAttachmentsForSend,
+    flushAttachmentDraft: () => draftPersistence?.flush() ?? Promise.resolve(),
   }
 }
 

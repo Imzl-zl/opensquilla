@@ -1820,7 +1820,29 @@ watch(
 )
 const nativeAttachmentSession = ref<{ key: string; epoch: number } | null>(null)
 watch(sessionKey, () => { nativeAttachmentSession.value = null }, { flush: 'sync' })
+const attachmentDraftIdentity = ref<string | null>(null)
+const attachmentDraftIdentityPending = ref(false)
+watch(() => gatewayAccess.deliveryIdentity, async (identity, _previous, onCleanup) => {
+  let current = true
+  onCleanup(() => { current = false })
+  attachmentDraftIdentity.value = null
+  attachmentDraftIdentityPending.value = false
+  if (!identity) return
+  if (platform.id !== 'desktop') { attachmentDraftIdentity.value = identity; return }
+  attachmentDraftIdentityPending.value = true
+  try {
+    const connection = await platform.gateway.getAttachmentBinding?.()
+    if (!current || !gatewayAccess.isLocalOwner || !connection?.profileFingerprint) return
+    // A verified owned profile remains the same draft owner across desktop
+    // restarts; the per-launch native selection secret never enters IndexedDB.
+    attachmentDraftIdentity.value = JSON.stringify(['desktop-profile-v1', connection.profileFingerprint, 'owner'])
+  } catch { /* Identity remains unproven until the next connection update. */ }
+  finally { if (current) attachmentDraftIdentityPending.value = false }
+}, { immediate: true })
 const chatAttachments = useChatAttachments(artifactWorkbench.content, {
+  draftScopePending: () => attachmentDraftIdentityPending.value,
+  draftScope: () => attachmentDraftIdentity.value && sessionKey.value
+    ? { identity: attachmentDraftIdentity.value, sessionKey: sessionKey.value } : null,
   native: platform.files,
   nativeIsCurrent: context => context.sessionKey === sessionKey.value
     && nativeAttachmentSession.value?.epoch === context.sessionEpoch,
