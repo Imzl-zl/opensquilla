@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from opensquilla.application.selected_skills import normalize_selected_skills
 from opensquilla.application.turn_admission import AdmitTurn, InitialRoutingMode, PendingInputGuard
 from opensquilla.application.turn_input import (
     IncomingTurnSource,
     MemoryCapturePolicy,
 )
+from opensquilla.contracts.selected_skills import normalize_selected_skills
 from opensquilla.gateway.turn_ingress import request_identity
 from opensquilla.session.keys import canonicalize_session_key
 

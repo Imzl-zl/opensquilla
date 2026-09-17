@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from opensquilla.application.selected_skills import normalize_selected_skills
+from opensquilla.contracts.selected_skills import normalize_selected_skills
 from opensquilla.gateway.adapters.pending_input_queue import GatewayPendingInputQueueAdapter
 from opensquilla.gateway.adapters.turn_admission import GatewayTurnAdmissionAdapter
 from opensquilla.gateway.admission_input import decode_admit_turn

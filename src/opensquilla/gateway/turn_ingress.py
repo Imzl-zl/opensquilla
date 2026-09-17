@@ -8,10 +8,10 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
-from opensquilla.application.selected_skills import normalize_selected_skills
 from opensquilla.application.turn_admission import AdmitTurnResult
 from opensquilla.application.turn_input import TurnRequestIdentity as TurnRequestIdentity
 from opensquilla.application.turn_input import complete_durable_ingress as complete_durable_ingress
+from opensquilla.contracts.selected_skills import normalize_selected_skills
 from opensquilla.session.keys import canonicalize_session_key
 from opensquilla.session.storage import TurnAcceptanceResult
 

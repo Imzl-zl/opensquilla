@@ -289,7 +289,7 @@ def transcript_entries_to_chat_messages(
                     display_text = parsed.get("display_text")
                     content = display_text if isinstance(display_text, str) else parsed["text"]
                     attachments = _public_attachment_projection(parsed.get("attachments"))
-                    from opensquilla.application.selected_skills import normalize_selected_skills
+                    from opensquilla.contracts.selected_skills import normalize_selected_skills
 
                     try:
                         selected_skills = normalize_selected_skills(parsed.get("selected_skills"))
