@@ -6599,7 +6599,6 @@ function beginDraftProjectChoice(): DraftProjectChoice | null {
   // Choosing a directory is an explicit draft edit, not a fresh task or an
   // invitation to recover another provisional Meta draft.
   markProvisionalDraftUsed()
-  draftProjectHydration.invalidate()
   cancelActiveProjectValidation()
   return choice
 }
@@ -6619,6 +6618,9 @@ async function commitDraftProjectChoice(
   const committed = await replaceDraftProject(workspace?.id || null)
   if (!draftProjectChoiceIsCurrent(choice)) return
   if (!committed) throw new Error('Project navigation did not complete.')
+  // Until navigation succeeds, the original route still owns its hydration.
+  // Cancelling the picker or a failed choice must let that draft finish loading.
+  draftProjectHydration.invalidate()
   applyDraftProjectChoice(choice)
   await nextTick()
 }

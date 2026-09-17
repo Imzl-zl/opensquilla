@@ -22,6 +22,7 @@ interface ProjectLifecycleState {
   sessionKey: string
   requestMethods: string[]
   subscriptions: RpcParams[]
+  pendingInitialSubscription: (() => void) | null
   pathListRequests: RpcParams[]
   workspaceListRequests: number
   sends: RpcParams[]
@@ -44,13 +45,14 @@ interface ProjectLifecycleState {
 
 async function installProjectLifecycleRpc(
   page: Page,
-  options: { connectDelayMs?: number; owner?: boolean } = {},
+  options: { connectDelayMs?: number; owner?: boolean; deferInitialSubscription?: boolean } = {},
 ): Promise<ProjectLifecycleState> {
   await page.addInitScript(() => localStorage.setItem('opensquilla-locale', 'en'))
   const state: ProjectLifecycleState = {
     sessionKey: 'agent:main:webchat:project-demo-task',
     requestMethods: [],
     subscriptions: [],
+    pendingInitialSubscription: null,
     pathListRequests: [],
     workspaceListRequests: 0,
     sends: [],
@@ -258,6 +260,12 @@ async function installProjectLifecycleRpc(
           return
         case 'sessions.messages.subscribe':
           state.subscriptions.push(params)
+          if (options.deferInitialSubscription && state.subscriptions.length === 1) {
+            state.pendingInitialSubscription = () => respond(
+              frame.id, sessionMessagesSubscribePayload(key, projectMetadata),
+            )
+            return
+          }
           respond(frame.id, sessionMessagesSubscribePayload(key, projectMetadata))
           return
         case 'sessions.messages.hydrate':
@@ -419,6 +427,45 @@ test.describe('Project workspaces', () => {
     expect(state.sends[0]).not.toHaveProperty('workspaceId')
     expect(state.sends[0]).toMatchObject({ sessionKey: key, attachments: expect.any(Array) })
   })
+
+  for (const outcome of ['picker cancel', 'trust cancel', 'open error'] as const) {
+    test(`restores the route project after ${outcome} during initial subscription`, async ({ page }) => {
+      const state = await installProjectLifecycleRpc(page, { deferInitialSubscription: true })
+      state.projectPresent = true
+      await page.goto('/control/chat/new?agent=main&project=project-demo')
+      await expect.poll(() => state.pendingInitialSubscription).not.toBeNull()
+      const message = page.getByRole('textbox', { name: 'Message to send' })
+      await message.fill('Keep the original project and draft')
+      const key = await draftKey(page)
+      expect(key).not.toBe('')
+
+      if (outcome === 'picker cancel') {
+        await page.getByRole('button', { name: 'Choose project', exact: true }).click()
+        await page.getByRole('dialog', { name: 'Choose project' })
+          .getByRole('button', { name: 'Cancel', exact: true }).click()
+      } else {
+        await chooseDraftDirectory(page, 'project-01')
+        if (outcome === 'trust cancel') {
+          await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
+        } else {
+          state.workspaceOpenError = 'synthetic open failure'
+          await page.getByRole('button', { name: 'Trust and open', exact: true }).click()
+          await expect(page.getByTestId('toast')).toContainText('synthetic open failure')
+        }
+      }
+
+      state.pendingInitialSubscription!()
+      await expect(page.locator('.chat-project-chip')).toHaveAttribute('data-status', 'ready')
+      await expect(page).toHaveURL(/\/chat\/new\?agent=main&project=project-demo$/)
+      await expect(message).toHaveValue('Keep the original project and draft')
+      expect(await draftKey(page)).toBe(key)
+      await page.getByRole('button', { name: 'Send', exact: true }).click()
+      await expect.poll(() => state.sends.length).toBe(1)
+      expect(state.sends[0]).toMatchObject({
+        message: 'Keep the original project and draft', sessionKey: key, workspaceId: 'project-demo',
+      })
+    })
+  }
 
   test('restores the same draft text and project after a page reload', async ({ page }) => {
     const state = await installProjectLifecycleRpc(page)
