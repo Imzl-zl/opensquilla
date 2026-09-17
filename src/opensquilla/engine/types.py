@@ -129,6 +129,14 @@ class RunHeartbeatEvent:
 
 
 @dataclass
+class SkillLoadEvent:
+    """Actual body loading outcome, separate from selection or tool calls."""
+
+    kind: Literal["skill_load"] = field(default="skill_load", init=False)
+    content: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class ProviderActivityEvent:
     """Public, provider-neutral progress for long model operations.
 
@@ -628,6 +636,7 @@ AgentEvent = (
     | TextDeltaEvent
     | RunHeartbeatEvent
     | ProviderActivityEvent
+    | SkillLoadEvent
     | ToolUseStartEvent
     | ToolUseDeltaEvent
     | ToolUseEndEvent

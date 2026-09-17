@@ -299,6 +299,12 @@ class ToolContext:
     # Trusted install receipts are shared with built-in tools only for this turn.
     # Appended to preserve positional compatibility; never serialize this state.
     skill_install_turn: Any | None = field(default=None, repr=False)
+    # Authenticated per-turn selection; never inferred from model tool arguments.
+    selected_skills: tuple[dict[str, str], ...] = field(default=(), repr=False)
+    verified_skill_ids: set[str] = field(default_factory=set, repr=False)
+    skill_load_emitter: Callable[[dict[str, Any]], Awaitable[None]] | None = field(
+        default=None, repr=False,
+    )
 
 
 def is_goal_owned_main_default_turn(ctx: ToolContext | None) -> bool:

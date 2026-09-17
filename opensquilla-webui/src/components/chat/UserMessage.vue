@@ -27,6 +27,10 @@
          above the text bubble, never packed inside it — text gets a filled
          bubble, images render as bordered bare media, files as icon chips. -->
     <div class="msg-user-stack">
+      <div v-if="message.selectedSkills?.length" class="chat-selected-skills" data-testid="sent-selected-skills">
+        <span class="chat-selected-skills__label">{{ t('chat.skillPalette.selected') }}</span>
+        <span v-for="skill in message.selectedSkills" :key="skill.instanceId" class="attachment-chip">{{ skill.name }}</span>
+      </div>
       <span
         v-if="message.provenanceKind === 'cron'"
         class="msg-user-cron-source"

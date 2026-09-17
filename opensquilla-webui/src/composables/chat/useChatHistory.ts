@@ -1,3 +1,4 @@
+import { copySelectedSkills } from '@/types/selectedSkills'
 import { pageAnnotationSnapshots } from '@/types/pageContext'
 import { nextTick, ref, type Ref } from 'vue'
 import type {
@@ -826,6 +827,7 @@ export function useChatHistory(options: UseChatHistoryOptions) {
       planRevisions: planRevisionsFromToolSegments(msg.toolCalls),
       timeline: recordArray<ChatTimelineSegment>(msg.timeline),
       attachments: normalizeDisplayAttachments([...msg.attachments], { messageId }),
+      ...(msg.selectedSkills?.length ? { selectedSkills: copySelectedSkills(msg.selectedSkills) } : {}),
       promptAnnotations: msg.pageContext
         ? pageAnnotationSnapshots(msg.pageContext)
         : msg.promptAnnotations

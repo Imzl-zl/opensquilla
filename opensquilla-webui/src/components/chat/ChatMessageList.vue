@@ -124,6 +124,7 @@
           @resume="$emit('resumeSandbox')"
           @retry="forwardSystemRetry"
         />
+        <SkillLoadStatus :receipts="messages[entry.index]?.skillLoads || []" />
       </div>
     </template>
     <div
@@ -137,6 +138,7 @@
 </template>
 
 <script setup lang="ts">
+import SkillLoadStatus from './SkillLoadStatus.vue'
 import {
   computed,
   nextTick,

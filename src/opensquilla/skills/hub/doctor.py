@@ -816,9 +816,15 @@ class SkillDoctor:
             )
 
         if winner_is_record:
+            from opensquilla.skills.catalog_policy import is_user_invocable_ordinary
+
             selection = (
                 SkillSelectionState.HIDDEN
                 if bool(getattr(spec, "disable_model_invocation", False))
+                and spec is not None
+                and not is_user_invocable_ordinary(
+                    spec, coding_mode="code-task" not in self._eligibility_context.disabled_set,
+                )
                 else SkillSelectionState.ACTIVE
             )
         elif candidate is not None or winner is not None:

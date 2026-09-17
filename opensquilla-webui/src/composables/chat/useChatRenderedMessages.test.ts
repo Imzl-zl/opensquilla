@@ -72,6 +72,21 @@ describe('useChatRenderedMessages scheduled provenance', () => {
   })
 })
 
+describe('historical Skill load receipts', () => {
+  it.each(['assistant', 'system'] as const)('renders %s outcomes without inventing tool calls', role => {
+    const receipt = { type: 'skill_load', name: 'report', instanceId: 'personal:report',
+      digest: 'synthetic-digest', source: 'user', status: 'loaded', turnId: 'turn-one' }
+    const api = renderedMessagesFor([{ role, text: 'Synthetic result', ts: 1,
+      tool_calls: [{ ...receipt, status: 'loading' }, receipt] }])
+    expect(api.renderedMessages.value).toHaveLength(1)
+    expect(api.renderedMessages.value[0]?.skillLoads).toEqual([{
+      name: 'report', instanceId: 'personal:report', digest: 'synthetic-digest',
+      source: 'user', status: 'loaded', turnId: 'turn-one',
+    }])
+    expect(api.renderedMessages.value[0]?.toolCalls).toEqual([])
+  })
+})
+
 describe('useChatRenderedMessages annotation-only user turns', () => {
   it('keeps the live optimistic row when prompt annotations are the only visible payload', () => {
     const api = renderedMessagesFor([{

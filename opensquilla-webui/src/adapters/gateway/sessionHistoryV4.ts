@@ -1,3 +1,4 @@
+import { copySelectedSkills, isSelectedSkills } from '@/types/selectedSkills'
 import { normalizePageContext } from '@/types/pageContext'
 import type { TransportCallOptions as RpcCallOptions } from './transportTypes'
 import {
@@ -134,6 +135,7 @@ const MESSAGE_FIELDS = new Set([
   'reasoning_content', 'reasoningContent', 'router_decision', 'routerDecision',
   'artifacts', 'tool_calls', 'toolCalls', 'timeline', 'attachments',
   'prompt_annotations', 'promptAnnotations', 'page_context', 'pageContext', 'provenance_kind',
+  'selectedSkills', 'selected_skills',
   'provenance_source_session_key', 'provenance_source_tool', 'turn_context',
   'turnContext', 'usage', 'turn_usage', 'turnUsage', 'model', 'model_id',
   'input', 'input_tokens', 'inputTokens', 'output', 'output_tokens', 'outputTokens',
@@ -167,6 +169,8 @@ function projectMessage(value: ChatHistoryMessage, index: number): SessionReadMe
     attachments: projectObjectArray(raw.attachments),
     promptAnnotations: projectUnknownArray(raw.prompt_annotations ?? raw.promptAnnotations),
     pageContext: normalizePageContext(raw.page_context ?? raw.pageContext) ?? undefined,
+    selectedSkills: isSelectedSkills(raw.selectedSkills ?? raw.selected_skills)
+      ? copySelectedSkills((raw.selectedSkills ?? raw.selected_skills) as import('@/types/selectedSkills').SelectedSkillRef[]) : undefined,
     provenance: Object.freeze({
       kind: textValue(value.provenance_kind),
       sourceSessionKey: textValue(value.provenance_source_session_key),

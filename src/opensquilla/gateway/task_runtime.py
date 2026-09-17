@@ -529,6 +529,7 @@ def _reusable_route_envelope(envelope: RouteEnvelope) -> RouteEnvelope:
     """Detach one route for reuse without execution-scoped freshness."""
 
     metadata = dict(envelope.metadata)
+    metadata.pop("selected_skills", None)
     if metadata.get("guest_safe") is True:
         for key in (
             "guest_profile_root",

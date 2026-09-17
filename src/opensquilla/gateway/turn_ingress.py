@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Mapping
 from typing import Any
 
+from opensquilla.application.selected_skills import normalize_selected_skills
 from opensquilla.application.turn_admission import AdmitTurnResult
 from opensquilla.application.turn_input import TurnRequestIdentity as TurnRequestIdentity
 from opensquilla.application.turn_input import complete_durable_ingress as complete_durable_ingress
@@ -18,6 +19,7 @@ _FINGERPRINT_FIELDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("message", ("message",)),
     ("display_text", ("displayText", "display_text")),
     ("attachments", ("attachments",)),
+    ("selected_skills", ("selectedSkills",)),
     ("intent", ("intent",)),
     (
         "initial_collaboration_mode",
@@ -58,6 +60,10 @@ def _canonical_fingerprint_payload(params: Mapping[str, Any]) -> dict[str, Any]:
         for alias in aliases:
             if alias in params:
                 value = params[alias]
+                if canonical_name == "selected_skills":
+                    value = list(normalize_selected_skills(value))
+                    if not value:
+                        break
                 if canonical_name == "document_context" and isinstance(value, dict):
                     value = {
                         "document_id": value.get("documentId", value.get("document_id")),

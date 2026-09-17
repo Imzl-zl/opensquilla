@@ -308,6 +308,8 @@
           />
         </template>
 
+        <SkillLoadStatus v-if="isStreaming" :receipts="liveSkillLoads[activeStreamTaskId] || []" />
+
         <!-- Streaming AI message: activity stays open while the turn is live.
              Gateway-marked intermediate text remains in the transcript, while
              gateway-marked answer text streams below the activity boundary. -->
@@ -556,23 +558,12 @@
         <span>{{ t('chat.latest') }}</span>
       </button>
     </Transition>
-    <!-- Slash command menu -->
-    <div v-if="slashOpen" ref="slashMenuRef" class="chat-slash">
-      <div
-        v-for="(cmd, i) in filteredSlashCmds"
-        :key="cmd.cmd"
-        class="chat-slash-item"
-        :class="{ 'chat-slash-item--active': i === slashIdx }"
-        @click="completeSlashCmd(cmd)"
-      >
-        <span class="chat-slash-cmd">{{ cmd.cmd }}</span>
-        <span
-          v-if="cmd.metaStatus === 'needs_setup'"
-          class="chat-slash-status"
-        >{{ t('chat.metaRuns.needsSetup') }}</span>
-        <span class="chat-slash-desc" :title="cmd.desc">{{ cmd.desc }}</span>
-      </div>
+    <div v-if="slashOpen" ref="slashMenuRef">
+      <ChatSlashPalette :items="filteredSlashCmds" :active-index="slashIdx"
+        :loading="skillsLoading" :error="skillsError" @choose="completeSlashCmd" />
     </div>
+    <SkillWorkflowRequestDialog v-if="metaDraft" v-model="metaDraft.text" :name="metaDraft.name"
+      @cancel="metaDraft = null" @launch="void launchMetaDraft()" />
 
     <PendingQueue
       :items="pendingQueue"
@@ -653,6 +644,7 @@
       :project-workspace-status="activeWorkspaceStatus"
       :project-status-message="activeProjectStatusMessage"
       :prompt-annotations="activePromptAnnotations"
+      :selected-skills="selectedSkills"
       :can-close-project="isDraftRoute() && pendingWorkspaceId !== null"
       :can-choose-project="gatewayAccess.canChooseProject"
       :plan-mode-available="planUiAvailable"
@@ -667,12 +659,13 @@
       :collapsed="composerCollapsed && composerFxEnabled && !isNewChatLanding"
       :floating="composerFxEnabled && !isNewChatLanding"
       @expand="expandComposer"
-      @composition-change="composing = $event"
+      @composition-change="composing = $event; !$event && handleSlashInput()"
       @beforeinput="onTextareaBeforeInput"
       @file-change="onFileInputChange"
       @input="onTextareaInput"
       @keydown="onTextareaKeydown"
       @remove-attachment="removeAttachment"
+      @remove-skill="selectedSkills = selectedSkills.filter(skill => skill.instanceId !== $event)"
       @retry-attachment="retryAttachment"
       @preview-image="previewPendingImage"
       @set-busy-send-mode="busySendMode = $event"
@@ -846,6 +839,12 @@ import { useChatFeatureToggles } from '@/composables/chat/useChatFeatureToggles'
 import { useChatSessionRouting } from '@/composables/chat/useChatSessionRouting'
 import { SESSION_ROUTING_KEY, type SessionRouting } from '@/modules/sessionRouting'
 import { USAGE_REPORTING_KEY, type UsageReporting } from '@/modules/usageReporting'
+import SkillLoadStatus from '@/components/chat/SkillLoadStatus.vue'
+import { mergeSkillLoad, type SkillLoadReceipt } from '@/types/skillLoads'
+import ChatSlashPalette from '@/components/chat/ChatSlashPalette.vue'
+import SkillWorkflowRequestDialog from '@/components/chat/SkillWorkflowRequestDialog.vue'
+import { SKILL_CATALOG_KEY } from '@/modules/skillCatalog'
+import type { SelectedSkillRef } from '@/types/selectedSkills'
 import { COMMAND_CATALOG_KEY, type CommandCatalog } from '@/modules/commandCatalog'
 import { PROMPT_CACHE_LEASE_KEY, type PromptCacheLease } from '@/modules/promptCacheLease'
 import {
@@ -1195,6 +1194,7 @@ const usageReporting: UsageReporting = injectedUsageReporting
 const injectedCommandCatalog = inject(COMMAND_CATALOG_KEY)
 if (!injectedCommandCatalog) throw new Error('CommandCatalog was not provided')
 const commandCatalog: CommandCatalog = injectedCommandCatalog
+const skillCatalog = inject(SKILL_CATALOG_KEY, undefined)
 const injectedPromptCacheLease = inject(PROMPT_CACHE_LEASE_KEY)
 if (!injectedPromptCacheLease) throw new Error('PromptCacheLease was not provided')
 const promptCacheLease: PromptCacheLease = injectedPromptCacheLease
@@ -1452,6 +1452,7 @@ const promptAnnotationDesktopAvailable = computed(() => (
   && platform.capabilities.hasNativeWorkbenchSurfaces === true
 ))
 const inputText = ref('')
+const selectedSkills = ref<SelectedSkillRef[]>([])
 const composerRevision = ref(0)
 const aborted = ref(false)
 const autoScroll = ref(true)
@@ -1568,7 +1569,7 @@ const chatElevatedMode = useChatElevatedMode({
 })
 // Persist the composer draft per session so a refresh / session switch / crash
 // before the backend accepts a send cannot silently lose typed text (issue 248).
-const draftPersistence = useChatDraftPersistence({ sessionKey, inputText })
+const draftPersistence = useChatDraftPersistence({ sessionKey, inputText, selectedSkills })
 const {
   elevatedMode,
   loadElevatedMode,
@@ -1830,7 +1831,7 @@ const {
   prepareAttachmentsForSend,
 } = chatAttachments
 watch(
-  [inputText, pendingAttachments],
+  [inputText, pendingAttachments, selectedSkills],
   () => {
     composerRevision.value += 1
   },
@@ -1882,6 +1883,7 @@ let forgetHiddenControlOutbox: (sessionKey: string, clientRequestId: string) => 
 let disarmGoalDraftForMetaRestore: () => void = () => {}
 const pendingInputWal = createPendingInputWal()
 const chatPendingQueue = useChatPendingQueue({
+  selectedSkills,
   sessionKey,
   ownerContext: pendingQueueOwnerContext,
   inputText,
@@ -2526,6 +2528,7 @@ const voiceCapability = useSetupStatus<{ audioConfigured?: boolean }>(injectedSe
 const voiceReady = computed(() => voiceCapability.data.value?.audioConfigured === true)
 
 const chatMessageActions = useChatMessageActions({
+  selectedSkills,
   messages,
   inputText,
   isStreaming,
@@ -3289,6 +3292,15 @@ const goalOutcomeHasMessageAnchor = computed(() => (
 ))
 
 const chatSlashCommands = useChatSlashCommands({
+  skillCatalog,
+  selectedSkills,
+  getCaret: () => composerRef.value?.composerElement()?.querySelector('textarea')?.selectionStart ?? inputText.value.length,
+  setCaret: (position) => { void nextTick(() => {
+    composerRef.value?.focusTextarea()
+    composerRef.value?.composerElement()?.querySelector('textarea')?.setSelectionRange(position, position)
+  }) },
+  manageSkill: (name) => { void router.push({ path: '/skills', query: { skill: name } }) },
+  hasNonTextInput: () => pendingAttachments.value.length > 0 || activePromptAnnotations.value.length > 0,
   commandCatalog,
   usageReporting,
   sessionMaintenance,
@@ -3342,6 +3354,11 @@ const chatSlashCommands = useChatSlashCommands({
 const {
   slashOpen,
   slashIdx,
+  skillsLoading,
+  skillsError,
+  metaDraft,
+  launchMetaDraft,
+  invalidateSkillCandidates,
   filteredSlashCmds,
   loadSlashCommands,
   handleSlashInput,
@@ -3352,6 +3369,7 @@ const {
   executeSlashCommand,
   restoreDurableMetaDrafts: restoreServerMetaDrafts,
 } = chatSlashCommands
+watch([sessionKey, codingModeEnabled, gatewayConnectionState, () => activeWorkspace.value?.id], invalidateSkillCandidates)
 
 watch([slashIdx, filteredSlashCmds], () => {
   slashMenuRef.value
@@ -3397,6 +3415,8 @@ const {
 resetComposerInputHistory = chatComposerShortcuts.resetInputHistory
 
 const chatSend = useChatSend({
+  selectedSkills,
+  consumeAcceptedDraft: draftPersistence.consumeAcceptedDraft,
   metaRunCenter,
   turnCommands: {
     send(request, options) {
@@ -3933,7 +3953,13 @@ function onPlanQuestionnaireTouchEnd() {
   questionnaireTouch = null
 }
 
+const liveSkillLoads = ref<Record<string, SkillLoadReceipt[]>>({})
+watch(sessionKey, () => { liveSkillLoads.value = {} })
 const rpcEventHandlers = useChatRpcEventHandlers({
+  onSkillLoad: (receipt, turnId) => {
+    liveSkillLoads.value[turnId] = mergeSkillLoad(liveSkillLoads.value[turnId] || [], receipt)
+    if (receipt.status === 'failed') invalidateSkillCandidates()
+  },
   onRecoveryRequired: () => { void recoverCurrentSession() },
   onTaskSettled: (taskId, epoch) => chatPlans.noteTaskSettled(taskId, epoch),
   conversationRuntime,

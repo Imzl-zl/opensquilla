@@ -640,6 +640,7 @@ def tool_context_from_envelope(
     ):
         generated_artifact_adopter = None
     ctx = ToolContext(
+        selected_skills=tuple(envelope.metadata.get("selected_skills") or ()),
         is_owner=is_owner,
         channel_admin_verified=channel_admin_verified,
         caller_kind=caller_kind,

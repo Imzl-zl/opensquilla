@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+from opensquilla.application.selected_skills import normalize_selected_skills
 from opensquilla.application.turn_admission import AdmitTurn, InitialRoutingMode, PendingInputGuard
 from opensquilla.application.turn_input import (
     IncomingTurnSource,
@@ -209,6 +210,7 @@ def decode_admit_turn(
             details={"action": "update_client_and_reopen_page"},
         )
     page_context = normalize_page_context(params.get("pageContext"))
+    selected_skills = normalize_selected_skills(params.get("selectedSkills"))
     attachments = params.get("attachments", [])
     attachments = attachments if isinstance(attachments, list) else []
     # The durable receipt identifies original material, not the shared guarded
@@ -262,6 +264,7 @@ def decode_admit_turn(
             or _optional_string(source, "surface_id", "surfaceId")
         ),
         attachments=tuple(attachments),
+        selected_skills=selected_skills,
         intent=params.get("intent", "continue"),
         intent_was_provided=params.get("intent") is not None,
         fork_before_message_id=_optional_string(

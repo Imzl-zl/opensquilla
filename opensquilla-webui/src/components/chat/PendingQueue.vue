@@ -62,6 +62,9 @@
       >
         {{ t('chat.pending.reorderRecovering') }}
       </span>
+      <span v-if="item.selectedSkills?.length" class="chat-pending-attachments">
+        {{ item.selectedSkills.map(skill => skill.name).join(', ') }}
+      </span>
       <span v-if="item.attachments?.length" class="chat-pending-attachments">
         {{ item.attachments.length }} · 📎
         <span
@@ -173,6 +176,7 @@ interface PendingQueueItem {
   hiddenControl?: boolean
   retiredAnnotationInput?: boolean
   pageContext?: import('@/types/pageContext').ChatPageContext
+  selectedSkills?: import('@/types/selectedSkills').SelectedSkillRef[]
   attachments?: Attachment[]
   deliveryState?: 'steering' | 'retryable'
   steerAttempt?: PendingSteerAttempt
@@ -181,6 +185,7 @@ interface PendingQueueItem {
 }
 
 type PendingSteerBlocker =
+  | 'skills'
   | 'controlInput'
   | 'attachment'
   | 'capability'
@@ -341,6 +346,7 @@ function attachmentBlockMessage(item: PendingQueueItem): string {
 }
 
 function pendingSteerBlocker(item: PendingQueueItem): PendingSteerBlocker | null {
+  if (item.selectedSkills?.length) return 'skills'
   if (isControlInput(item.text)) return 'controlInput'
   if (item.attachments?.length) return 'attachment'
   if (
@@ -364,6 +370,7 @@ function isSteerDisabled(item: PendingQueueItem): boolean {
 
 function steerTitle(item: PendingQueueItem): string {
   switch (pendingSteerBlocker(item)) {
+    case 'skills': return t('chat.skillPalette.queuedHint')
     case 'controlInput':
       return t('chat.sendQueues')
     case 'attachment':

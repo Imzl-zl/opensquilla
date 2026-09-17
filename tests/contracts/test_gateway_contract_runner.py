@@ -493,15 +493,18 @@ def test_compatibility_manifest_is_schema_derived_and_deterministic() -> None:
     assert manifest["protocol"] == runner.GATEWAY_PROTOCOL
     assert manifest["wireVersion"] == 4
     assert manifest["source"] == {
-        "schemaCount": 226,
-        "methodCount": 216,
+        "schemaCount": 228,
+        "methodCount": 218,
         "eventFamilyCount": 10,
         "schemaTreeSha256": runner._schema_tree_digest(specs),
         "generatorSha256": runner._generator_digest(),
     }
     assert any(entry["name"] == "skills.install.status" for entry in manifest["methods"])
+    assert {"skills.candidates", "skills.setEnabled"}.issubset(
+        {entry["name"] for entry in manifest["methods"]}
+    )
     assert Counter(entry["lifecycle"] for entry in manifest["methods"]) == {
-        "stable": 213,
+        "stable": 215,
         "legacy": 3,
     }
     assert [
@@ -749,6 +752,37 @@ def test_python_renderer_keeps_field_alias_metadata_when_tightening_nullability(
         "status: StrictStr = Field(None, alias='wireStatus')  # type: ignore[assignment]"
         in rendered
     )
+
+
+def test_python_renderer_keeps_omittable_non_nullable_collection_constraints(
+    tmp_path: Path,
+) -> None:
+    from pydantic import ValidationError
+
+    document = _method_schema("sessions.resolve")
+    document["$defs"]["SessionsResolveResult"] = {
+        "type": "object",
+        "properties": {"values": {"type": "array", "items": {"type": "string"}, "maxItems": 2}},
+    }
+    schema = _write_schema(tmp_path, "sessions/sessions-resolve.schema.json", document)
+    spec = runner.load_contract(schema, contract_root=tmp_path)
+    generated = (
+        "from pydantic import BaseModel, Field\n\n"
+        "class SessionsResolveResult(BaseModel):\n"
+        "    values: list[str] | None = Field(None, max_length=2)\n"
+    )
+    rendered = runner._normalise_optional_non_nullable_defaults(spec, generated)
+    assert "list[str] = Field(None, max_length=2)  # type: ignore[assignment, arg-type]" in rendered
+    namespace: dict[str, Any] = {}
+    exec(rendered, namespace)
+    model = namespace["SessionsResolveResult"]
+    model.model_rebuild(_types_namespace=namespace)
+    assert model().model_dump(exclude_unset=True) == {}
+    assert model(values=[]).model_dump() == {"values": []}
+    with pytest.raises(ValidationError):
+        model(values=None)
+    with pytest.raises(ValidationError):
+        model(values=["one", "two", "three"])
 
 
 def test_python_renderer_aligns_json_integer_acceptance_with_ajv(

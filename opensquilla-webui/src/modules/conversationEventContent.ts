@@ -29,6 +29,7 @@ export type ConversationEventIdentity = {
 }
 
 export type ConversationEventData = ConversationEventIdentity & {
+  skillLoad?: import('@/types/skillLoads').SkillLoadReceipt
   modelCapacity?: import('./providerConfiguration').ModelCapacityFailure
   execution_log_handle?: string
   reason?: string

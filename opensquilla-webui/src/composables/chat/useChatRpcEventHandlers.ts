@@ -1,3 +1,4 @@
+import { mergeSkillLoad, skillLoadsFromSegments, type SkillLoadReceipt } from '@/types/skillLoads'
 import type {
   ConversationAnswerReset,
   ConversationCompactionContent,
@@ -132,6 +133,7 @@ type ChatCompactionPlacement = 'activity' | 'standalone'
 type ChatCompactionPresentationResult = boolean | ChatCompactionPlacement | void
 
 export interface UseChatRpcEventHandlersOptions {
+  onSkillLoad?: (receipt: SkillLoadReceipt, turnId: string) => void
   /** Shared transport-independent conversation cursor policy. */
   conversationRuntime?: ConversationRuntime
   sessionKey: Ref<string>
@@ -343,6 +345,18 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
   } = options
   const conversationRuntime = options.conversationRuntime ?? createConversationRuntime()
   const streamGeneration = options.streamGeneration ?? ref<string | null>(null)
+  const skillLoadsByTurn = new Map<string, SkillLoadReceipt[]>()
+  watch([sessionKey, currentEpoch], () => skillLoadsByTurn.clear())
+
+  function attachSkillLoads(message: ChatMessage, payload: ConversationEventIdentity) {
+    const receipts = skillLoadsByTurn.get(payloadTurnId(payload)) || []
+    if (!receipts.length) return
+    const merged = receipts.reduce(mergeSkillLoad, skillLoadsFromSegments(message.tool_calls))
+    message.tool_calls = [
+      ...(message.tool_calls || []).filter(segment => segment.type !== 'skill_load'),
+      ...merged.map(receipt => ({ type: 'skill_load', ...receipt })),
+    ]
+  }
 
   function cursor() {
     return conversationRuntime.createCursor(sessionKey.value, {
@@ -837,6 +851,8 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
         handleRpcAnswerGenerationReset(payload)
       } else if (event === 'text-delta') {
         handleRpcTextDelta(payload)
+      } else if (event === 'skill-load') {
+        handleSkillLoad(payload)
       } else if (event === 'tool-use-started') {
         handleRpcToolUseStart(payload)
       } else if (event === 'tool-use-delta') {
@@ -1554,6 +1570,20 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
       // Compatibility with older gateways that predate semantic text roles.
       stream.appendDelta(payload.text || '')
     }
+  }
+
+  function handleSkillLoad(payload: ConversationEventData) {
+    if (isStaleEpoch(payload) || aborted.value) return
+    if (bufferPendingStreamEvent('skill-load', payload)) return
+    if (!isCurrentTaskPayload(payload) || !isCurrentGenerationPayload(payload)) return
+    if (!acceptStreamSeq(payload) || !payload.skillLoad) return
+    const turnId = payloadTurnId(payload)
+    skillLoadsByTurn.set(turnId, mergeSkillLoad(skillLoadsByTurn.get(turnId) || [], payload.skillLoad))
+    if (skillLoadsByTurn.size > REASONING_LOG_LIMIT) {
+      skillLoadsByTurn.delete(skillLoadsByTurn.keys().next().value!)
+    }
+    stream.resetStreamIdleTimer()
+    options.onSkillLoad?.(payload.skillLoad, turnId)
   }
 
   function handleRpcToolUseStart(payload: ConversationToolContent) {
@@ -2373,6 +2403,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
         : null
       if (completedAssistant) {
         completedAssistant.turnId = donePayload.completedTurnId ?? completedAssistant.turnId
+        attachSkillLoads(completedAssistant, payload)
         recordTurnActivity(completedAssistant)
       }
       if (completedAssistant && payload?.reason !== 'aborted') {
@@ -2452,6 +2483,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
         terminalNotice: true,
         ts: new Date().toISOString(),
       })
+      attachSkillLoads(messages.value[messages.value.length - 1]!, payload)
       messages.value = dedupeTerminalErrorNotices(messages.value)
       const mergedOutcome = terminalTurnId
         ? messages.value.find(message => message.role === 'error'
@@ -2510,6 +2542,9 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
           break
         case 'text-delta':
           handleRpcTextDelta(event.payload)
+          break
+        case 'skill-load':
+          handleSkillLoad(event.payload)
           break
         case 'tool-use-started':
           handleRpcToolUseStart(event.payload)

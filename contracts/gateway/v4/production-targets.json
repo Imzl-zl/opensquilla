@@ -1407,6 +1407,20 @@
       "roles": [
         "result"
       ]
+    },
+    {
+      "kind": "method",
+      "wireName": "skills.candidates",
+      "roles": [
+        "result"
+      ]
+    },
+    {
+      "kind": "method",
+      "wireName": "skills.setEnabled",
+      "roles": [
+        "result"
+      ]
     }
   ]
 }

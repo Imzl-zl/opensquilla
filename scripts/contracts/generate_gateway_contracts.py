@@ -923,8 +923,18 @@ def _normalise_optional_non_nullable_defaults(spec: ContractSpec, text: str) -> 
             if line_end < 0:
                 line_end = len(text)
             line = text[_source_offset(lines, value_lineno, 0) : line_end]
-            if "# type: ignore[assignment]" not in line:
-                replacements.append((line_end, line_end, "  # type: ignore[assignment]"))
+            # Pydantic's generic Field overload infers collection defaults
+            # from the assignment target. Its intentional omission sentinel
+            # is therefore diagnosed as arg-type instead of assignment.
+            generic_field_default = (
+                isinstance(field.value, ast.Call)
+                and isinstance(field.value.func, ast.Name)
+                and field.value.func.id == "Field"
+                and isinstance(ast.parse(annotation, mode="eval").body, ast.Subscript)
+            )
+            ignore_codes = "assignment, arg-type" if generic_field_default else "assignment"
+            if "# type: ignore[" not in line:
+                replacements.append((line_end, line_end, f"  # type: ignore[{ignore_codes}]"))
 
     for start, end, replacement in reversed(replacements):
         text = text[:start] + replacement + text[end:]
