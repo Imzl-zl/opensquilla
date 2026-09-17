@@ -333,6 +333,16 @@ class SessionUsageEventSink:
             record = await self._storage.finalize_usage_event(call.event_id, completion, **kwargs)
             await self._notify_goal_usage(record)
         except Exception:
+            # A finished provider call with an unwritten receipt must not look
+            # like a live, fully accounted request to Goal budget admission.
+            # Reuse the existing ledger state; the bounded finalize retry can
+            # still replace unknown with its exact receipt later.
+            with contextlib.suppress(Exception):
+                record = await self._storage.mark_usage_event_unknown(
+                    call.event_id, completed_at_ms=completion.completed_at_ms,
+                    reason="usage_unknown",
+                )
+                await self._notify_goal_usage(record)
             self._schedule_retry(
                 self._retry_finalize(call.event_id, completion, items, receipts),
                 event_id=call.event_id,

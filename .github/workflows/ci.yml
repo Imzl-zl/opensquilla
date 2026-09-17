@@ -9,6 +9,12 @@ name: CI
   schedule:
     - cron: "23 18 * * *"
   workflow_dispatch:
+    inputs:
+      gateway_timing_base:
+        description: "Optional full baseline SHA for same-runner offline Gateway timing"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   actions: read
@@ -1001,6 +1007,33 @@ jobs:
       - name: Type check
         shell: bash
         run: uv run mypy src/opensquilla --show-error-codes
+
+      - name: Compare offline Gateway startup and Default first turn
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.gateway_timing_base != '' }}
+        shell: bash
+        env:
+          TIMING_BASE: ${{ inputs.gateway_timing_base }}
+        run: |
+          set -euo pipefail
+          [[ "$TIMING_BASE" =~ ^[0-9a-f]{40}$ ]] || { echo "Expected a full baseline commit SHA" >&2; exit 2; }
+          git fetch --no-tags --depth=1 origin "$TIMING_BASE"
+          baseline_dir="$(mktemp -d "$(dirname "$GITHUB_WORKSPACE")/gateway-timing-baseline.XXXXXX")"
+          trap 'rm -rf "$baseline_dir"' EXIT
+          git archive "$TIMING_BASE" > "$RUNNER_TEMP/gateway-timing-baseline.tar"
+          git get-tar-commit-id < "$RUNNER_TEMP/gateway-timing-baseline.tar" > "$baseline_dir/.gateway-timing-source-sha"
+          tar -xf "$RUNNER_TEMP/gateway-timing-baseline.tar" -C "$baseline_dir"
+          uv run --no-sync python scripts/compare_gateway_timing.py \
+            --baseline-root "$baseline_dir" --candidate-root "$GITHUB_WORKSPACE" \
+            --baseline-sha "$TIMING_BASE" --candidate-sha "$(git rev-parse HEAD)" \
+            --samples 3 --output "$RUNNER_TEMP/gateway-timing.json"
+
+      - name: Preserve offline Gateway timing evidence
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.gateway_timing_base != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-timing-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gateway-timing.json
+          if-no-files-found: error
 
       - name: Test targeted PR suite
         if: ${{ contains(fromJSON(needs.plan-ci.outputs.required_suites), 'python-targeted') && !contains(fromJSON(needs.plan-ci.outputs.required_suites), 'python-full') }}

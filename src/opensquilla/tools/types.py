@@ -300,6 +300,8 @@ class ToolContext:
     # Appended to preserve positional compatibility; never serialize this state.
     skill_install_turn: Any | None = field(default=None, repr=False)
 
+    # The context yields a finish-without-compute callback for a decided terminal
+    # outcome. Calling it forbids subsequent model/tool execution in this turn.
     suspend_compute_slot: Callable[[], Any] | None = field(default=None, repr=False)
     update_progress: Callable[..., Awaitable[dict[str, Any]]] | None = field(
         default=None, repr=False

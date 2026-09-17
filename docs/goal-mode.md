@@ -68,6 +68,8 @@ AgentTask:
   the latest objective instead. Editing a completed Goal reactivates that same
   Goal: its identity, creation time, and lifetime usage remain, while its
   terminal result, progress view, and current guardrail window are reset.
+  If its token budget is exhausted or its usage receipts are incomplete, the
+  edit is saved and the Goal remains paused until the budget allows Resume.
 - `pause` disables future automatic continuation. It does not cancel an already
   accepted task; that task continues and may still submit an explicit complete
   or blocked decision. Use the normal task Stop control when the current task
@@ -159,11 +161,14 @@ following are still true:
 - the session generation, Goal identity, objective revision, and continuation
   sequence match;
 - the Goal is active and has no owning task;
-- the session is in Default mode and has no active manual Plan run;
+- the session is in Default mode;
 - the execution grant is still authorized; foreground Goals also require the
   owner connection's live subscription;
 - there is no explicit user ingress or other queued/running session work; and
 - the current guardrail window still permits another turn.
+
+Historical PlanRun records are associations and progress projections. They do
+not lock a session; only actual queued or running tasks participate in admission.
 
 Explicit user input wins every race with automatic work. A normal Default-mode
 follow-up can claim the active Goal; if it was queued, the claim is revalidated
@@ -319,7 +324,9 @@ receipt. Historical totals are preserved without inventing descendant usage;
 create a new Goal to enable its budget. Missing receipts pause a budgeted Goal
 with `usage_unknown`. Late receipts repair coverage when all unknown calls are
 resolved, but do not resume execution automatically. Setting a budget requires
-complete coverage. Provider account credit exhaustion remains the distinct
+complete coverage. A finished request whose receipt could not be saved also
+prevents budgeted continuation; an in-flight child request may finish normally.
+Provider account credit exhaustion remains the distinct
 `usage_limited` state.
 
 Three consecutive automatic turns with complete activity evidence but no body,
@@ -399,7 +406,6 @@ GOAL_BUSY
 STALE_GOAL
 SESSION_GENERATION_CHANGED
 PLAN_MODE_ACTIVE
-PLAN_RUN_ACTIVE
 EXECUTION_LEASE_REQUIRED
 GOAL_NOT_RESUMABLE
 GOAL_EXECUTION_DISABLED

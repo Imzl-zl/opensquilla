@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import platform
@@ -39,6 +40,7 @@ from opensquilla.provider.registry import get_provider_spec  # noqa: E402
 from scripts.live_harness_security import (  # noqa: E402
     child_environment,
     classify_failure,
+    minimal_child_environment,
     provider_response_model_matches,
     registry_endpoint,
     require_temporary_report_path,
@@ -79,6 +81,7 @@ SCENARIOS = {
     "goal-control": ("goal",),
     "budget": ("budget",),
     "restart": ("restart",),
+    "cli": ("cli",),
 }
 ALLOWED_TOOLS = [
     "read_file",
@@ -192,6 +195,14 @@ class DispatchGuard:
             raise DispatchLimitError("multiple_completions")
         return self.claim("physical_calls", LIMITS["physical_calls"])
 
+    def release_unstarted_turn(self, name: str, turn_id: str) -> None:
+        """Return only a newly reserved turn that explicitly never activated."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            deleted = db.execute("DELETE FROM turns WHERE id=? AND kind=?", (turn_id, name))
+            if deleted.rowcount:
+                db.execute("UPDATE counters SET value=value-1 WHERE name=? AND value>0", (name,))
+
     def finish(self, index: int, status: int | None, failure: str = "") -> None:
         if index:
             with self.connect() as db:
@@ -297,8 +308,11 @@ def install_dispatch_guard(guard: DispatchGuard) -> None:
 
     async def bounded_running(runtime: Any, task: Any) -> bool:
         kind = "children" if task.run_kind == "subagent" else "root_turns"
-        guard.claim(kind, LIMITS[kind], turn_id=task.task_id)
-        return await original_running(runtime, task)
+        reserved = guard.claim(kind, LIMITS[kind], turn_id=task.task_id)
+        running = await original_running(runtime, task)
+        if running is False and reserved:
+            guard.release_unstarted_turn(kind, task.task_id)
+        return running
 
     def bounded_log(logger: Any, kind: str, payload: dict[str, Any]) -> Any:
         if kind == "llm_error":
@@ -318,7 +332,31 @@ def selected_model(provider: str, env: Mapping[str, str]) -> str:
     return model
 
 
-def render_config(provider: str, model: str, workspace: Path) -> str:
+def execution_source_fingerprint() -> dict[str, Any]:
+    """Identify the actual checkout content without publishing local paths."""
+    def git(*args: str) -> bytes:
+        return subprocess.check_output(
+            ["git", *args], cwd=ROOT, timeout=10, env=minimal_child_environment(),
+        )
+
+    paths = sorted(set(git(
+        "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--",
+        "src", "migrations", "contracts", "scripts/live_plan_goal_runtime.py",
+        "scripts/live_harness_security.py", "tests/integration/cli/tui_real_terminal",
+        "scripts/smoke_v4_phase3_router.py",
+    ).split(b"\0")) - {b""})
+    digest = hashlib.sha256()
+    for name in paths:
+        path = ROOT / os.fsdecode(name)
+        digest.update(name + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest() if path.is_file() else b"deleted")
+    return {"head": git("rev-parse", "HEAD").decode().strip(),
+            "execution_source_sha256": digest.hexdigest(), "files": len(paths)}
+
+
+def render_config(provider: str, model: str, workspace: Path, *, thinking: str = "off") -> str:
+    if thinking not in {"off", "low", "medium", "high"}:
+        raise ValueError("unsupported live thinking level")
     spec = get_provider_spec(provider)
     return "\n".join(
         [
@@ -361,7 +399,7 @@ def render_config(provider: str, model: str, workspace: Path) -> str:
             f"api_key_env = {json.dumps(spec.env_key)}",
             f"base_url = {json.dumps(registry_endpoint(provider))}",
             "max_tokens = 4096",
-            'thinking = "off"',
+            f"thinking = {json.dumps(thinking)}",
             "[squilla_router]",
             "enabled = false",
             "[llm_ensemble]",
@@ -643,22 +681,36 @@ def child_usage_evidence(state: Path, goal_id: str) -> dict[str, Any]:
 
 
 class LiveCase:
-    def __init__(self, root: Path, provider: str, model: str, secrets: Mapping[str, str]) -> None:
+    def __init__(
+        self, root: Path, provider: str, model: str, secrets: Mapping[str, str],
+        *, thinking: str = "off",
+    ) -> None:
         self.root, self.provider, self.model, self.secrets = root, provider, model, secrets
         self.deadline = time.monotonic() + LIMITS["case_seconds"]
         self.workspace = root / "workspace"
         self.workspace.mkdir()
+        (self.workspace / "AGENTS.md").write_text(
+            "# Repository\n\n"
+            "This is a configured, isolated Python test repository.\n"
+            "Work on the files relevant to the user's requested change. "
+            "Identity, user profiles, and long-term memory are outside this task's scope.\n"
+            "Run Python checks with python3.\n",
+            encoding="utf-8",
+        )
         for name in ("state", "turn-calls", "user-state"):
             (root / name).mkdir()
         self.port = _free_port()
         self.process: subprocess.Popen[Any] | None = None
         self.client: GatewayRPCClient | None = None
+        self.terminal: Any | None = None
         self.subscriptions: set[str] = set()
         self.logs: list[Any] = []
         self.assertions: dict[str, bool] = {}
         self.evidence: dict[str, Any] = {}
         self.guard = DispatchGuard(root / "dispatch.sqlite", provider=provider, model=model)
-        (root / "config.toml").write_text(render_config(provider, model, self.workspace))
+        (root / "config.toml").write_text(
+            render_config(provider, model, self.workspace, thinking=thinking)
+        )
 
     def check(self, name: str, condition: Any) -> None:
         self.assertions[name] = bool(condition)
@@ -793,6 +845,10 @@ class LiveCase:
         return _read_turn_call_records(self.root / "turn-calls")
 
     async def stop(self, *, crash: bool = False) -> dict[str, Any]:
+        import httpx
+
+        from opensquilla.gateway.boot import gateway_shutdown_deadline
+
         shutdown: dict[str, Any] = {"forced": False, "process_exited": True}
         try:
             remaining = max(0.0, self.deadline - time.monotonic())
@@ -803,6 +859,24 @@ class LiveCase:
         try:
             process = self.process
             if process is not None:
+                remaining = max(0.0, self.deadline - time.monotonic())
+                graceful_requested = False
+                if not crash and remaining and process.poll() is None:
+                    # The owner-only endpoint shares the CLI's drain path and
+                    # works on Windows, where terminate() skips finalization.
+                    try:
+                        async with asyncio.timeout_at(self.deadline):
+                            async with httpx.AsyncClient(trust_env=False) as client:
+                                response = await client.post(
+                                    f"http://127.0.0.1:{self.port}/api/system/shutdown",
+                                    timeout=min(5.0, remaining),
+                                )
+                        graceful_requested = response.status_code == 202
+                        if not graceful_requested:
+                            shutdown["graceful_request_error"] = "not_accepted"
+                    except Exception as exc:
+                        shutdown["graceful_request_error"] = type(exc).__name__
+
                 def stop_process() -> bool:
                     forced = False
                     if process.poll() is None:
@@ -811,9 +885,12 @@ class LiveCase:
                             process.kill()
                             forced = True
                         else:
-                            process.terminate()
+                            if not graceful_requested:
+                                process.terminate()
                             try:
-                                process.wait(timeout=min(10.0, remaining))
+                                # Use the production shutdown budget; the old
+                                # 10s kill raced its normal 30s task drain.
+                                process.wait(timeout=min(gateway_shutdown_deadline(), remaining))
                             except subprocess.TimeoutExpired:
                                 process.kill()
                                 forced = True
@@ -828,6 +905,24 @@ class LiveCase:
             shutdown["process_stop_error"] = type(exc).__name__
             shutdown["process_exited"] = self.process is None or self.process.poll() is not None
         finally:
+            if self.process is not None and self.process.poll() is None:
+                # An unexpected drain/reap error must not leave inference alive
+                # while we clean up the terminal or produce a failure report.
+                shutdown["forced"] = True
+                try:
+                    self.process.kill()
+                    await asyncio.to_thread(self.process.wait, timeout=5)
+                except Exception as exc:
+                    shutdown["process_kill_error"] = type(exc).__name__
+                shutdown["process_exited"] = self.process.poll() is not None
+            if self.terminal is not None:
+                # Gateway is stopped before terminal cleanup can outlive the
+                # inference deadline. The driver bounds every cleanup command.
+                try:
+                    await asyncio.to_thread(self.terminal.terminate)
+                except Exception as exc:
+                    shutdown["terminal_close_error"] = type(exc).__name__
+                self.terminal = None
             for stream in self.logs:
                 stream.close()
             self.logs = []
@@ -1588,6 +1683,7 @@ def file_write_in_turn(case: LiveCase, task_id: str, filename: str) -> bool:
 
 async def background_case(case: LiveCase) -> None:
     key = "agent:main:webchat:live-background"
+    await case.rpc("plans.setMode", sessionKey=key, mode="default", expectedRevision=0)
     await case.subscribe(key)
     accepted = await case.rpc(
         "goals.set", sessionKey=key, executionPolicy="background",
@@ -1855,7 +1951,18 @@ async def restart_case(case: LiveCase) -> None:
     accepted = await case.rpc("goals.resume", **params)
     replay = await case.rpc("goals.resume", **params)
     case.check("resume_idempotent", replay == accepted)
-    await case.pending(key, accepted["taskId"])
+    # Resume acknowledges a state transition before ordinary idle admission;
+    # its durable response can correctly have taskId=null. Wait for the actual
+    # continuation identity, never interpret the old abandoned task as its result.
+    resumed = await case.until(
+        key,
+        lambda s: any(
+            t.get("task_id") != created["taskId"] for t in s.get("tasks", [])
+        ),
+    )
+    next_tasks = [t for t in resumed["tasks"] if t.get("task_id") != created["taskId"]]
+    case.check("restart_exactly_one_resume_task", len(next_tasks) == 1)
+    await case.pending(key, next_tasks[0]["task_id"])
     goal = (await case.rpc("goals.status", sessionKey=key))["goal"]
     await case.rpc(
         "goals.pause",
@@ -1867,16 +1974,118 @@ async def restart_case(case: LiveCase) -> None:
     case.check("rpc_pause_persisted", (await case.snapshot(key))["goal"]["status"] == "paused")
 
 
+async def cli_case(case: LiveCase) -> None:
+    """Drive the public Gateway client through its real terminal renderer."""
+    import shutil
+
+    sys.path.insert(0, str(ROOT / "tests" / "integration" / "cli"))
+    from tui_real_terminal.assertions import (
+        assert_no_completion_menu_overlap,
+        assert_no_duplicate_fixed_chrome,
+        assert_no_stale_completion_menu,
+        assert_prompt_ready,
+    )
+    from tui_real_terminal.driver import TerminalSize, open_real_terminal_session
+    from tui_real_terminal.targets import opentui_host_skip_reason
+
+    case.check("cli_tmux_available", shutil.which("tmux") is not None)
+    key = "agent:main:webchat:live-cli"
+    await case.rpc("plans.setMode", sessionKey=key, mode="default", expectedRevision=0)
+    await case.subscribe(key)
+    # The client receives no provider credential. Inference stays in the
+    # already guarded Gateway; clear tmux's inherited environment as well.
+    env = child_environment(case.provider, {})
+    env.update({
+        "PYTHONPATH": str(ROOT / "src"),
+        "OPENSQUILLA_HOME": str(case.root / "cli-profile"),
+        "OPENSQUILLA_STATE_DIR": str(case.root / "cli-state"),
+        "OPENSQUILLA_USER_STATE_DIR": str(case.root / "cli-user-state"),
+        "OPENSQUILLA_GATEWAY_URL": f"ws://127.0.0.1:{case.port}/ws",
+        "OPENSQUILLA_GATEWAY_CONFIG_PATH": str(case.root / "config.toml"),
+        "OPENSQUILLA_LOG_DIR": str(case.root / "cli-logs"),
+        "OPENSQUILLA_TUI_DEV_SOURCE_HOST": "1",
+        "OPENSQUILLA_TUI_READY_MARKER": "OPEN_SQUILLA_TUI_READY",
+        "OPENSQUILLA_MEMORY_DREAM_DISABLED": "1",
+        "OPENSQUILLA_OPENROUTER_LIVE_PRICING": "0",
+        "TERM": "xterm-256color",
+    })
+    case.check("cli_source_host_available", opentui_host_skip_reason(env) is None)
+    command = ["env", "-i", *(f"{k}={v}" for k, v in sorted(env.items())),
+               sys.executable, "-u", "-m", "opensquilla.cli.main", "chat", "--session", key]
+    run_id = f"opensquilla-live-{uuid.uuid4().hex}"
+    terminal = open_real_terminal_session(
+        command=command, cwd=case.workspace, env={}, run_id=run_id,
+        size=TerminalSize(120, 36), artifact_dir=case.root / "terminal", driver="tmux",
+        driver_env=env, tmux_socket=run_id, deadline=case.deadline,
+    )
+    case.terminal = terminal
+    geometry = []
+    await asyncio.to_thread(terminal.start)
+    await asyncio.to_thread(
+        terminal.wait_for_text, "OPEN_SQUILLA_TUI_READY",
+        timeout_s=min(20, max(0, case.deadline - time.monotonic())), checkpoint="ready",
+    )
+    await asyncio.to_thread(
+        terminal.send_text,
+        "请直接用中文写三段简短的合成终端测试说明，包含 emoji 🦑 和 ✅。"
+        "不要调用工具，不要创建目标或方案。最后一行写：终端验证完成。",
+    )
+    accepted = await case.until(key, lambda s: bool(s.get("tasks")))
+    case.check("cli_single_task", len(accepted["tasks"]) == 1)
+    task = accepted["tasks"][0]["task_id"]
+    # Resize while the real provider request/stream is active, then prove
+    # the completed framebuffer at both narrow and wide geometries.
+    await asyncio.to_thread(terminal.resize, TerminalSize(80, 28))
+    await case.done(key, task)
+    for width in (80, 120):
+        await asyncio.to_thread(terminal.resize, TerminalSize(width, 36))
+        await asyncio.to_thread(
+            terminal.wait_for_text, "终端验证完成",
+            timeout_s=min(15, max(0, case.deadline - time.monotonic())),
+            checkpoint=f"settled-{width}",
+        )
+        frame = await asyncio.to_thread(terminal.capture_text, f"geometry-{width}")
+        assert_prompt_ready(frame)
+        assert_no_duplicate_fixed_chrome(frame)
+        cursor = await asyncio.to_thread(terminal.cursor_position)
+        case.check("cli_cursor_in_bounds", cursor is not None
+                   and 0 <= cursor[0] < width and 0 <= cursor[1] < 36)
+        geometry.append({"columns": width, "rows": 36, "cursor_in_bounds": True})
+    await asyncio.to_thread(terminal.paste, "/")
+    overlay = await asyncio.to_thread(
+        terminal.wait_for_text, "commands", timeout_s=5, checkpoint="commands",
+    )
+    assert_no_completion_menu_overlap(overlay)
+    await asyncio.to_thread(terminal.send_key, "Escape")
+    await asyncio.to_thread(terminal.send_key, "C-u")
+    # Waiting for the ordinary composer also gives the renderer a flush;
+    # no browser screenshot stands in for these terminal frames.
+    await asyncio.sleep(0.2)
+    frame = await asyncio.to_thread(terminal.capture_text, "overlay-closed")
+    assert_no_stale_completion_menu(frame)
+    assert_prompt_ready(frame)
+    replies = "\n".join(str(r["payload"].get("text", "")) for r in case.records()
+                        if r.get("kind") == "llm_response")
+    case.check("cli_unicode_response", "🦑" in replies and "✅" in replies
+               and "终端验证完成" in replies)
+    case.check("cli_rendering_verified", True)
+    case.evidence["terminal"] = {"driver": "tmux", "geometry": geometry,
+                                 "unicode": True, "overlay": True}
+    case.check(
+        "cli_one_provider_call", case.guard.snapshot()["counts"].get("physical_calls") == 1,
+    )
+
+
 async def run_case(
     name: str, provider: str, model: str, secrets: Mapping[str, str],
-    *, retain_failed_state: bool = False,
+    *, retain_failed_state: bool = False, thinking: str = "off",
 ) -> dict[str, Any]:
     root = Path(tempfile.mkdtemp(prefix="opensquilla-live-plan-goal-"))
     os.chmod(root, 0o700)
     case: LiveCase | None = None
     result: dict[str, Any] = {"case": name, "status": "failed"}
     try:
-        case = LiveCase(root, provider, model, secrets)
+        case = LiveCase(root, provider, model, secrets, thinking=thinking)
         async with asyncio.timeout_at(case.deadline):
             await case.start()
             if name in {"wait", "cancel"}:
@@ -1891,6 +2100,7 @@ async def run_case(
                     "childbudget": childbudget_case,
                     "restart": restart_case,
                     "background": background_case,
+                    "cli": cli_case,
                 }[name](case)
             case.check(
                 "real_provider_called", case.guard.snapshot()["counts"].get("physical_calls", 0) > 0
@@ -1976,6 +2186,7 @@ async def run(
     environment: Mapping[str, str],
     output: Path | None = None,
     retain_failed_state: bool = False,
+    thinking: str = "off",
 ) -> dict[str, Any]:
     spec = get_provider_spec(provider)
     secret = environment.get(spec.env_key, "")
@@ -1984,6 +2195,7 @@ async def run(
         "schema_version": 1,
         "provider": provider,
         "model": model,
+        "thinking": thinking,
         "platform": platform.system(),
         "limits": dict(LIMITS),
         "status": "not_run",
@@ -1992,6 +2204,7 @@ async def run(
     if not secret:
         result["failure_class"] = "missing-credential"
         return result
+    result["source_start"] = execution_source_fingerprint()
     secrets = {spec.env_key: secret}
     names = (
         tuple(dict.fromkeys(n for group in SCENARIOS.values() for n in group))
@@ -2000,6 +2213,8 @@ async def run(
     )
     for name in names:
         case_options = {"retain_failed_state": True} if retain_failed_state else {}
+        if thinking != "off":
+            case_options["thinking"] = thinking
         row = await run_case(name, provider, model, secrets, **case_options)
         result["cases"].append(row)
         result["status"] = "running"
@@ -2013,6 +2228,11 @@ async def run(
         and all(row["status"] == "passed" for row in result["cases"])
         else "failed"
     )
+    result["source_end"] = execution_source_fingerprint()
+    result["source_unchanged"] = result["source_start"] == result["source_end"]
+    if not result["source_unchanged"]:
+        result["status"] = "failed"
+        result["failure_class"] = "source-changed-during-validation"
     return sanitize_report(result, secrets)
 
 
@@ -2021,6 +2241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--provider", choices=tuple(MODELS), required=True)
     parser.add_argument("--scenario", choices=(*SCENARIOS, "all"), default="all")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--thinking", choices=("off", "low", "medium", "high"), default="off")
     parser.add_argument(
         "--retain-failed-state", action="store_true",
         help="Retain credential-scanned private state only for failed cases (default: delete)",
@@ -2052,7 +2273,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     require_temporary_report_path(args.output)
     report = asyncio.run(
         run(args.provider, args.scenario, environment=os.environ, output=args.output,
-            retain_failed_state=args.retain_failed_state)
+            retain_failed_state=args.retain_failed_state, thinking=args.thinking)
     )
     spec = get_provider_spec(args.provider)
     safe = write_safe_report(args.output, report, {spec.env_key: os.environ.get(spec.env_key, "")})

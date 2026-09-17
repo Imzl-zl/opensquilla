@@ -11978,27 +11978,51 @@ class Agent:
                                 )
                             approval_wait_started = _loop.time()
                             suspend = getattr(self._tool_context, "suspend_compute_slot", None)
+                            approval_entry = None
+                            explicit_human_denial = False
                             try:
                                 async with (
                                     suspend() if callable(suspend) else contextlib.nullcontext()
-                                ):
+                                ) as finish_without_compute:
                                     await _wait_for_pending_approval_resolution(pending_approval)
+                                    from opensquilla.gateway.approval_queue import (
+                                        get_approval_queue,
+                                    )
+
+                                    try:
+                                        approval_entry = get_approval_queue().get(
+                                            str(pending_approval["approval_id"])
+                                        )
+                                    except KeyError:
+                                        pass
+                                    if approval_entry is not None:
+                                        explicit_human_denial = (
+                                            approval_entry.resolved
+                                            and not approval_entry.approved
+                                            and approval_entry.resolution == "denied"
+                                            and str(approval_entry.params.get("reviewer") or "user")
+                                            == "user"
+                                            and str(
+                                                approval_entry.params.get("resolutionSource") or ""
+                                            ) in {"", "user", "user_web", "user_channel"}
+                                            and approval_entry.params.get("humanActionable")
+                                            is not False
+                                        )
+                                    if callable(finish_without_compute) and (
+                                        approval_entry is None
+                                        or not approval_entry.resolved
+                                        or explicit_human_denial
+                                    ):
+                                        # These branches end below without executing a tool
+                                        # or calling the provider. Do not queue terminal
+                                        # reporting behind unrelated computation. Expiry
+                                        # and automatic rule refusals still resume normally.
+                                        finish_without_compute()
                             finally:
                                 if _total_deadline is not None:
                                     _total_deadline += max(
                                         0.0, _loop.time() - approval_wait_started,
                                     )
-                            approval_entry = None
-                            from opensquilla.gateway.approval_queue import (
-                                get_approval_queue,
-                            )
-
-                            try:
-                                approval_entry = get_approval_queue().get(
-                                    str(pending_approval["approval_id"])
-                                )
-                            except KeyError:
-                                approval_entry = None
                             if approval_entry is None or not approval_entry.resolved:
                                 self._set_tool_reliability_terminal(
                                     tool_use_id=tc.tool_use_id,
@@ -12019,17 +12043,6 @@ class Agent:
                             if not approval_entry.approved:
                                 suspended.deny(str(pending_approval["approval_id"]))
                                 resolution = str(approval_entry.resolution or "")
-                                reviewer = str(approval_entry.params.get("reviewer") or "user")
-                                resolution_source = str(
-                                    approval_entry.params.get("resolutionSource") or ""
-                                )
-                                explicit_human_denial = (
-                                    resolution == "denied"
-                                    and reviewer == "user"
-                                    and resolution_source
-                                    in {"", "user", "user_web", "user_channel"}
-                                    and approval_entry.params.get("humanActionable") is not False
-                                )
                                 rationale = str(
                                     approval_entry.params.get("reviewRationale") or ""
                                 ).strip()

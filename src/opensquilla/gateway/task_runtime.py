@@ -6047,22 +6047,34 @@ class TaskRuntime:
         return self._fair_cond
 
     @contextlib.asynccontextmanager
-    async def _suspend_compute_slot(self, task: _RuntimeTask) -> AsyncIterator[None]:
+    async def _suspend_compute_slot(
+        self, task: _RuntimeTask,
+    ) -> AsyncIterator[Callable[[], None]]:
         """Lend capacity during an external wait while retaining the session lane.
 
         The task, frozen context and execution lock remain owned by the same
         turn. Only a successful wait rejoins the ordinary capacity queue; an
         error or cancellation goes directly to the existing terminal cleanup.
+        A wait that decides the turn must end can call the yielded function;
+        that path may only report the terminal outcome, never resume execution.
         """
 
         if task.cancel_requested or task.terminal_closing:
             raise asyncio.CancelledError
         if task.status is not AgentTaskStatus.RUNNING or not task.acquired_slot:
             raise RuntimeError("Only a running task holding capacity can suspend it")
+        resume_compute = True
+
+        def finish_without_compute() -> None:
+            nonlocal resume_compute
+            resume_compute = False
+
         await self._release_slot(task)
-        yield
+        yield finish_without_compute
         if task.cancel_requested or task.terminal_closing:
             raise asyncio.CancelledError
+        if not resume_compute:
+            return
         await self._wait_for_subagent_slot(task)
         await self._acquire_fair_slot(task, mark_running=False)
 

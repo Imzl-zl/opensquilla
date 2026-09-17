@@ -46,11 +46,19 @@ class CustomBuildHook(BuildHookInterface):
                 verify_sdist_source_inventory(root / "opensquilla-webui")
             registry = root / "build" / "migration-registry" / "registry.json"
             freeze_registry(root / "migrations", registry)
-            build_data.setdefault("force_include", {})[str(registry)] = (
-                "opensquilla/_migrations/registry.json"
-                if self.target_name == "wheel"
-                else "migrations/registry.json"
-            )
+            source_registry = root / "migrations" / "registry.json"
+            if source_registry.is_file():
+                # An sdist already carries the frozen inventory. Its migrations
+                # directory is included by both standard targets, so adding the
+                # generated copy would publish the same archive path twice.
+                if source_registry.read_bytes() != registry.read_bytes():
+                    raise RuntimeError("Frozen migration registry does not match migration sources")
+            else:
+                build_data.setdefault("force_include", {})[str(registry)] = (
+                    "opensquilla/_migrations/registry.json"
+                    if self.target_name == "wheel"
+                    else "migrations/registry.json"
+                )
         except (ImportError, OSError, RuntimeError) as exc:
             privacy_note = (
                 " Standard sdists intentionally reject personal BGM; build a "

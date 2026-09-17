@@ -4318,6 +4318,7 @@ async def start_gateway_server(
     if usage_event_sink is not None:
         usage_event_sink.on_goal_usage = goal_service.on_usage_changed
     background_completion_manager.set_idle_listener(goal_service.schedule_idle_evaluation)
+    background_completion_manager.set_cancel_listener(goal_service.on_completion_group_cancelled)
 
     async def _ordered_task_lifecycle(event: TaskLifecycleEvent) -> None:
         # Session projection remains first. Goal settlement is independently

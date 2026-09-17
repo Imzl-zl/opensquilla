@@ -534,6 +534,17 @@ def validate_goal_budget(value: object) -> int | None:
     return value
 
 
+def goal_budget_pause_reason(goal: GoalRecord) -> str | None:
+    """Use one budget decision for edits, resume, and ordinary turn admission."""
+    if goal.token_budget is None:
+        return None
+    if not goal.usage_accounting_version or goal.usage_coverage != "complete":
+        return "usage_unknown"
+    if goal.budget_tokens_used >= goal.token_budget:
+        return "token_budget"
+    return None
+
+
 def new_goal(
     *,
     goal_id: str,

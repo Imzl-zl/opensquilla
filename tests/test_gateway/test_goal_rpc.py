@@ -5741,8 +5741,21 @@ async def test_late_goal_usage_emits_once_after_commit_and_never_recreates_clear
 ) -> None:
     from opensquilla.engine.usage_accounting import UsageCallResult, UsageCallStart
     from opensquilla.gateway.usage_ledger_runtime import SessionUsageEventSink
+    from opensquilla.session.usage_ledger import UsageEventCompletion, UsageEventStart
 
-    async with _open_goal_rpc_stack(tmp_path / "goal-usage-events.sqlite") as stack:
+    async def handler(run):
+        await stack.storage.start_usage_event(UsageEventStart(
+            event_id="parent-proof", execution_id=run.task_id, turn_id=run.task_id,
+            root_turn_id=run.task_id, session_id=run.envelope.session_id,
+            session_epoch=run.envelope.session_epoch, call_index=1, started_at_ms=0,
+        ))
+        await stack.storage.finalize_usage_event(
+            "parent-proof", UsageEventCompletion(completed_at_ms=0),
+        )
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "goal-usage-events.sqlite", handler=handler,
+    ) as stack:
         created = await _handle_goals_set({**_set_params(), "tokenBudget": 5}, stack.context)
         await stack.runtime.wait(created["taskId"], timeout=2)
         session = await stack.storage.get_session(SOURCE_KEY)
@@ -5794,3 +5807,44 @@ async def test_late_goal_usage_emits_once_after_commit_and_never_recreates_clear
         assert stack.events == []
         assert await stack.storage.get_goal(SOURCE_KEY) is None
         await sink.close()
+
+
+async def test_completed_goal_edit_with_missing_usage_stays_paused_through_rpc(tmp_path):
+    from opensquilla.session.usage_ledger import UsageEventStart
+
+    runs = []
+
+    async def handler(run):
+        runs.append(run.task_id)
+        assert len(runs) == 1
+        await stack.storage.start_usage_event(UsageEventStart(
+            event_id="missing-completed-receipt", execution_id=run.task_id,
+            turn_id=run.task_id, root_turn_id=run.task_id, call_index=1,
+            session_id=run.envelope.session_id, session_epoch=run.envelope.session_epoch,
+            started_at_ms=1,
+        ))
+        await stack.storage.mark_usage_event_unknown(
+            "missing-completed-receipt", completed_at_ms=2,
+        )
+        await stack.service.commit_model_status(run.goal_context, status="complete", reason=None)
+
+    async with _open_goal_rpc_stack(
+        tmp_path / "reopen-unknown-budget.sqlite", handler=handler, wire_lifecycle=True,
+    ) as stack:
+        created = await _handle_goals_set({**_set_params(), "tokenBudget": 100}, stack.context)
+        await stack.runtime.wait(created["taskId"], timeout=2)
+        completed = await _wait_for_goal(
+            stack.storage,
+            lambda value: value.status == "complete" and value.active_task_id is None,
+        )
+        snapshot = await stack.service.snapshot(completed)
+        edited = await _handle_goals_edit(
+            {**_mutation_params(snapshot, request_index=2), "objective": "Next synthetic task."},
+            stack.context,
+        )
+        assert edited["goal"]["objective"] == "Next synthetic task."
+        assert edited["goal"]["status"] == "paused"
+        assert edited["goal"]["pauseReason"] == "usage_unknown"
+        await stack.service._kick_if_idle(SOURCE_KEY)
+        assert await _table_count(stack.storage, "agent_tasks") == 1
+        assert runs == [created["taskId"]]

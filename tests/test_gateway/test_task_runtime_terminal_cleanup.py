@@ -15,6 +15,7 @@ import gc
 import inspect
 import json
 import tracemalloc
+import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
@@ -643,7 +644,10 @@ async def test_resumed_plan_run_progress_is_injected_into_provider_prompt() -> N
     await runtime.wait(handle.task_id, timeout=2.0)
 
     progress = captured_context["Previous Plan Progress"]
-    payload = json.loads(progress[progress.index("{") :])
+    reference = ET.fromstring(progress)
+    assert reference.tag == "untrusted"
+    assert reference.attrib == {"source": "plan_progress"}
+    payload = json.loads(reference.text or "")
     assert payload["runId"] == run.run_id
     assert payload["currentStepId"] is None
     assert [step["status"] for step in payload["steps"]] == ["completed", "pending"]

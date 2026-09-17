@@ -46,6 +46,18 @@ def test_config_uses_selected_real_deployment_and_normal_runtime(
     assert "provider_response" not in rendered
 
 
+def test_thinking_setting_keeps_model_and_execution_bounds(tmp_path: Path) -> None:
+    cfg = GatewayConfig(**tomllib.loads(live.render_config(
+        "openrouter", live.MODELS["openrouter"], tmp_path, thinking="high",
+    )))
+    assert cfg.llm.thinking == "high"
+    assert cfg.llm.model == live.MODELS["openrouter"]
+    assert cfg.llm.max_tokens == live.LIMITS["output_tokens"]
+    assert cfg.agent_request_timeout_seconds == live.LIMITS["request_seconds"]
+    with pytest.raises(ValueError, match="thinking"):
+        live.render_config("openrouter", live.MODELS["openrouter"], tmp_path, thinking="unknown")
+
+
 def test_physical_limit_is_atomic_and_survives_restart(tmp_path: Path) -> None:
     guard = _guard(tmp_path)
     url = guard.endpoint + "/chat/completions"
@@ -325,8 +337,9 @@ async def test_real_gateway_boot_and_control_rpc_without_provider_credentials() 
             assert snapshot["pendingUserInputs"] == []
             assert case.guard.snapshot()["counts"].get("physical_calls", 0) == 0
     finally:
-        await case.stop()
+        shutdown = await case.stop()
         live.scan_and_remove_temporary_tree(root, {})
+        assert shutdown == {"forced": False, "process_exited": True}
 
 
 async def test_done_accepts_production_succeeded_task_status(tmp_path, monkeypatch):
@@ -733,6 +746,44 @@ async def test_stop_at_case_deadline_kills_without_extending_execution(tmp_path:
     assert result["forced"] and result["process_exited"]
 
 
+async def test_stop_requests_owner_drain_before_production_kill_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensquilla.gateway import boot
+
+    calls = []
+    case = live.LiveCase(tmp_path, "deepseek", "deepseek-chat", {})
+
+    class Process:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            raise AssertionError("graceful HTTP drain must work without POSIX signals")
+
+        def kill(self):
+            raise AssertionError("must allow the production drain deadline")
+
+        def wait(self, timeout):
+            calls.append(("wait", timeout))
+            self.returncode = 0
+            return 0
+
+    async def post(_client, url, **kwargs):
+        calls.append(("shutdown", url))
+        return httpx.Response(202)
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    monkeypatch.setattr(boot, "gateway_shutdown_deadline", lambda: 75)
+    case.process = Process()
+    result = await case.stop()
+    assert result == {"forced": False, "process_exited": True}
+    assert calls == [("shutdown", f"http://127.0.0.1:{case.port}/api/system/shutdown"),
+                     ("wait", 75), ("wait", 5)]
+
+
 def test_goal_control_diagnostics_keep_shape_not_user_arguments(tmp_path: Path) -> None:
     records = [{"kind": "tool_request", "turn_id": "private-id", "payload": {
         "name": "update_goal", "arguments": {
@@ -769,3 +820,234 @@ async def test_pending_waits_for_specific_new_task_after_resume(tmp_path, monkey
     monkeypatch.setattr(case, "snapshot", snapshot)
     result = await case.pending("synthetic", "new")
     assert result["request_id"] == "synthetic-request" and not snapshots
+
+
+async def test_background_case_creates_session_before_subscribing(tmp_path, monkeypatch):
+    case = live.LiveCase(tmp_path, "deepseek", "deepseek-chat", {})
+    calls = []
+
+    async def rpc(method, **params):
+        calls.append(method)
+        return {}
+
+    async def subscribe(key):
+        assert calls == ["plans.setMode"]
+        raise live.CaseFailureError("synthetic-stop-before-provider")
+
+    monkeypatch.setattr(case, "rpc", rpc)
+    monkeypatch.setattr(case, "subscribe", subscribe)
+    with pytest.raises(live.CaseFailureError, match="synthetic-stop-before-provider"):
+        await live.background_case(case)
+
+
+async def test_restart_accepts_null_resume_task_until_idle_admission(tmp_path, monkeypatch):
+    case = live.LiveCase(tmp_path, "deepseek", "deepseek-chat", {})
+    phase = "active"
+    goal = {"goalId": "synthetic-goal", "stateRevision": 1,
+            "status": phase, "executionPolicy": "background"}
+    requested = []
+
+    async def rpc(method, **params):
+        nonlocal phase
+        if method == "goals.set":
+            return {"taskId": "old"}
+        if method == "goals.resume":
+            phase = "active"
+            return {"accepted": True, "taskId": None}
+        if method == "goals.status":
+            return {"goal": dict(goal, status=phase)}
+        if method == "goals.pause":
+            phase = "paused"
+        return {}
+
+    async def snapshot(key):
+        return {"goal": dict(goal, status=phase)}
+
+    async def pending(key, task=None):
+        requested.append(task)
+        assert task in {"old", "new"}
+        return {"request_id": "synthetic-question"}
+
+    async def until(key, predicate):
+        assert not predicate({"tasks": [{"task_id": "old", "status": "abandoned"}]})
+        state = {"tasks": [{"task_id": "old", "status": "abandoned"},
+                           {"task_id": "new", "status": "running"}]}
+        assert predicate(state)
+        return state
+
+    async def stop(**kwargs):
+        nonlocal phase
+        phase = "paused"
+
+    async def noop(*args, **kwargs):
+        pass
+
+    for name, fn in {"rpc": rpc, "snapshot": snapshot, "pending": pending, "until": until,
+                     "stop": stop, "start": noop, "subscribe": noop, "reconnect": noop}.items():
+        monkeypatch.setattr(case, name, fn)
+    await live.restart_case(case)
+    assert requested == ["old", "new"]
+
+
+async def test_stop_total_deadline_bounds_dripping_http_before_terminal_cleanup(tmp_path):
+    # This is a real local HTTP stream, not a provider or a mocked live result.
+    from opensquilla.gateway import boot  # noqa: F401 - warm production import before deadline
+
+    response_finished = asyncio.Event()
+    request_started = asyncio.Event()
+    handlers = set()
+
+    async def drip(reader, writer):
+        handlers.add(asyncio.current_task())
+        try:
+            await reader.readuntil(b"\r\n\r\n")
+            request_started.set()
+            writer.write(b"HTTP/1.1 202 Accepted\r\nTransfer-Encoding: chunked\r\n\r\n")
+            await writer.drain()
+            for _ in range(100):
+                await asyncio.sleep(0.01)
+                writer.write(b"1\r\nx\r\n")
+                await writer.drain()
+            writer.write(b"0\r\n\r\n")
+            await writer.drain()
+            response_finished.set()
+        except (ConnectionError, asyncio.CancelledError):
+            pass
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except ConnectionError:
+                pass
+
+    order = []
+
+    class Process:
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            order.append("gateway-killed")
+            self.returncode = -9
+
+        def terminate(self):
+            raise AssertionError("deadline must kill inference before cleanup")
+
+        def wait(self, timeout):
+            assert self.returncode == -9 and timeout == 5
+            return self.returncode
+
+    class Terminal:
+        def terminate(self):
+            assert order == ["gateway-killed"]
+            order.append("terminal-cleaned")
+
+    server = await asyncio.start_server(drip, "127.0.0.1", 0)
+    try:
+        case = live.LiveCase(tmp_path, "deepseek", "deepseek-v4-flash", {})
+        case.port = server.sockets[0].getsockname()[1]
+        case.process, case.terminal = Process(), Terminal()
+        case.deadline = asyncio.get_running_loop().time() + 0.2
+        async with asyncio.timeout(2):
+            result = await case.stop()
+        assert request_started.is_set() and not response_finished.is_set()
+        assert result["graceful_request_error"] == "TimeoutError"
+        assert result["forced"] and result["process_exited"]
+        assert order == ["gateway-killed", "terminal-cleaned"]
+    finally:
+        server.close()
+        await server.wait_closed()
+        for handler in handlers:
+            handler.cancel()
+        await asyncio.gather(*handlers, return_exceptions=True)
+
+
+@pytest.mark.parametrize("run_kind,counter", [("agent", "root_turns"), ("subagent", "children")])
+async def test_unstarted_turn_returns_only_its_new_guard_reservation(
+    tmp_path, monkeypatch, run_kind, counter,
+):
+    from types import SimpleNamespace
+
+    from opensquilla.gateway.task_runtime import TaskRuntime
+    from opensquilla.observability.turn_call_log import TurnCallLogger
+
+    async def original(_runtime, task):
+        if task.task_id == "uncertain":
+            raise RuntimeError("activation state is uncertain")
+        return task.running
+
+    monkeypatch.setattr(TaskRuntime, "_mark_running", original)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request",
+                        httpx.AsyncHTTPTransport.handle_async_request)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", httpx.HTTPTransport.handle_request)
+    monkeypatch.setattr(TurnCallLogger, "write", TurnCallLogger.write)
+    guard = _guard(tmp_path)
+    live.install_dispatch_guard(guard)
+
+    async def start(task_id, *, running=False):
+        return await TaskRuntime._mark_running(None, SimpleNamespace(
+            task_id=task_id, run_kind=run_kind, running=running,
+        ))
+
+    assert not await start("cancelled-before-start")
+    assert guard.snapshot()["counts"][counter] == 0
+    assert await start("running", running=True)
+    # An already-counted task returning False on a later call cannot undo its
+    # original reservation (including a concurrent duplicate activation).
+    assert not await start("running")
+    assert guard.snapshot()["counts"][counter] == 1
+    with pytest.raises(RuntimeError, match="uncertain"):
+        await start("uncertain")
+    assert guard.snapshot()["counts"][counter] == 2
+
+
+def test_concurrent_unstarted_reservations_keep_started_turns(tmp_path):
+    guard = _guard(tmp_path)
+    guard.claim("root_turns", 4, turn_id="started")
+    for index in range(3):
+        guard.claim("root_turns", 4, turn_id=f"cancelled-{index}")
+
+    def release(index):
+        guard.release_unstarted_turn("root_turns", f"cancelled-{index % 3}")
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        list(executor.map(release, range(30)))
+    assert guard.snapshot()["counts"]["root_turns"] == 1
+    for index in range(3):
+        guard.claim("root_turns", 4, turn_id=f"replacement-{index}")
+    with pytest.raises(live.DispatchLimitError, match="root_turns_limit"):
+        guard.claim("root_turns", 4, turn_id="excess")
+
+
+def test_source_fingerprint_covers_imported_helper_without_inheriting_credentials(
+    monkeypatch,
+):
+    helper = "scripts/smoke_v4_phase3_router.py"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-secret")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "other-synthetic-secret")
+    calls = []
+
+    def git(args, **kwargs):
+        calls.append(args)
+        assert kwargs["timeout"] == 10
+        assert "DEEPSEEK_API_KEY" not in kwargs["env"]
+        assert "OPENROUTER_API_KEY" not in kwargs["env"]
+        if args[1] == "ls-files":
+            assert helper in args
+            return helper.encode() + b"\0"
+        return b"synthetic-head\n"
+
+    monkeypatch.setattr(live.subprocess, "check_output", git)
+    before = live.execution_source_fingerprint()
+    original_read = Path.read_bytes
+    monkeypatch.setattr(
+        Path, "read_bytes",
+        lambda path: (b"synthetic helper changed" if path == live.ROOT / helper
+                      else original_read(path)),
+    )
+    after = live.execution_source_fingerprint()
+    assert before["execution_source_sha256"] != after["execution_source_sha256"]
+    assert before["head"] == after["head"] == "synthetic-head"
+    assert len(calls) == 4

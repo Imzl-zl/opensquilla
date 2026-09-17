@@ -332,3 +332,112 @@ async def test_real_agent_waits_for_runtime_capacity_before_next_provider_call(
         assert runtime._global_in_flight == 0
     finally:
         await runtime.shutdown(timeout=2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["denied", "approved", "expired", "rule_denied"])
+async def test_approval_terminal_denial_needs_no_slot_but_execution_always_reacquires(
+    decision: str, tmp_path: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensquilla.application import approval_queue as approval_module
+    from opensquilla.engine import Agent, AgentConfig, ToolResult
+    from opensquilla.engine.types import ToolResultEvent
+    from opensquilla.gateway.approval_queue import get_approval_queue, reset_approval_queue
+    from tests.test_engine.test_interactive_approval_retry import (
+        _DeniedApprovalThenAnswerProvider,
+        _exec_definition,
+    )
+
+    monkeypatch.setattr(
+        approval_module, "_DEFAULT_APPROVAL_QUEUE_PATH", tmp_path / "approval.sqlite",
+    )
+    reset_approval_queue()
+    published, other_started, finish_other, reacquiring = (asyncio.Event() for _ in range(4))
+    events: list[Any] = []
+    approval: dict[str, str] = {}
+    tool_calls: list[str] = []
+    first_task_id = ""
+
+    class Provider(_DeniedApprovalThenAnswerProvider):
+        def chat(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+            assert runtime._tasks[first_task_id].acquired_slot
+            return super().chat(*args, **kwargs)
+
+    provider = Provider()
+
+    async def handler(run: Any) -> None:
+        nonlocal first_task_id
+        if run.message == "other":
+            other_started.set()
+            await finish_other.wait()
+            return
+        first_task_id = run.task_id
+
+        async def tool_handler(call: Any) -> ToolResult:
+            assert runtime._tasks[run.task_id].acquired_slot
+            tool_calls.append(call.tool_use_id)
+            if len(tool_calls) > 1:
+                return ToolResult(call.tool_use_id, call.tool_name, "executed")
+            approval["id"] = get_approval_queue().request("exec", {
+                "toolName": call.tool_name, "command": call.arguments["command"],
+                "args": dict(call.arguments),
+                "reviewer": "auto_review" if decision == "rule_denied" else "user",
+                "humanActionable": decision != "rule_denied",
+            })
+            return ToolResult(call.tool_use_id, call.tool_name, json.dumps({
+                "status": "approval_required", "approval_id": approval["id"],
+                "command": call.arguments["command"],
+            }))
+
+        agent = Agent(
+            provider=provider, config=AgentConfig(max_iterations=3),
+            tool_definitions=[_exec_definition()], tool_handler=tool_handler,
+            tool_context=run.envelope.tool_context(is_owner=True),
+            session_key=run.envelope.session_key,
+        )
+        async for event in agent.run_turn("Inspect the synthetic location"):
+            events.append(event)
+            if isinstance(event, ToolResultEvent) and "approval_required" in event.result:
+                published.set()
+
+    runtime = TaskRuntime(storage=_Storage(), turn_handler=handler, max_concurrency=1)
+    original_acquire = runtime._acquire_fair_slot
+
+    async def acquire(task: Any, *, mark_running: bool = True) -> None:
+        if not mark_running:
+            reacquiring.set()
+        await original_acquire(task, mark_running=mark_running)
+
+    monkeypatch.setattr(runtime, "_acquire_fair_slot", acquire)
+    try:
+        first = await runtime.enqueue(_envelope("approval"), "approval")
+        await asyncio.wait_for(published.wait(), 2)
+        other = await runtime.enqueue(_envelope("other"), "other")
+        await asyncio.wait_for(other_started.wait(), 2)
+        if decision == "expired":
+            get_approval_queue().expire_pending(approval["id"])
+        else:
+            get_approval_queue().resolve(approval["id"], decision == "approved")
+        if decision == "denied":
+            await runtime.wait(first.task_id, timeout=2)
+            assert not reacquiring.is_set()
+            assert runtime._tasks[other.task_id].acquired_slot
+            assert any(
+                isinstance(event, ToolResultEvent) and "approval_denied" in event.result
+                for event in events
+            )
+        else:
+            await asyncio.wait_for(reacquiring.wait(), 2)
+            assert not runtime._tasks[first.task_id].done.is_set()
+        assert len(provider.calls) == len(tool_calls) == 1
+        finish_other.set()
+        await runtime.wait(other.task_id, timeout=2)
+        await runtime.wait(first.task_id, timeout=2)
+        assert len(provider.calls) == (1 if decision == "denied" else 2)
+        assert len(tool_calls) == (2 if decision == "approved" else 1)
+        assert runtime._global_in_flight == 0
+        assert not runtime._agent_slot_waiters
+    finally:
+        finish_other.set()
+        await runtime.shutdown(timeout=2)
+        reset_approval_queue()

@@ -80,6 +80,7 @@ class _ReconcilesCheckpointProvider:
         self.calls = 0
         self.model = "test/model"
         self.requests: list[list[Message]] = []
+        self.system_prompts: list[str] = []
         self.tool_names_per_request: list[set[str]] = []
 
     def chat(
@@ -90,6 +91,7 @@ class _ReconcilesCheckpointProvider:
     ) -> AsyncIterator[Any]:
         self.calls += 1
         self.requests.append(list(messages))
+        self.system_prompts.append(config.system or "")
         self.tool_names_per_request.append({tool.name for tool in tools or []})
         return self._stream(self.calls)
 
@@ -498,8 +500,10 @@ async def test_final_checkpoint_allows_prepared_preview_without_publication(tmp_
     assert not any(isinstance(event, ErrorEvent) for event in events)
     assert {"write_file", "exec_command", "publish_artifact"} <= provider.tool_names_per_request[1]
     assert plan_storage.run.current_step_id is None
-    approved = "\n".join(str(message.content) for message in provider.requests[0])
-    assert "Only publish artifacts when the user requested" in approved
+    assert len(provider.system_prompts) == 2
+    for system_prompt in provider.system_prompts:
+        assert "## Approved Plan Execution" in system_prompt
+        assert "Only publish artifacts when the user requested" in system_prompt
 
 
 @pytest.mark.asyncio

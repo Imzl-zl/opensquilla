@@ -31,7 +31,7 @@ def apply_step(conn) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_usage_events_goal "
-        "ON usage_events(goal_id, session_id, session_epoch) WHERE goal_id IS NOT NULL"
+        "ON usage_events(goal_id) WHERE goal_id IS NOT NULL"
     )
 
 

@@ -61,6 +61,7 @@ from opensquilla.session.goals import (
     StartGoalMutation,
     automatic_goal_task_id,
     effective_goal_turn_context,
+    goal_budget_pause_reason,
     goal_snapshot,
     goal_turn_context,
     normalize_goal_objective,
@@ -1413,7 +1414,7 @@ CREATE TABLE IF NOT EXISTS usage_legacy_baselines (
 
 _CREATE_IDX_USAGE_EVENTS_GOAL = """
 CREATE INDEX IF NOT EXISTS idx_usage_events_goal
-ON usage_events(goal_id, session_id, session_epoch) WHERE goal_id IS NOT NULL
+ON usage_events(goal_id) WHERE goal_id IS NOT NULL
 """
 _CREATE_IDX_USAGE_EVENTS_COMPLETED = """
 CREATE INDEX IF NOT EXISTS idx_usage_events_completed
@@ -3187,7 +3188,10 @@ class SessionStorage:
                 (event.parent_turn_id, root_turn_id, event.session_id, event.session_epoch),
             ) as parent_cur:
                 parent_usage = await parent_cur.fetchone()
-            durable_child = parent_usage is not None and parent_usage["goal_id"] is not None
+            # The parent may have reserved its request before a natural
+            # create_goal call. The durable reservation proves the link even
+            # when that earlier request was correctly not billed to the Goal.
+            durable_child = parent_usage is not None
         if root_turn_id:
             async with conn.execute(
                 "SELECT details FROM agent_tasks WHERE task_id = ?", (root_turn_id,)
@@ -3196,6 +3200,8 @@ class SessionStorage:
             details = _json_object_or_none(task_row["details"]) if task_row else None
             goal_context = effective_goal_turn_context(details or {})
             if goal_context is not None:
+                if event.turn_id != root_turn_id and not durable_child:
+                    raise UsageLedgerConflictError("usage child ancestry is not durable")
                 if not durable_child and (
                     goal_context.session_id != event.session_id
                     or goal_context.epoch != event.session_epoch
@@ -3381,25 +3387,39 @@ class SessionStorage:
         assert finalized is not None
         return finalized, True
 
-    @staticmethod
-    async def _refresh_goal_usage_coverage_on_conn(conn: Any, goal_id: str) -> None:
+    async def _refresh_goal_usage_coverage_on_conn(
+        self, conn: Any, goal_id: str, *, pause_active: bool = True,
+    ) -> GoalRecord | None:
         await conn.execute(
             """UPDATE session_goals SET usage_coverage = CASE
                 WHEN EXISTS (SELECT 1 FROM usage_events
                     WHERE usage_events.goal_id = session_goals.goal_id
-                    AND (status = 'unknown' OR coverage_status = 'usage_missing'))
+                    AND (status = 'unknown' OR coverage_status = 'usage_missing'
+                        OR (status = 'started' AND EXISTS (
+                            SELECT 1 FROM agent_tasks AS executor
+                            WHERE executor.task_id = COALESCE(
+                                (SELECT physical.task_id FROM agent_tasks AS physical
+                                 WHERE physical.task_id = usage_events.turn_id),
+                                usage_events.root_turn_id)
+                            AND executor.status NOT IN ('queued', 'running')))))
                     THEN 'partial_usage'
                 WHEN usage_accounting_version = 0 THEN 'partial_history'
                 ELSE 'complete' END WHERE goal_id = ?""",
             (goal_id,),
         )
+        goal = await self._select_goal_on_conn(conn, goal_id=goal_id)
+        if goal is None or not pause_active or goal.status != GoalStatus.ACTIVE.value:
+            return goal
+        reason = goal_budget_pause_reason(goal)
+        if reason is None:
+            return goal
         await conn.execute(
-            """UPDATE session_goals SET status = 'paused', pause_reason = 'usage_unknown',
-                terminal_reason = 'usage_unknown', state_revision = state_revision + 1
-                WHERE goal_id = ? AND status = 'active' AND token_budget IS NOT NULL
-                AND usage_coverage != 'complete'""",
-            (goal_id,),
+            """UPDATE session_goals SET status = 'paused', pause_reason = ?,
+                terminal_reason = ?, state_revision = state_revision + 1
+                WHERE goal_id = ? AND status = 'active'""",
+            (reason, reason, goal_id),
         )
+        return await self._select_goal_on_conn(conn, goal_id=goal_id)
 
     async def finalize_usage_event(
         self,
@@ -3443,14 +3463,6 @@ class SessionStorage:
                         record.completed_at_ms,
                         record.goal_id,
                     ),
-                )
-                await conn.execute(
-                    """UPDATE session_goals SET status = 'paused', pause_reason = 'token_budget',
-                        terminal_reason = 'token_budget', state_revision = state_revision + 1
-                        WHERE goal_id = ?
-                          AND status = 'active' AND token_budget IS NOT NULL
-                          AND budget_tokens_used >= token_budget""",
-                    (record.goal_id,),
                 )
                 await self._refresh_goal_usage_coverage_on_conn(conn, record.goal_id)
             return replace(record, transition_applied=changed)
@@ -7796,22 +7808,6 @@ class SessionStorage:
                 "Goal execution cannot start while Plan mode is active",
                 current=goal,
             )
-        async with conn.execute(
-            """
-            SELECT 1 FROM plan_runs
-            WHERE session_key = ?
-              AND driver_kind = 'manual'
-              AND status IN ('queued', 'running', 'paused', 'blocked')
-            LIMIT 1
-            """,
-            (goal.session_key,),
-        ) as cur:
-            if await cur.fetchone() is not None:
-                raise GoalConflictError(
-                    "PLAN_RUN_ACTIVE",
-                    "A manual Plan run is active for this session",
-                    current=goal,
-                )
 
     @staticmethod
     async def _require_idle_goal_session_on_conn(
@@ -7947,11 +7943,17 @@ class SessionStorage:
             )
             from opensquilla.session.goals import validate_goal_budget
 
+            goal = (
+                await self._refresh_goal_usage_coverage_on_conn(
+                    conn, goal.goal_id, pause_active=False,
+                )
+            ) or goal
             settings = settings or {}
             token_budget = validate_goal_budget(settings.get("tokenBudget", goal.token_budget))
-            if ("tokenBudget" in settings or resume_requested) and token_budget is not None and (
-                not goal.usage_accounting_version or goal.usage_coverage != "complete"
-            ):
+            budget_reason = goal_budget_pause_reason(
+                goal.model_copy(update={"token_budget": token_budget})
+            )
+            if ("tokenBudget" in settings or resume_requested) and budget_reason == "usage_unknown":
                 raise GoalConflictError(
                     "GOAL_USAGE_INCOMPLETE",
                     "Token budgets require complete usage; historical usage is incomplete "
@@ -7985,11 +7987,7 @@ class SessionStorage:
                     or goal.active_task_id not in {None, binding_task_id}
                 ):
                     raise GoalConflictError("STALE_GOAL", "The current task cannot own this Goal")
-            if (
-                resume_requested
-                and token_budget is not None
-                and goal.budget_tokens_used >= token_budget
-            ):
+            if resume_requested and budget_reason == "token_budget":
                 raise GoalConflictError(
                     "GOAL_BUDGET_EXHAUSTED",
                     "Increase or remove the token budget before resuming",
@@ -8054,12 +8052,6 @@ class SessionStorage:
                         "STALE_GOAL",
                         "The Goal changed before it could be edited",
                     )
-            await conn.execute(
-                """UPDATE session_goals SET status = 'paused', pause_reason = 'token_budget',
-                    terminal_reason = 'token_budget' WHERE goal_id = ? AND status = 'active'
-                    AND token_budget IS NOT NULL AND budget_tokens_used >= token_budget""",
-                (goal.goal_id,),
-            )
             if resume_requested and goal.status != GoalStatus.ACTIVE.value:
                 await conn.execute(
                     "UPDATE session_goals SET status = 'active', pause_reason = NULL, "
@@ -8073,6 +8065,12 @@ class SessionStorage:
                     "terminal_reason = NULL, blocked_reason = NULL, terminal_task_id = NULL, "
                     "finished_at_ms = NULL WHERE goal_id = ?",
                     (goal.goal_id,),
+                )
+            if budget_reason is not None:
+                await conn.execute(
+                    """UPDATE session_goals SET status = 'paused', pause_reason = ?,
+                        terminal_reason = ? WHERE goal_id = ? AND status = 'active'""",
+                    (budget_reason, budget_reason, goal.goal_id),
                 )
             if binding_task is not None:
                 await conn.execute(
@@ -8397,11 +8395,17 @@ class SessionStorage:
                     "This Goal is not resumable",
                     current=goal,
                 )
-            if goal.token_budget is not None and goal.usage_coverage != "complete":
+            goal = (
+                await self._refresh_goal_usage_coverage_on_conn(
+                    conn, goal.goal_id, pause_active=False,
+                )
+            ) or goal
+            budget_reason = goal_budget_pause_reason(goal)
+            if budget_reason == "usage_unknown":
                 raise GoalConflictError(
                     "GOAL_USAGE_INCOMPLETE", "Usage receipts are incomplete", current=goal
                 )
-            if goal.token_budget is not None and goal.budget_tokens_used >= goal.token_budget:
+            if budget_reason == "token_budget":
                 raise GoalConflictError(
                     "GOAL_BUDGET_EXHAUSTED",
                     "Increase or remove the token budget before resuming",
@@ -8617,6 +8621,10 @@ class SessionStorage:
                 conn,
                 session_key=task_record.session_key,
             )
+            goal = (await self._refresh_goal_usage_coverage_on_conn(conn, goal.goal_id)) or goal
+            budget_reason = goal_budget_pause_reason(goal)
+            if budget_reason is not None:
+                return GoalGuardrailPause(goal=goal, reason=budget_reason)
             guardrail_reason: str | None = None
             if goal.window_turns_started >= max_turns:
                 guardrail_reason = "turn_limit"
@@ -8787,13 +8795,15 @@ class SessionStorage:
                 or goal.active_task_id is not None
             ):
                 return None
+            goal = (await self._refresh_goal_usage_coverage_on_conn(conn, goal.goal_id)) or goal
+            if goal_budget_pause_reason(goal) is not None:
+                return None
             try:
                 await self._require_default_goal_mode_on_conn(conn, goal=goal)
             except GoalConflictError as exc:
                 if exc.code in {
                     "SESSION_GENERATION_CHANGED",
                     "PLAN_MODE_ACTIVE",
-                    "PLAN_RUN_ACTIVE",
                 }:
                     return None
                 raise
@@ -9113,7 +9123,9 @@ class SessionStorage:
                     "STALE_GOAL",
                     "The terminal task does not carry this Goal generation",
                 )
-            goal = await self._select_goal_on_conn(conn, goal_id=context.goal_id)
+            goal = await self._refresh_goal_usage_coverage_on_conn(
+                conn, context.goal_id, pause_active=False,
+            )
             if (
                 goal is None
                 or goal.session_id != context.session_id
@@ -9238,6 +9250,12 @@ class SessionStorage:
                     status = GoalStatus.PAUSED.value
                     pause_reason = "process_restart"
                     terminal_reason = "process_restart"
+
+            if status == GoalStatus.ACTIVE.value:
+                budget_reason = goal_budget_pause_reason(goal)
+                if budget_reason is not None:
+                    status = GoalStatus.PAUSED.value
+                    pause_reason = terminal_reason = budget_reason
 
             await conn.execute(
                 """
@@ -13745,22 +13763,10 @@ class SessionStorage:
                         ),
                     ) as busy_cur:
                         has_existing_task = await busy_cur.fetchone() is not None
-                    async with conn.execute(
-                        """
-                        SELECT 1 FROM plan_runs
-                        WHERE session_key = ?
-                          AND driver_kind = 'manual'
-                          AND status IN ('queued', 'running', 'paused', 'blocked')
-                        LIMIT 1
-                        """,
-                        (entry.session_key,),
-                    ) as plan_cur:
-                        has_manual_plan_run = await plan_cur.fetchone() is not None
                     can_claim_now = (
                         mode_is_default
                         and current.active_task_id is None
                         and not has_existing_task
-                        and not has_manual_plan_run
                         and not merge_into_task
                     )
                     task_details = dict(task_record.details or {})
