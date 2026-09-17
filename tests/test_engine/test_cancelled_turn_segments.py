@@ -33,6 +33,12 @@ PARTIAL_ANSWER = "Based on the lookup, the answer is 42 and the reasoning is as 
 PARTIAL_ACTIVITY = "I will inspect another source before answering."
 
 
+@pytest.fixture(autouse=True)
+def _offline_token_estimation(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Cancellation tests must not wait for tokenizer downloads.
+    monkeypatch.setattr("opensquilla.token_estimation._get_encoding", lambda: None)
+
+
 class _ToolThenHangingTextProvider:
     """Call 1: emits one tool call. Call 2: streams text, then hangs forever."""
 
@@ -230,9 +236,6 @@ async def test_cancelled_question_projects_terminal_result_into_next_provider_hi
 ) -> None:
     from opensquilla.tools.builtin.plan_control import request_user_input
 
-    # Exercise the ordinary prompt assembly and cancellation path without a
-    # network-dependent encoder cold start in this offline lifecycle test.
-    monkeypatch.setattr("opensquilla.token_estimation._get_encoding", lambda: None)
     question = "Which synthetic scope?"
 
     class Provider(_ToolThenHangingTextProvider):
