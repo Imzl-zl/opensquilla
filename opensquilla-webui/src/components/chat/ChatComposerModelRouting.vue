@@ -72,8 +72,9 @@ const key = (model: { model: string; provider: string | null }) =>
 const selectedKey = computed(() =>
   props.modelSelection ? key(props.modelSelection) : 'default',
 )
+type ModelOption = { key: string; label: string; model: string; provider: string | null }
 const models = computed(() => {
-  const catalog = new Map<string, { key: string; label: string; model: string; provider: string | null; missing: boolean }>(
+  const catalog = new Map<string, ModelOption>(
     (props.availableModels ?? []).map((model) => [
       key({ model: model.id, provider: model.provider }),
       {
@@ -81,7 +82,6 @@ const models = computed(() => {
         label: model.name || model.id,
         model: model.id,
         provider: model.provider,
-        missing: false,
       },
     ]),
   )
@@ -91,17 +91,21 @@ const models = computed(() => {
       key: selectedKey.value,
       label: selection.model,
       ...selection,
-      missing: true,
     })
+  const providers = new Map<string | null, ModelOption[]>()
+  for (const model of catalog.values()) {
+    const group = providers.get(model.provider) ?? []
+    group.push(model)
+    providers.set(model.provider, group)
+  }
   return [
     {
       key: 'default',
       label: t('chat.newTaskModel.gatewayDefault'),
       model: '',
       provider: '',
-      missing: false,
     },
-    ...catalog.values(),
+    ...[...providers.values()].flat(),
   ]
 })
 const pickerTitle = computed(() => t(props.isNewTask ? 'chat.newTaskModel.title' : 'chat.modelRouting.sessionModelTitle'))
@@ -135,10 +139,33 @@ const filteredModels = computed(() =>
       .includes(search.value.trim().toLocaleLowerCase()),
   ),
 )
+// Provider sections stay inside the existing second level; search and keyboard
+// navigation continue to operate on one flat list of model identities.
+const modelGroups = computed(() => {
+  const groups = new Map<string, { key: string; provider: string | null; rows: { model: ModelOption; index: number }[] }>()
+  filteredModels.value.forEach((model, index) => {
+    const provider = model.key === 'default' ? null : model.provider
+    const groupKey = model.key === 'default' ? 'default' : JSON.stringify(provider)
+    let group = groups.get(groupKey)
+    if (!group) {
+      group = { key: groupKey, provider, rows: [] }
+      groups.set(groupKey, group)
+    }
+    group.rows.push({ model, index })
+  })
+  return [...groups.values()]
+})
+const showProviderGroups = computed(() => new Set(
+  models.value.filter((model) => model.key !== 'default' && model.provider).map((model) => model.provider),
+).size > 1)
 const issue = computed(() => {
   if (props.modelSelectionDisabledReason === 'unavailable') return t('chat.newTaskModel.unavailable')
-  if (props.modelsError) return props.modelsError
-  const failures = props.modelProviderErrors ?? []
+  if (props.modelsError && !props.availableModels?.length) return props.modelsError
+  // A compatible last-good catalog remains usable during a discovery outage.
+  // Only surface provider failures that actually leave its options unavailable.
+  const failures = (props.modelProviderErrors ?? []).filter((error) =>
+    !props.availableModels?.some((model) => model.provider === error.provider),
+  )
   return failures.length
     ? t('chat.newTaskModel.partialFailure', {
         providers: failures.map((error) => error.provider).join(', '),
@@ -149,7 +176,7 @@ function modelDisabled(model: (typeof models.value)[number]) {
   return (
     props.busy ||
     props.modelSelectionDisabledReason === 'busy' ||
-    model.missing ||
+    (model.key !== 'default' && !model.provider) ||
     (!props.modelSelectionAvailable && (!props.isNewTask || model.key !== 'default'))
   )
 }
@@ -254,8 +281,9 @@ function onKey(event: KeyboardEvent) {
 watch(search, () => {
   activeModel.value = -1
 })
-watch(filteredModels, () => {
-  if (activeModel.value >= filteredModels.value.length) activeModel.value = -1
+watch(filteredModels, (next, previous) => {
+  const activeKey = previous[activeModel.value]?.key
+  activeModel.value = activeKey ? next.findIndex((model) => model.key === activeKey) : -1
 })
 // Sample only while this popover is mounted: position can change without the
 // trigger resizing (sidebar, composer growth, client zoom, visual viewport pan).
@@ -473,45 +501,57 @@ defineExpose({ element: () => rootRef.value })
           :aria-label="pickerTitle"
           :aria-busy="modelsLoading"
         >
-          <button
-            v-for="(model, index) in filteredModels"
-            :id="`${id}-model-${index}`"
-            :key="model.key"
-            type="button"
-            role="option"
-            tabindex="-1"
-            :aria-selected="modelRoutingMode === 'off' && model.key === selectedKey"
-            :aria-disabled="modelDisabled(model)"
-            class="routing-model"
-            :class="{ 'is-highlighted': activeModel === index }"
-            @pointermove="activeModel = index"
-            @mousedown.prevent
-            @click="selectModel(index)"
+          <div
+            v-for="(group, groupIndex) in modelGroups"
+            :key="group.key"
+            role="group"
+            :aria-labelledby="showProviderGroups && group.provider ? `${id}-provider-${groupIndex}` : undefined"
           >
-            <span class="routing-model__avatar" aria-hidden="true">
-              <Icon v-if="model.key === 'default'" name="settings" :size="15" />
-              <template v-else>{{ model.label.charAt(0).toUpperCase() }}</template>
-            </span>
-            <span class="routing-model__copy">
-              <span class="routing-model__name">{{ model.label }}</span>
-              <span class="routing-model__provider">
-                {{ model.key === 'default' ? defaultModelHint : model.provider }}
+            <div
+              v-if="showProviderGroups && group.provider"
+              :id="`${id}-provider-${groupIndex}`"
+              class="routing-provider-heading"
+            >{{ group.provider }}</div>
+            <button
+              v-for="{ model, index } in group.rows"
+              :id="`${id}-model-${index}`"
+              :key="model.key"
+              type="button"
+              role="option"
+              tabindex="-1"
+              :aria-selected="modelRoutingMode === 'off' && model.key === selectedKey"
+              :aria-disabled="modelDisabled(model)"
+              class="routing-model"
+              :class="{ 'is-highlighted': activeModel === index }"
+              @pointermove="activeModel = index"
+              @mousedown.prevent
+              @click="selectModel(index)"
+            >
+              <span class="routing-model__avatar" aria-hidden="true">
+                <Icon v-if="model.key === 'default'" name="settings" :size="15" />
+                <template v-else>{{ model.label.charAt(0).toUpperCase() }}</template>
               </span>
-            </span>
-            <Icon
-              v-if="modelRoutingMode === 'off' && model.key === selectedKey"
-              name="check"
-              :size="16"
-            />
-          </button>
+              <span class="routing-model__copy">
+                <span class="routing-model__name">{{ model.label }}</span>
+                <span class="routing-model__provider">
+                  {{ model.key === 'default' ? defaultModelHint : model.provider }}
+                </span>
+              </span>
+              <Icon
+                v-if="modelRoutingMode === 'off' && model.key === selectedKey"
+                name="check"
+                :size="16"
+              />
+            </button>
+          </div>
           <p v-if="!filteredModels.length" class="routing-empty" role="status">
             {{
               modelsLoading ? t('chat.newTaskModel.loading') : t('chat.newTaskModel.empty')
             }}
           </p>
         </div>
-        <div v-if="issue || modelsLoading" class="routing-issue" role="status">
-          <span>{{ modelsLoading ? t('chat.newTaskModel.loading') : issue }}</span>
+        <div v-if="issue || (modelsLoading && !availableModels?.length)" class="routing-issue" role="status">
+          <span>{{ modelsLoading && !availableModels?.length ? t('chat.newTaskModel.loading') : issue }}</span>
           <button
             v-if="issue"
             type="button"
@@ -750,6 +790,12 @@ defineExpose({ element: () => rootRef.value })
   padding: 0 8px 8px;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+.routing-provider-heading {
+  padding: 10px 10px 4px;
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  font-weight: 500;
 }
 .routing-model {
   display: flex;

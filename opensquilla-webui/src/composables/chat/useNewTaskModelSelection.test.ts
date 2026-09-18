@@ -88,8 +88,40 @@ describe('new-task model selection', () => {
     await h.api.refresh()
     expect(h.api.providerErrors.value).toEqual(errors)
     expect(h.api.select(PIN)).toBe(true)
-    expect(h.api.select({ model: 'missing', provider: MODEL.provider })).toBe(false)
     expect(h.api.selection.value).toEqual(PIN)
+    h.scope.stop()
+  })
+
+  it('retains and reselects a saved model omitted from discovery, including from router mode', async () => {
+    const storage = memoryStorage()
+    const original = harness({ storage })
+    original.api.select(PIN)
+    original.scope.stop()
+    const h = harness({ storage, list: async () => ({ models: [], errors: [] }) })
+    await h.api.refresh()
+    expect(h.api.models.value).toEqual([])
+    expect(h.api.selection.value).toEqual(PIN)
+    expect(h.api.select(PIN)).toBe(true)
+    h.routingMode.value = 'squilla_router'
+    expect(await h.api.selectWithRouting(PIN, async mode => {
+      h.routingMode.value = mode
+      return true
+    })).toBe(true)
+    expect(h.api.selection.value).toEqual(PIN)
+    expect(h.api.conflict.value).toBeNull()
+    h.scope.stop()
+  })
+
+  it('keeps the last catalog and selected pin when discovery fails', async () => {
+    const h = harness()
+    await h.api.refresh()
+    h.api.select(PIN)
+    h.list.mockRejectedValueOnce(new Error('Provider discovery failed'))
+    await h.api.refresh()
+    expect(h.api.models.value).toEqual([MODEL])
+    expect(h.api.selection.value).toEqual(PIN)
+    expect(h.api.error.value).toBe('Provider discovery failed')
+    expect(h.api.select(PIN)).toBe(true)
     h.scope.stop()
   })
 
@@ -148,7 +180,7 @@ describe('new-task model selection', () => {
     const h = harness()
     await h.api.refresh()
     const setMode = vi.fn(async () => true)
-    expect(await h.api.selectWithRouting({ ...PIN, provider: 'missing' }, setMode)).toBe(false)
+    expect(await h.api.selectWithRouting({ ...PIN, provider: ' invalid ' }, setMode)).toBe(false)
     h.busy.value = true
     expect(await h.api.selectWithRouting(PIN, setMode)).toBe(false)
     h.busy.value = false
@@ -184,7 +216,7 @@ describe('new-task model selection', () => {
     h.scope.stop()
   })
 
-  it.each(['navigate', 'reconnect', 'send', 'newer-mode'] as const)(
+  it.each(['navigate', 'reconnect', 'send', 'newer-mode', 'newer-model', 'clear-model', 'dispose'] as const)(
     'does not apply a delayed model choice after %s', async cause => {
       const h = harness()
       await h.api.refresh()
@@ -195,13 +227,30 @@ describe('new-task model selection', () => {
         h.sessionKey.value = 'agent:main:webchat:one'
       } else if (cause === 'reconnect') h.connectionEpoch.value += 1
       else if (cause === 'send') h.busy.value = true
-      else await h.api.selectRoutingMode('squilla_router', async () => true)
+      else if (cause === 'newer-mode') await h.api.selectRoutingMode('squilla_router', async () => true)
+      else if (cause === 'newer-model') h.api.select({ ...PIN, model: 'other-model' })
+      else if (cause === 'clear-model') h.api.select(null)
+      else h.scope.stop()
       resolve(true)
       expect(await pending).toBe(false)
-      expect(h.api.selection.value).toBeNull()
+      expect(h.api.selection.value).toEqual(cause === 'newer-model'
+        ? { ...PIN, model: 'other-model' } : null)
       h.scope.stop()
     },
   )
+
+  it('does not clear a pin when a route choice from an old connection resolves', async () => {
+    const h = harness()
+    h.api.select(PIN)
+    let resolve!: (updated: boolean) => void
+    const pending = h.api.selectRoutingMode('squilla_router', () => new Promise(r => { resolve = r }))
+    h.connectionEpoch.value += 1
+    h.routingMode.value = 'squilla_router'
+    resolve(true)
+    await pending
+    expect(h.api.selection.value).toEqual(PIN)
+    h.scope.stop()
+  })
 
   it('preserves the pin on a rejected or failed strategy change and during unacknowledged sending', async () => {
     const h = harness()

@@ -97,6 +97,46 @@ describe('Native cascading model routing menu', () => {
       provider: 'provider-b',
     })
   })
+
+  it('groups multiple providers in the same submenu without losing keyboard order', async () => {
+    const { selected } = await mount({ availableModels: [
+      { id: 'a1', name: 'Alpha one', provider: 'provider-a' },
+      { id: 'b1', name: 'Beta one', provider: 'provider-b' },
+      { id: 'a2', name: 'Alpha two', provider: 'provider-a' },
+    ] })
+    expect([...document.querySelectorAll('.routing-provider-heading')].map(el => el.textContent))
+      .toEqual(['provider-a', 'provider-b'])
+    expect([...document.querySelectorAll('.routing-model__name')].map(el => el.textContent))
+      .toEqual(['Default model', 'Alpha one', 'Alpha two', 'Beta one'])
+    const input = query<HTMLInputElement>('input')
+    await key(input, 'ArrowDown')
+    await key(input, 'ArrowDown')
+    await key(input, 'ArrowDown')
+    await key(input, 'Enter')
+    expect(selected).toHaveBeenCalledWith({ model: 'a2', provider: 'provider-a' })
+  })
+  it('does not add provider headings or loading noise to a usable single-provider list', async () => {
+    await mount({
+      availableModels: [{ id: 'a1', name: 'Alpha', provider: 'provider-a' }],
+      modelsLoading: true,
+      modelProviderErrors: [{ provider: 'provider-a', kind: 'network', detail: 'offline' }],
+    })
+    expect(query('.routing-provider-heading')).toBeNull()
+    expect(query('.routing-issue')).toBeNull()
+    expect(query('[role="option"][aria-disabled="true"]')).toBeNull()
+  })
+  it('keeps keyboard focus on the same model when discovery inserts an earlier row', async () => {
+    const { props, selected } = await mount()
+    const input = query<HTMLInputElement>('input')
+    await key(input, 'ArrowUp')
+    props.availableModels = [
+      ...props.availableModels,
+      { id: 'new-model', name: 'New Alpha', provider: 'provider-a' },
+    ]
+    await nextTick()
+    await key(input, 'Enter')
+    expect(selected).toHaveBeenCalledWith({ model: 'shared-model', provider: 'provider-b' })
+  })
   it('starts ArrowUp at the last available model when search has no active result', async () => {
     const { selected } = await mount()
     const input = query<HTMLInputElement>('input')
@@ -157,7 +197,7 @@ describe('Native cascading model routing menu', () => {
     })
     query<HTMLButtonElement>('.routing-mode').click()
     await nextTick()
-    query<HTMLButtonElement>('[role="option"]:nth-child(2)').click()
+    document.querySelectorAll<HTMLButtonElement>('[role="option"]')[1]!.click()
     expect(selected).toHaveBeenCalledWith({ model: 'shared-model', provider: 'provider-a' })
   })
   it('preserves the single model default choice and explicit routing alternatives', async () => {
@@ -183,16 +223,16 @@ describe('Native cascading model routing menu', () => {
     await key(query('.routing-mode'), 'Escape')
     expect(close).toHaveBeenCalledOnce()
   })
-  it('keeps unavailable selected models visible and prevents accidental replacement during partial failure', async () => {
+  it('keeps a selected model absent from discovery selectable for backend validation', async () => {
     const { selected, refresh } = await mount({
       modelSelection: { model: 'offline-model', provider: 'provider-c' },
-      modelProviderErrors: [{ provider: 'provider-c', error: 'offline' }],
+      modelProviderErrors: [{ provider: 'provider-c', kind: 'network', detail: 'offline' }],
     })
     const missing = query<HTMLButtonElement>('[aria-selected="true"]')
     expect(missing.textContent).toContain('offline-model')
-    expect(missing.getAttribute('aria-disabled')).toBe('true')
+    expect(missing.getAttribute('aria-disabled')).toBe('false')
     missing.click()
-    expect(selected).not.toHaveBeenCalled()
+    expect(selected).toHaveBeenCalledWith({ model: 'offline-model', provider: 'provider-c' })
     expect(query('.routing-issue').textContent).toContain('provider-c')
     query<HTMLButtonElement>('.routing-retry').click()
     expect(refresh).toHaveBeenCalledOnce()
@@ -205,7 +245,7 @@ describe('Native cascading model routing menu', () => {
     await nextTick()
     expect(document.activeElement).toBe(row)
     row.click()
-    query<HTMLButtonElement>('[role="option"]:nth-child(2)').click()
+    document.querySelectorAll<HTMLButtonElement>('[role="option"]')[1]!.click()
     expect(mode).not.toHaveBeenCalled()
     expect(selected).not.toHaveBeenCalled()
   })
@@ -242,13 +282,13 @@ describe('Native cascading model routing menu', () => {
     expect(legacy.getAttribute('aria-disabled')).toBe('true')
     legacy.click()
     expect(selected).not.toHaveBeenCalled()
-    query<HTMLButtonElement>('[role="option"]:nth-child(2)').click()
+    document.querySelectorAll<HTMLButtonElement>('[role="option"]')[1]!.click()
     expect(selected).toHaveBeenCalledWith({ model: 'shared-model', provider: 'provider-a' })
   })
   it('blocks concrete model changes during a response while retaining next-turn routing controls', async () => {
     const { selected, mode } = await mount({ isNewTask: false, modelSelectionDisabledReason: 'busy' })
     expect(query('.routing-model-scope').textContent).toContain('Finish the current response')
-    query<HTMLButtonElement>('[role="option"]:nth-child(2)').click()
+    document.querySelectorAll<HTMLButtonElement>('[role="option"]')[1]!.click()
     query<HTMLButtonElement>('[role="option"]').click()
     expect(selected).not.toHaveBeenCalled()
     query<HTMLButtonElement>('[data-mode="squilla_router"]').click()

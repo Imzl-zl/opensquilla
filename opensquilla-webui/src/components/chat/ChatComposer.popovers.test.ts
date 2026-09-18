@@ -111,7 +111,9 @@ describe('ChatComposer popovers', () => {
     document.body.querySelector<HTMLButtonElement>('[data-mode="off"]')!.click()
     await nextTick()
     expect(document.body.querySelector('.new-task-model-menu strong')?.textContent).toBe('Conversation model')
-    document.body.querySelector<HTMLButtonElement>('[role="option"]:nth-child(3)')!.click()
+    const nextModel = Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="option"]'))
+      .find(row => row.textContent?.includes('Next model'))!
+    nextModel.click()
     expect(selected).toHaveBeenCalledWith({ model: 'next', provider: 'provider-b' })
     await nextTick()
     expect(document.body.querySelector('.composer-model-routing')).toBeNull()

@@ -97,9 +97,11 @@ export function useNewTaskModelSelection(options: UseNewTaskModelSelectionOption
   function select(next: NewTaskModelSelection | null): boolean {
     if (!options.isDraft() || options.busy.value) return false
     // Gateway default remains an explicit escape from a model/routing conflict.
-    if (next === null) { persist(null); return true }
+    if (next === null) { selectionOperation += 1; persist(null); return true }
     if (disabledReason.value || !validSelection(next)) return false
-    if (!models.value.some(model => model.id === next.model && model.provider === next.provider)) return false
+    // Discovery may omit a saved or manually configured model. Admission is
+    // authoritative; catalog membership must not discard the user's pin.
+    selectionOperation += 1
     persist({ sessionKey: options.sessionKey.value, selection: { ...next } })
     return true
   }
@@ -109,6 +111,7 @@ export function useNewTaskModelSelection(options: UseNewTaskModelSelectionOption
     setMode: (mode: ModelRoutingMode) => Promise<boolean>,
   ): Promise<boolean> {
     const key = options.sessionKey.value
+    const epoch = options.connectionEpoch?.value
     const wasDraft = options.isDraft()
     // A first send waiting for admission must keep its frozen model and route.
     if (wasDraft && options.busy.value) return false
@@ -118,6 +121,7 @@ export function useNewTaskModelSelection(options: UseNewTaskModelSelectionOption
     // Passive config changes and stale writes must leave the draft untouched.
     if (updated && operation === selectionOperation
       && wasDraft && options.isDraft() && key === options.sessionKey.value
+      && epoch === options.connectionEpoch?.value
       && mode !== 'off' && options.routingMode.value === mode) select(null)
     return updated
   }
@@ -132,9 +136,7 @@ export function useNewTaskModelSelection(options: UseNewTaskModelSelectionOption
     // an explicit local pin remains safe and restores gateway-default behavior.
     if (next === null && !available.value) return select(null)
     if (!available.value) return false
-    if (next && (!validSelection(next) || !models.value.some(model => (
-      model.id === next.model && model.provider === next.provider
-    )))) return false
+    if (next && !validSelection(next)) return false
     const key = options.sessionKey.value
     const epoch = options.connectionEpoch?.value
     const operation = ++selectionOperation
@@ -203,7 +205,10 @@ export function useNewTaskModelSelection(options: UseNewTaskModelSelectionOption
     invalidateCatalog()
     if (catalogAvailable.value) void refresh()
   }, { immediate: true })
-  if (getCurrentScope()) onScopeDispose(invalidateCatalog)
+  if (getCurrentScope()) onScopeDispose(() => {
+    selectionOperation += 1
+    invalidateCatalog()
+  })
 
   return {
     available, selection, models, loading, error, providerErrors, disabledReason,
