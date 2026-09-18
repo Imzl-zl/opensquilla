@@ -72,7 +72,6 @@ export function useSetupBehaviorForm() {
   function createPanel(context: BehaviorPanelContext) {
     return computed(() => ({
       autoSessionTitles: autoSessionTitles.value,
-      autoSessionTitlesDirty: isDirty.value,
       commitMessageEnabled: commitMessageEnabled.value,
       commitMessageInstructions: commitMessageInstructions.value,
       statusText: context.statusText.value,

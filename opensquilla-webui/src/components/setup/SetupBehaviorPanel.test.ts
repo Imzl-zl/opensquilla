@@ -9,7 +9,6 @@ const mounted: App[] = []
 function panel(overrides: Record<string, unknown> = {}) {
   return {
     autoSessionTitles: true,
-    autoSessionTitlesDirty: false,
     commitMessageEnabled: true,
     commitMessageInstructions: '',
     statusText: 'New sessions receive a short generated title.',

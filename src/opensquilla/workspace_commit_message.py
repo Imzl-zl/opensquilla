@@ -315,13 +315,13 @@ def build_staged_diff_context(diff_text: str, *, truncated: bool = False) -> str
     excerpts: list[str] = []
     remaining = _DIFF_EXCERPT_CHARS
     for section in sections:
-        text = section.strip()
-        if len(text) > per_file:
-            text = f"{text[:per_file]}\n… (this file's patch is truncated)"
-        if len(text) > remaining:
+        excerpt = section.strip()
+        if len(excerpt) > per_file:
+            excerpt = f"{excerpt[:per_file]}\n… (this file's patch is truncated)"
+        if len(excerpt) > remaining:
             break
-        excerpts.append(text)
-        remaining -= len(text)
+        excerpts.append(excerpt)
+        remaining -= len(excerpt)
     omitted = len(sections) - len(excerpts)
 
     # The coverage is stated in the first line rather than after the excerpts,

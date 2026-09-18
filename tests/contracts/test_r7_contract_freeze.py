@@ -40,6 +40,13 @@ EXPECTED_METHOD_METADATA = {
         "command",
         "non-idempotent",
     ),
+    # The only operator.read in the workspaces family that is a command: the
+    # draft must not be replayed, and what it returns is text, not state.
+    "workspaces.git.commitMessage.draft": (
+        "operator.read",
+        "command",
+        "non-idempotent",
+    ),
 }
 
 RESPONSE_VALIDATED_METHODS = (

@@ -6,7 +6,6 @@ const { t } = useI18n()
 
 interface BehaviorPanelContract {
   autoSessionTitles: boolean
-  autoSessionTitlesDirty: boolean
   commitMessageEnabled: boolean
   commitMessageInstructions: string
   statusText: string
