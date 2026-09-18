@@ -2993,6 +2993,7 @@ def test_desktop_cleanup_flow_allows_windows_helper_release_latency() -> None:
 ])
 def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_name):
     steps = _workflow("ci.yml")["jobs"][job_name]["steps"]
+    faulthandler_timeout = 0 if job_name == "windows-full" else 60
     preflight = next(step for step in steps if step.get("name") == (
         "Preflight offline test environment"
     ))
@@ -3033,7 +3034,7 @@ def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_
         assert '"${{ matrix.shard }}" == "desktop-installer-contracts"' in preflight["run"]
         assert '"${{ matrix.shard }}" == "gateway-sqlite"' in preflight["run"]
         assert '"${regression_args[@]}"' in preflight["run"]
-        assert "-o faulthandler_timeout=60" in preflight["run"]
+        assert f"-o faulthandler_timeout={faulthandler_timeout}" in preflight["run"]
     if job_name == "windows-full":
         expected_preflight_files.update({
             "tests/test_ci/test_windows_signatures.py",
@@ -3044,6 +3045,8 @@ def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_
         expected_preflight_files
     )
     assert "-vv --tb=short" in preflight["run"]
-    assert "-o faulthandler_timeout=60" in main["run"]
+    assert f"-o faulthandler_timeout={faulthandler_timeout}" in main["run"]
+    assert "no:faulthandler" not in preflight["run"]
+    assert "no:faulthandler" not in main["run"]
     assert "--showlocals" not in preflight["run"]
     assert "--showlocals" not in main["run"]
