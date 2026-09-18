@@ -1148,8 +1148,12 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   transition: opacity var(--dur-fast);
 }
 
+/* Revealed by pointing at the header, or by focusing an action itself. Not by
+   `:focus-within` on the header: clicking the toggle to fold a section leaves
+   focus there, which latched the actions on for that section alone — the same
+   header behaving differently depending on what was last clicked. */
 .wb-changes__group-head:hover .wb-changes__group-actions,
-.wb-changes__group-head:focus-within .wb-changes__group-actions {
+.wb-changes__group-actions:focus-within {
   opacity: 1;
 }
 
@@ -1379,8 +1383,10 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   border-color: transparent;
 }
 
+/* Same rule as a section header: the pointer reveals, the action's own focus
+   reveals, and the row under review keeps its actions. */
 .wb-changes__row:hover .wb-changes__row-actions,
-.wb-changes__row:focus-within .wb-changes__row-actions,
+.wb-changes__row-actions:focus-within,
 .wb-changes__row.is-selected .wb-changes__row-actions {
   opacity: 1;
 }
