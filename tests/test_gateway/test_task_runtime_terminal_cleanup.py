@@ -371,7 +371,10 @@ async def _make_durable_plan_run(
 
 
 @pytest.mark.asyncio
-async def test_plan_run_is_running_only_during_its_execution_turn() -> None:
+@pytest.mark.parametrize("storage_busy", [False, True])
+async def test_plan_run_is_running_only_during_its_execution_turn(
+    storage_busy: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     session_key = "agent-1::plan-runtime"
     task_id = "task-plan-runtime"
     storage, run = await _make_durable_plan_run(
@@ -384,6 +387,7 @@ async def test_plan_run_is_running_only_during_its_execution_turn() -> None:
     observed_statuses: list[str] = []
     terminal_plan_statuses: list[str] = []
     events: list[tuple[str, str, dict[str, Any]]] = []
+    gate_held = False
 
     async def _handler(_run: Any) -> None:
         current = await storage.get_plan_run(run.run_id)
@@ -393,8 +397,12 @@ async def test_plan_run_is_running_only_during_its_execution_turn() -> None:
         await release.wait()
 
     async def _emit(session: str, name: str, payload: dict[str, Any]) -> None:
+        nonlocal gate_held
         events.append((session, name, payload))
         if name == "task.succeeded":
+            if gate_held:
+                storage._operation_lock.release()
+                gate_held = False
             current = await storage.get_plan_run(run.run_id)
             assert current is not None
             terminal_plan_statuses.append(current.status)
@@ -414,13 +422,32 @@ async def test_plan_run_is_running_only_during_its_execution_turn() -> None:
     assert running.step_states[0]["status"] == "in_progress"
     assert observed_statuses == ["running"]
 
+    if storage_busy:
+        storage._busy_budget_seconds = 0.02
+        original_settle = storage.settle_agent_task
+        blocked_once = False
+
+        async def settle_with_busy_writer(task_id: str, **fields: Any) -> Any:
+            nonlocal gate_held, blocked_once
+            if not blocked_once:
+                await storage._operation_lock.acquire()
+                gate_held = blocked_once = True
+            return await original_settle(task_id, **fields)
+
+        monkeypatch.setattr(storage, "settle_agent_task", settle_with_busy_writer)
     release.set()
-    await rt.wait(handle.task_id, timeout=2.0)
+    try:
+        await rt.wait(handle.task_id, timeout=2.0)
+    finally:
+        if gate_held:
+            storage._operation_lock.release()
+            gate_held = False
+        await rt.shutdown(timeout=2)
     paused = await storage.get_plan_run(run.run_id)
     assert paused is not None
     assert paused.status == "paused"
     assert paused.active_task_id is None
-    assert terminal_plan_statuses == ["paused"]
+    assert terminal_plan_statuses == (["running"] if storage_busy else ["paused"])
     assert [
         payload["plan_run"]["status"]
         for _session, name, payload in events

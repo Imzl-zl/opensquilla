@@ -6473,9 +6473,10 @@ class TaskRuntime:
                     status=status,
                     terminal_update=terminal_update,
                 )
-            # Settle the plan before terminal observers can read its state or
-            # admit another implementation turn on this session.
-            await self._settle_attached_plan_run(task)
+            if terminal_persisted:
+                # Settle the plan before observers can admit another turn.
+                # A busy writer must still receive its fallback event first.
+                await self._settle_attached_plan_run(task)
             if terminal_persisted and promote_pending_steers:
                 # The terminal AgentTask row is now durable, but no public
                 # terminal/idle signal has escaped. Close every accepted steer
@@ -6602,6 +6603,7 @@ class TaskRuntime:
                     )
                     if not terminal_persisted:
                         self._schedule_terminal_retry(task, terminal_update)
+                    await self._settle_attached_plan_run(task)
             if (
                 status == AgentTaskStatus.SUCCEEDED
                 and terminal_reason == "completed"
