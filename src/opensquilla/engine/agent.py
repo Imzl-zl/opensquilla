@@ -1920,6 +1920,19 @@ def _provider_stream_deadline_timeout(
     return error
 
 
+def _terminal_physical_input_tokens(
+    provider_done: ProviderDoneEvent | None,
+    *,
+    fallback_input_tokens: int,
+) -> int:
+    """Keep terminal request size separate from composite billing totals."""
+
+    value = getattr(provider_done, "terminal_request_input_tokens", None)
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return fallback_input_tokens
+
+
 def _is_large_context_invalid_response(
     kind: _ProviderAttemptKind,
     *,
@@ -9182,6 +9195,10 @@ class Agent:
                         yield terminal_error
                         break
                     if not _got_error and attempt_classification.kind != _ProviderAttemptKind.OK:
+                        terminal_request_input_tokens = _terminal_physical_input_tokens(
+                            provider_done_for_log,
+                            fallback_input_tokens=iter_input_tokens,
+                        )
                         logger.warning(
                             "provider.invalid_response",
                             session_key=self._session_key,
@@ -9195,13 +9212,14 @@ class Agent:
                             got_done_event=_got_done_event,
                             stop_reason=stop_reason,
                             iter_input_tokens=iter_input_tokens,
+                            terminal_request_input_tokens=terminal_request_input_tokens,
                             iter_output_tokens=iter_output_tokens,
                             iter_reasoning_tokens=iter_reasoning_tokens,
                             reasoning_chars=len(iter_reasoning_content or ""),
                         )
                         large_context_invalid = _is_large_context_invalid_response(
                             attempt_classification.kind,
-                            input_tokens=iter_input_tokens,
+                            input_tokens=terminal_request_input_tokens,
                         )
                         supports_reasoning_replay = supports_reasoning_prefill_replay(
                             model_capabilities=self.config.model_capabilities,

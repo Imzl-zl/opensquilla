@@ -1179,6 +1179,131 @@ async def test_clean_empty_done_retries_once_then_errors() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terminal_input_tokens", "expect_retry"),
+    [
+        pytest.param(10_000, True, id="small-final-request"),
+        pytest.param(0, True, id="zero-final-request"),
+        pytest.param(35_000, False, id="large-final-request"),
+        pytest.param(None, False, id="legacy-usage-only"),
+        pytest.param(-1, False, id="invalid-negative"),
+        pytest.param(True, False, id="invalid-boolean"),
+        pytest.param("10000", False, id="invalid-string"),
+    ],
+)
+async def test_terminal_request_input_controls_empty_recovery_without_changing_usage(
+    terminal_input_tokens: Any,
+    expect_retry: bool,
+) -> None:
+    provider = _SequenceProvider(
+        [
+            [
+                ProviderDone(
+                    stop_reason="stop",
+                    input_tokens=40_000,
+                    terminal_request_input_tokens=terminal_input_tokens,
+                )
+            ],
+            [
+                ProviderText(text="recovered answer"),
+                ProviderDone(stop_reason="stop", input_tokens=10_000, output_tokens=2),
+            ],
+        ]
+    )
+    tracker = UsageTracker()
+    session_key = "agent:main:synthetic-terminal-input"
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            max_provider_retries=1,
+            retry_base_backoff_ms=0,
+            retry_max_backoff_ms=0,
+        ),
+        usage_tracker=tracker,
+        session_key=session_key,
+    )
+
+    events = [event async for event in agent.run_turn("hello")]
+
+    assert len(provider.calls) == (2 if expect_retry else 1)
+    assert any(
+        event.kind == "warning" and event.code == "provider_empty_retry" for event in events
+    ) is expect_retry
+    done = next(event for event in events if event.kind == "done")
+    if expect_retry:
+        assert done.text == "recovered answer"
+        assert not any(event.kind == "error" for event in events)
+    else:
+        error = next(event for event in events if event.kind == "error")
+        assert error.code == "empty_response"
+        assert "large input" in error.message
+    expected_input_tokens = 50_000 if expect_retry else 40_000
+    assert done.input_tokens == expected_input_tokens
+    usage = tracker.get(session_key)
+    assert usage is not None
+    assert usage.input_tokens == expected_input_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("terminal_input_tokens", "expect_fallback"),
+    [(10_000, False), (35_000, True)],
+    ids=["small-final-request", "large-final-request"],
+)
+async def test_terminal_request_input_controls_reasoning_length_fallback_order(
+    terminal_input_tokens: int,
+    expect_fallback: bool,
+) -> None:
+    provider = _FallbackSequenceProvider(
+        [
+            [
+                ProviderDone(
+                    stop_reason="length",
+                    input_tokens=40_000,
+                    output_tokens=1024,
+                    reasoning_tokens=1024,
+                    reasoning_content="synthetic reasoning",
+                    terminal_request_input_tokens=terminal_input_tokens,
+                )
+            ],
+            [
+                ProviderText(text="visible answer"),
+                ProviderDone(stop_reason="stop", input_tokens=10_000, output_tokens=2),
+            ],
+        ]
+    )
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            thinking=ThinkingLevel.MEDIUM,
+            max_provider_retries=1,
+            retry_base_backoff_ms=0,
+            retry_max_backoff_ms=0,
+        ),
+    )
+
+    events = [event async for event in agent.run_turn("hello")]
+
+    assert len(provider.calls) == 2
+    assert provider.fallback_reasons == (["reasoning_only"] if expect_fallback else [])
+    assert any(
+        event.kind == "warning" and event.code == "provider_large_context_fallback"
+        for event in events
+    ) is expect_fallback
+    assert any(
+        event.kind == "warning" and event.code == "provider_reasoning_only_retry"
+        for event in events
+    ) is not expect_fallback
+    assert all(call["config"].thinking is True for call in provider.calls)
+    assert not any(event.kind == "error" for event in events)
+    done = next(event for event in events if event.kind == "done")
+    assert done.text == "visible answer"
+    assert done.input_tokens == 50_000
+    assert done.output_tokens == 1026
+    assert done.reasoning_tokens == 1024
+
+
+@pytest.mark.asyncio
 async def test_clean_empty_done_can_switch_to_selector_fallback() -> None:
     provider = _FallbackSequenceProvider(
         [

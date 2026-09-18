@@ -103,6 +103,296 @@ def _read_zip(path: Path) -> dict[str, bytes]:
         return {name: archive.read(name) for name in archive.namelist()}
 
 
+@pytest.mark.parametrize("include_content", [False, True])
+def test_all_json_artifacts_parse_and_preserve_metadata(tmp_path, include_content) -> None:
+    home, log_dir = _make_home(tmp_path)
+    metadata = {
+        "requiresApiKey": True,
+        "REQUIRESAPIKEY": False,
+        "requires_api_key": False,
+        "apiKeyConfigured": False,
+        "apiKeyEnv": "SYNTHETIC_API_KEY",
+        "tokenCount": 17,
+        "retryAfter": 1.25,
+        "optional": None,
+        "session_key": "agent:synthetic",
+    }
+    secrets = {
+        "apiKey": 'dummy "quoted" \\ credential',
+        "ACCESS_TOKEN": 12345,
+        "clientSecret": {"value": "synthetic credential"},
+        "password": ["synthetic credential", False],
+    }
+    payload = {"providers": [{**metadata, **secrets}], "states": [True, False, 3, None]}
+    before = json.dumps(payload)
+    day = datetime.now(UTC).strftime("%Y%m%d")
+    (log_dir / f"turn-calls-{day}.jsonl").write_text(json.dumps(payload) + "\n")
+    dest = tmp_path / "bundle.zip"
+
+    result = collect_bundle(
+        dest, home_dir=home, log_dir=log_dir, include_content=include_content,
+        extra={"doctor": payload},
+    )
+
+    entries = _read_zip(dest)
+    assert {"doctor.json", "live/doctor.json", "config.redacted.json"} <= entries.keys()
+    for name, data in entries.items():
+        if name.endswith(".json"):
+            json.loads(data)
+        elif name.endswith(".jsonl"):
+            for line in data.splitlines():
+                json.loads(line)
+    live = json.loads(entries["live/doctor.json"])
+    assert live["states"] == payload["states"]
+    assert live["providers"][0] == {**metadata, **dict.fromkeys(secrets, "[redacted]")}
+    if include_content:
+        assert json.loads(entries[f"content/turn-calls-{day}.jsonl"]) == live
+    assert result.manifest == json.loads(entries["manifest.json"])
+    assert not result.manifest["collection_errors"]
+    assert json.dumps(payload) == before
+
+
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")])
+def test_invalid_json_values_are_omitted_with_actionable_errors(tmp_path, bad_value) -> None:
+    home, log_dir = _make_home(tmp_path)
+    dest = tmp_path / "bundle.zip"
+    result = collect_bundle(
+        dest, home_dir=home, log_dir=log_dir, extra={"invalid": {"value": bad_value}},
+    )
+    entries = _read_zip(dest)
+    assert "live/invalid.json" not in entries
+    errors = result.manifest["collection_errors"]
+    assert any(error["artifact"] == "live/invalid.json" and "JSON" in error["error"]
+               for error in errors)
+
+
+def test_invalid_serialized_json_is_never_written(tmp_path, monkeypatch) -> None:
+    from opensquilla.observability import bundle
+
+    home, log_dir = _make_home(tmp_path)
+    original_dumps = json.dumps
+
+    def corrupt_encoder(value, **kwargs):
+        if value == {"synthetic_fault": True}:
+            return '{"synthetic_fault": invalid}'
+        return original_dumps(value, **kwargs)
+
+    monkeypatch.setattr(bundle.json, "dumps", corrupt_encoder)
+    dest = tmp_path / "bundle.zip"
+    result = collect_bundle(
+        dest, home_dir=home, log_dir=log_dir, extra={"invalid": {"synthetic_fault": True}},
+    )
+    assert "live/invalid.json" not in _read_zip(dest)
+    assert any(error["artifact"] == "live/invalid.json" and "JSON" in error["error"]
+               for error in result.manifest["collection_errors"])
+
+
+def test_malformed_content_jsonl_is_omitted_with_line_error(tmp_path) -> None:
+    home, log_dir = _make_home(tmp_path)
+    day = datetime.now(UTC).strftime("%Y%m%d")
+    name = f"turn-calls-{day}.jsonl"
+    (log_dir / name).write_text('{"kind":"llm_request"}\n{"password":"synthetic',
+                                encoding="utf-8")
+    dest = tmp_path / "bundle.zip"
+    result = collect_bundle(dest, home_dir=home, log_dir=log_dir, include_content=True)
+    assert f"content/{name}" not in _read_zip(dest)
+    error = next(e for e in result.manifest["collection_errors"]
+                 if e["artifact"] == f"content/{name}")
+    assert "JSON" in error["error"] and "line 2" in error["error"]
+    assert "synthetic" not in error["error"]
+
+
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_content_jsonl_preserves_unicode_inside_string_values(tmp_path, separator, newline) -> None:
+    from opensquilla.observability.turn_call_log import TurnCallLogger
+
+    home, log_dir = _make_home(tmp_path)
+    logger = TurnCallLogger(
+        turn_id="synthetic-turn", session_key="agent:synthetic", agent_id="synthetic",
+        provider="synthetic", model="synthetic", log_dir=log_dir,
+    )
+    message = f"synthetic{separator}message"
+    path = logger.write("llm_request", {"message": message, "api_key": "dummy credential"})
+    assert path is not None
+    path.write_bytes(path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", newline.encode()))
+    dest = tmp_path / "bundle.zip"
+
+    result = collect_bundle(dest, home_dir=home, log_dir=log_dir, include_content=True)
+
+    entry_name = f"content/{path.name}"
+    assert not result.manifest["collection_errors"]
+    data = _read_zip(dest)[entry_name]
+    records = [json.loads(line) for line in data.split(b"\n") if line]
+    assert len(records) == 2
+    assert records[1]["payload"] == {"message": message, "api_key": "[redacted]"}
+
+
+@pytest.mark.parametrize("suffix", ["", "\n", "\r\n"])
+def test_jsonl_write_validation_uses_lf_record_boundaries(tmp_path, suffix) -> None:
+    from opensquilla.observability.bundle import _write_entry
+
+    text = json.dumps(
+        {"message": "synthetic\u0085\u2028\u2029message"}, ensure_ascii=False,
+    ) + suffix
+    dest = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(dest, "w") as archive:
+        _write_entry(archive, "content/synthetic.jsonl", text)
+    assert _read_zip(dest)["content/synthetic.jsonl"].decode("utf-8") == text
+
+
+@pytest.mark.parametrize("text", ['{}\n\n', '{}\n\n{}', '{}\r{}'])
+def test_invalid_jsonl_record_boundaries_still_fail(tmp_path, text) -> None:
+    from opensquilla.observability.bundle import _write_entry
+
+    with zipfile.ZipFile(tmp_path / "bundle.zip", "w") as archive:
+        with pytest.raises(ValueError, match="Invalid JSONL"):
+            _write_entry(archive, "content/synthetic.jsonl", text)
+        assert not archive.namelist()
+
+
+def test_offline_doctor_uses_the_structured_json_boundary(tmp_path, monkeypatch) -> None:
+    payload = {"checks": [{"requiresApiKey": True, "apiKey": "synthetic credential"}]}
+    monkeypatch.setattr(
+        "opensquilla.diagnostics_sources.offline_doctor_report", lambda *args, **kwargs: payload,
+    )
+    home, log_dir = _make_home(tmp_path)
+    dest = tmp_path / "bundle.zip"
+    collect_bundle(dest, home_dir=home, log_dir=log_dir)
+    assert json.loads(_read_zip(dest)["doctor.json"]) == {
+        "checks": [{"requiresApiKey": True, "apiKey": "[redacted]"}],
+    }
+
+
+def test_config_secret_and_metadata_fields_use_bundle_policy(tmp_path, _hermetic_config) -> None:
+    _hermetic_config.write_text(
+        '[synthetic]\nrequires_api_key = true\napi_key_env = "SYNTHETIC_API_KEY"\n'
+        'api_key = "dummy credential"\nencrypt_key = "dummy channel credential"\n',
+        encoding="utf-8",
+    )
+    home, log_dir = _make_home(tmp_path)
+    dest = tmp_path / "bundle.zip"
+    collect_bundle(dest, home_dir=home, log_dir=log_dir)
+    assert json.loads(_read_zip(dest)["config.redacted.json"]) == {"synthetic": {
+        "requires_api_key": True,
+        "api_key_env": "SYNTHETIC_API_KEY",
+        "api_key": "[redacted]",
+        "encrypt_key": "[redacted]",
+    }}
+
+
+def test_bundle_masks_custom_header_and_cli_credentials(tmp_path, _hermetic_config) -> None:
+    _hermetic_config.write_text(
+        '[memory.embedding.remote.headers]\n'
+        '"X.Provider-Token" = "synthetic-header-credential"\n'
+        '"定制_api_key" = "synthetic-unicode-credential"\n'
+        '"apiKeyEnv" = "SYNTHETIC_API_KEY"\n',
+        encoding="utf-8",
+    )
+    home, log_dir = _make_home(tmp_path)
+    dest = tmp_path / "bundle.zip"
+    result = collect_bundle(
+        dest, home_dir=home, log_dir=log_dir,
+        extra={"diagnostics": {
+            "headers": {"Vendor.Key-Api-Key": "synthetic-live-credential"},
+            "message": 'helper --api-key="synthetic-command-credential"',
+            "requiresApiKey": True,
+        }},
+    )
+    entries = _read_zip(dest)
+    assert not result.manifest["collection_errors"]
+    assert json.loads(entries["config.redacted.json"])["memory"]["embedding"]["remote"] == {
+        "headers": {
+            "X.Provider-Token": "[redacted]",
+            "定制_api_key": "[redacted]",
+            "apiKeyEnv": "SYNTHETIC_API_KEY",
+        },
+    }
+    assert json.loads(entries["live/diagnostics.json"]) == {
+        "headers": {"Vendor.Key-Api-Key": "[redacted]"},
+        "message": 'helper --api-key="[redacted]"',
+        "requiresApiKey": True,
+    }
+    assert b"-credential" not in b"".join(entries.values())
+
+
+@pytest.mark.parametrize("header", [
+    "X-AuthToken", "x-authtoken", "X-AUTHTOKEN", "x-accesstoken", "X-ACCESSTOKEN",
+    "X-CSRFToken", "x-csrftoken", "X-CSRFTOKEN",
+    "X-SecurityToken", "x-securitytoken", "X-SECURITYTOKEN",
+    "X-ProviderApiKey", "x-providerapikey", "X-PROVIDERAPIKEY",
+    "X.hasH_token", "X.IsLandToken",
+    "X!Password", "X$Token", "X+ApiKey", "X%ClientSecret", "X'Authorization",
+    "X`PrivateKey", "X|CSRFToken",
+    "x!csrftoken", "x|securitytoken", "x+providerapikey", "x&securitytoken",
+    "x'providerapikey",
+])
+def test_bundle_masks_compound_credentials_with_case_insensitive_headers(
+    tmp_path, _hermetic_config, header,
+) -> None:
+    _hermetic_config.write_text(
+        '[memory.embedding.remote.headers]\n'
+        f'"{header}" = "synthetic-opaque-credential"\n',
+        encoding="utf-8",
+    )
+    home, log_dir = _make_home(tmp_path)
+    dest = tmp_path / "bundle.zip"
+    result = collect_bundle(
+        dest, home_dir=home, log_dir=log_dir,
+        extra={
+            "headers": {header: "synthetic-opaque-credential"},
+            "details": {"message": f"{header}: synthetic-opaque-credential"},
+        },
+    )
+    entries = _read_zip(dest)
+    assert not result.manifest["collection_errors"]
+    assert json.loads(entries["config.redacted.json"])["memory"]["embedding"]["remote"] == {
+        "headers": {header: "[redacted]"},
+    }
+    assert json.loads(entries["live/headers.json"]) == {header: "[redacted]"}
+    assert json.loads(entries["live/details.json"]) == {"message": f"{header}: [redacted]"}
+    assert b"synthetic-opaque-credential" not in b"".join(entries.values())
+
+
+def test_manifest_encoding_failure_fails_the_bundle(tmp_path, monkeypatch) -> None:
+    from opensquilla.observability import bundle
+
+    home, log_dir = _make_home(tmp_path)
+    original_dumps = json.dumps
+
+    def corrupt_manifest(value, **kwargs):
+        if isinstance(value, dict) and "bundle_schema" in value:
+            return '{"bundle_schema": invalid}'
+        return original_dumps(value, **kwargs)
+
+    monkeypatch.setattr(bundle.json, "dumps", corrupt_manifest)
+    dest = tmp_path / "bundle.zip"
+    with pytest.raises(ValueError, match="Invalid JSON"):
+        collect_bundle(dest, home_dir=home, log_dir=log_dir)
+    assert "manifest.json" not in _read_zip(dest)
+
+
+@pytest.mark.parametrize("folder", ["content", "decisions"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_capped_jsonl_has_parseable_truncation_record(tmp_path, folder, newline) -> None:
+    from opensquilla.observability.bundle import _add_tail
+
+    source = tmp_path / "synthetic.jsonl"
+    tail = json.dumps({"kind": "llm_request", "apiKey": "dummy credential"}) + newline
+    source.write_bytes((json.dumps({"password": "x" * 256}) + newline + tail).encode())
+    dest = tmp_path / "bundle.zip"
+    truncations = []
+    entry = f"{folder}/synthetic.jsonl"
+    with zipfile.ZipFile(dest, "w") as archive:
+        _add_tail(archive, entry, source, truncations, cap=len(tail.encode()) + 8)
+    data = _read_zip(dest)[entry]
+    records = [json.loads(line) for line in data.splitlines()]
+    assert records[0]["truncated"] is True
+    assert records[1]["kind"] == "llm_request"
+    assert b"dummy credential" not in data
+    assert truncations[0]["entry"] == entry
+
+
 def test_default_bundle_contents_and_redaction(tmp_path) -> None:
     home, log_dir = _make_home(tmp_path)
     active = home / "state/toolchains/v1/active"
@@ -210,8 +500,12 @@ def test_tail_cap_truncates_large_files(tmp_path) -> None:
     assert any("gateway.log" in str(item) for item in manifest["truncations"])
 
 
+@pytest.mark.parametrize("old_config", [
+    OUTDATED_TOML,
+    '[control_ui]\nfrontend = "legacy"\n',
+])
 def test_doctor_collection_never_rewrites_outdated_config(
-    tmp_path, _hermetic_config: Path
+    tmp_path, _hermetic_config: Path, old_config: str,
 ) -> None:
     """collect_bundle must be byte-identical read-only, even on an outdated config.
 
@@ -220,7 +514,7 @@ def test_doctor_collection_never_rewrites_outdated_config(
     user's real file.
     """
     config_path = _hermetic_config
-    config_path.write_text(OUTDATED_TOML, encoding="utf-8")
+    config_path.write_text(old_config, encoding="utf-8")
     before = hashlib.sha256(config_path.read_bytes()).hexdigest()
     home, log_dir = _make_home(tmp_path)
     dest = tmp_path / "bundle.zip"
@@ -231,7 +525,8 @@ def test_doctor_collection_never_rewrites_outdated_config(
     assert not list(config_path.parent.glob(f"{config_path.name}.backup*"))
     # The doctor artifact itself is still collected (from a throwaway copy).
     entries = _read_zip(dest)
-    assert "doctor.json" in entries
+    assert isinstance(json.loads(entries["doctor.json"]), dict)
+    assert json.loads(entries["manifest.json"])["bundle_schema"] == 1
 
 
 def test_tail_truncation_never_bisects_a_secret_line(tmp_path) -> None:

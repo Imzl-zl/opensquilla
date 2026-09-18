@@ -228,7 +228,7 @@ def test_bundle_reprojects_legacy_rotation_desktop_and_error_rows(tmp_path, monk
     config = tmp_path / "config.toml"
     config.write_text("# synthetic config\n")
     monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(config))
-    monkeypatch.setattr("opensquilla.observability.bundle._collect_doctor", lambda: "{}")
+    monkeypatch.setattr("opensquilla.observability.bundle._collect_doctor", lambda: {})
     day = datetime.now(UTC).strftime("%Y%m%d")
     legacy = f"2026-01-01 01:02:03 [ERROR] opensquilla.provider: failed error='{PRIVATE}'\n"
     legacy += SYSTEM + "\n" + json.dumps({"body": FILE_BODY}) + "\n"

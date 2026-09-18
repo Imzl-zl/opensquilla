@@ -1233,8 +1233,10 @@ def _tokenrhythm_done(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_input_tokens", [None, 0, 75])
 async def test_tokenrhythm_b5_default_quorum_reconciles_five_physical_receipts(
     monkeypatch: pytest.MonkeyPatch,
+    terminal_input_tokens: int | None,
 ) -> None:
     proposer_models = ["p1", "p2", "p3", "p4"]
     registry = _FakeRegistry(
@@ -1249,7 +1251,13 @@ async def test_tokenrhythm_b5_default_quorum_reconciles_five_physical_receipts(
                 for index, model in enumerate(proposer_models, start=1)
             },
             "agg": _FakePlan(
-                [TextDeltaEvent(text="final"), _tokenrhythm_done("agg", scale=5)]
+                [
+                    TextDeltaEvent(text="final"),
+                    replace(
+                        _tokenrhythm_done("agg", scale=5),
+                        terminal_request_input_tokens=terminal_input_tokens,
+                    ),
+                ]
             ),
         }
     )
@@ -1300,6 +1308,10 @@ async def test_tokenrhythm_b5_default_quorum_reconciles_five_physical_receipts(
     assert all(receipt.currency == "CNY" for receipt in receipts)
     assert sum(receipt.amount_nanos or 0 for receipt in receipts) == 418_500
     assert done.input_tokens == 1_500
+    assert done.terminal_request_input_tokens == (
+        500 if terminal_input_tokens is None else terminal_input_tokens
+    )
+    assert sum(result.input_tokens for _, result in sink.finalized) == 1_500
     assert done.output_tokens == 150
     assert done.reasoning_tokens == 45
     assert done.cached_tokens == 300
@@ -1326,8 +1338,10 @@ async def test_tokenrhythm_b5_default_quorum_reconciles_five_physical_receipts(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_input_tokens", [None, 0, 75])
 async def test_tokenrhythm_b5_explicit_quorum_uses_fixed_fallback_when_unmet(
     monkeypatch: pytest.MonkeyPatch,
+    terminal_input_tokens: int | None,
 ) -> None:
     registry = _FakeRegistry(
         {
@@ -1361,7 +1375,10 @@ async def test_tokenrhythm_b5_explicit_quorum_uses_fixed_fallback_when_unmet(
 
             async def _stream() -> AsyncIterator[StreamEvent]:
                 yield TextDeltaEvent(text="fallback")
-                yield _tokenrhythm_done("fallback", scale=4)
+                yield replace(
+                    _tokenrhythm_done("fallback", scale=4),
+                    terminal_request_input_tokens=terminal_input_tokens,
+                )
 
             return _stream()
 
@@ -1425,6 +1442,10 @@ async def test_tokenrhythm_b5_explicit_quorum_uses_fixed_fallback_when_unmet(
     receipts = [row["billing_receipt"] for row in done.model_usage_breakdown]
     assert sum(receipt.amount_nanos or 0 for receipt in receipts) == 279_000
     assert done.input_tokens == 1_000
+    assert done.terminal_request_input_tokens == (
+        400 if terminal_input_tokens is None else terminal_input_tokens
+    )
+    assert sum(result.input_tokens for _, result in sink.finalized) == 1_000
     assert done.output_tokens == 100
     assert done.reasoning_tokens == 30
     assert done.cached_tokens == 200
@@ -5380,8 +5401,10 @@ async def test_unready_aggregator_errors_before_any_proposer_spend(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_input_tokens", [None, 0, 5])
 async def test_unready_aggregator_uses_fallback_without_burning_proposer_spend(
     monkeypatch: pytest.MonkeyPatch,
+    terminal_input_tokens: int | None,
 ) -> None:
     registry = _FakeRegistry(
         {
@@ -5408,7 +5431,12 @@ async def test_unready_aggregator_uses_fallback_without_burning_proposer_spend(
         ) -> AsyncIterator[StreamEvent]:
             async def _stream() -> AsyncIterator[StreamEvent]:
                 yield TextDeltaEvent(text="single")
-                yield DoneEvent(input_tokens=7, output_tokens=8, model="single")
+                yield DoneEvent(
+                    input_tokens=7,
+                    output_tokens=8,
+                    model="single",
+                    terminal_request_input_tokens=terminal_input_tokens,
+                )
 
             return _stream()
 
@@ -5432,12 +5460,21 @@ async def test_unready_aggregator_uses_fallback_without_burning_proposer_spend(
         shuffle_candidates=False,
     )
 
-    events = await _collect(provider)
+    sink = _RecordingUsageSink()
+    with bind_usage_accounting_scope(_usage_scope(sink)):
+        events = await _collect(provider)
 
     assert registry.calls == []
     assert not any(isinstance(event, ErrorEvent) for event in events)
     done = next(event for event in events if isinstance(event, DoneEvent))
     assert done.model_usage_breakdown[-1]["role"] == "fixed_direct"
+    assert (done.input_tokens, done.output_tokens) == (7, 8)
+    assert done.terminal_request_input_tokens == (
+        7 if terminal_input_tokens is None else terminal_input_tokens
+    )
+    assert len(sink.started) == len(sink.finalized) == 1
+    assert sink.finalized[0][1].input_tokens == 7
+    assert sink.unknown == []
     assert done.ensemble_trace is not None
     assert done.ensemble_trace["fallback_used"] is True
     assert "aggregator deployment is not ready" in done.ensemble_trace["fallback_reason"]
@@ -5592,7 +5629,7 @@ def _aggregator_done_with_receipt(
 async def test_aggregator_transient_error_is_retried_in_place(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, call_count = _flaky_aggregator_harness(
+    registry, call_count = _flaky_aggregator_harness(
         monkeypatch,
         [
             [ErrorEvent(message="upstream rate limit", code="429")],
@@ -5602,8 +5639,11 @@ async def test_aggregator_transient_error_is_retried_in_place(
             ],
         ],
     )
+    registry.plans["p1"].events[-1] = DoneEvent(input_tokens=30_000, model="p1")
 
-    events = await _collect(_retry_test_provider())
+    sink = _RecordingUsageSink()
+    with bind_usage_accounting_scope(_usage_scope(sink)):
+        events = await _collect(_retry_test_provider())
 
     assert call_count[0] == 2
     assert not any(isinstance(event, ErrorEvent) for event in events)
@@ -5616,6 +5656,13 @@ async def test_aggregator_transient_error_is_retried_in_place(
     assert len(retry_beats) == 1
     done = next(event for event in events if isinstance(event, DoneEvent))
     assert done.model_usage_breakdown[-1]["role"] == "aggregator"
+    assert done.terminal_request_input_tokens == 2
+    assert (done.input_tokens, done.output_tokens) == (30_002, 3)
+    assert [result.input_tokens for _, result in sink.finalized] == [30_000, 2]
+    assert len(sink.started) == 3
+    assert [(call.model, reason) for call, reason in sink.unknown] == [
+        ("agg", "provider_error:429")
+    ]
     # The failed first attempt started a request that produced no receipt.
     assert done.usage_missing_count == 1
     assert done.ensemble_trace is not None
@@ -6682,15 +6729,24 @@ async def test_aggregator_error_finish_fallback_retains_reported_usage_without_r
         aggregator_stream=reported_error_then_stall,
         fallback_stream=successful_fallback,
         proposer_done=DoneEvent(input_tokens=7, output_tokens=3, model="p1"),
+        # Exercise the error-finish path with the normal request budget so
+        # asynchronous usage receipts can commit before Done is forwarded.
+        timeout_seconds=3600.0,
     )
 
-    events = await _collect(provider)
+    sink = _RecordingUsageSink()
+    with bind_usage_accounting_scope(_usage_scope(sink)):
+        events = await _collect(provider)
 
     assert aggregator_attempts == 1
     assert len(aggregator.calls) == 1
     assert fallback is not None and len(fallback.calls) == 1
     done = next(event for event in events if isinstance(event, DoneEvent))
     assert (done.input_tokens, done.output_tokens) == (31, 9)
+    assert done.terminal_request_input_tokens == 11
+    assert [result.input_tokens for _, result in sink.finalized] == [7, 13, 11]
+    assert len(sink.started) == 3
+    assert sink.unknown == []
     assert [row["role"] for row in done.model_usage_breakdown] == [
         "proposer",
         "aggregator",
@@ -6702,6 +6758,7 @@ async def test_aggregator_error_finish_fallback_retains_reported_usage_without_r
     assert retry_row["usage_reported"] is True
     assert done.usage_missing_count == 0
     assert done.ensemble_trace is not None
+    assert done.ensemble_trace["fallback_code"] == "ensemble_aggregator_error_finish_reason"
     assert done.ensemble_trace["llm_request_count"] == 3
     assert done.ensemble_trace["primary_request"].get("retry_count", 0) == 0
 
