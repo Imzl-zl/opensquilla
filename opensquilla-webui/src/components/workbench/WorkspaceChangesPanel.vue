@@ -1032,10 +1032,10 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 
 <style scoped>
 .wb-changes {
-  /* One reserved column for row and section actions, two icons wide, so
-     revealing them moves nothing: neither the counts beside them nor the paths
-     above them. Two slots are reserved even where a section offers one action,
-     so every count in the panel sits on the same right edge. */
+  /* One reserved column for the row actions, two icons wide, so revealing them
+     moves neither the counts beside them nor the paths before them. Rows only:
+     a section header keeps its count next to its own title, so its actions can
+     appear without anything else moving. */
   --wb-changes-action-slot: calc(2 * 1.375rem + var(--sp-1));
   display: flex;
   flex-direction: column;
@@ -1137,15 +1137,13 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 }
 
 /* Section actions are quiet until the header is pointed at or focused, the way
-   a source-control list keeps its headers readable. They sit in the same
-   reserved column the row actions use, so a section's count does not move when
-   its actions appear. */
+   a source-control list keeps its headers readable. They take the trailing edge
+   on appearance; the title and its count stay where they were. */
 .wb-changes__group-actions {
   display: flex;
   flex: none;
-  width: var(--wb-changes-action-slot);
-  justify-content: flex-end;
   gap: 0.125rem;
+  margin-inline-start: auto;
   opacity: 0;
   transition: opacity var(--dur-fast);
 }
@@ -1318,10 +1316,10 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   white-space: nowrap;
 }
 
-/* A count, not a control: plain secondary text, the way the sidebar states its
-   own totals, so nothing in the header reads as a button it is not. */
+/* A count, not a control: plain secondary text immediately after the title, the
+   way a source-control section reads ("Changes 3"). Right-aligning it left a
+   void between the two, which read as a missing column rather than a count. */
 .wb-changes__group-count {
-  margin-left: auto;
   flex: none;
   color: var(--text-muted);
   font-weight: 500;
