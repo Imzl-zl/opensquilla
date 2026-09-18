@@ -50,14 +50,17 @@ describe('App workbench dock toggle contract', () => {
     expect(body).toContain('workbenchStore.setExpanded(!workbenchStore.expanded)')
   })
 
-  it('only guesses a project when exactly one exists', () => {
+  it('reviews only the project the current task is on', () => {
     const start = appSource.indexOf('const reviewableProject = computed')
     const end = appSource.indexOf('function toggleWorkbench()', start)
     const body = appSource.slice(start, end)
 
+    // The selected project, and nothing else: falling back to the single
+    // registered project opened a review nobody had asked for.
     expect(body).toContain('activeProjectDraftId.value')
-    expect(body).toContain('projects.length === 1')
     expect(body).toContain('return null')
+    expect(body).not.toContain('projects.length === 1')
+    expect(body).not.toContain('projectWorkspaces.workspaces.value')
   })
 
   it('binds the toggle-workbench shortcut to the same function', () => {

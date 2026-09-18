@@ -1032,6 +1032,11 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 
 <style scoped>
 .wb-changes {
+  /* One reserved column for row and section actions, two icons wide, so
+     revealing them moves nothing: neither the counts beside them nor the paths
+     above them. Two slots are reserved even where a section offers one action,
+     so every count in the panel sits on the same right edge. */
+  --wb-changes-action-slot: calc(2 * 1.375rem + var(--sp-1));
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
@@ -1132,12 +1137,15 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 }
 
 /* Section actions are quiet until the header is pointed at or focused, the way
-   a source-control list keeps its headers readable. */
+   a source-control list keeps its headers readable. They sit in the same
+   reserved column the row actions use, so a section's count does not move when
+   its actions appear. */
 .wb-changes__group-actions {
   display: flex;
   flex: none;
-  gap: var(--sp-1);
-  margin-inline-start: var(--sp-1);
+  width: var(--wb-changes-action-slot);
+  justify-content: flex-end;
+  gap: 0.125rem;
   opacity: 0;
   transition: opacity var(--dur-fast);
 }
@@ -1321,8 +1329,8 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 
 .wb-changes__row {
   display: flex;
-  position: relative;
   align-items: center;
+  padding-inline-end: 0.5rem;
   border-left: 2px solid transparent;
 }
 
@@ -1341,7 +1349,7 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   align-items: center;
   min-width: 0;
   flex: 1;
-  padding: 0.25rem 0.5rem;
+  padding: 0.25rem 0.25rem 0.25rem 0.5rem;
   color: var(--text);
   font: inherit;
   text-align: left;
@@ -1350,20 +1358,18 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   cursor: pointer;
 }
 
-/* The actions share the row's trailing column with the line counts: at rest the
-   column shows the numbers, and on hover or selection the actions take their
-   place. They are drawn in the same column rather than taking layout space,
-   because reserving it measured as 79 of 91 rows wrapping to a second line in a
-   narrow dock. Opaque and on the row's own background, so the swap is clean. */
+/* The actions live in their own reserved column to the right of the line
+   counts: nothing is covered and nothing shifts, which is the only way to have
+   both. The column is reserved rather than filled on demand, and rows never
+   wrap, so revealing it cannot change a row's height either. */
 .wb-changes__row-actions {
   display: flex;
-  position: absolute;
-  top: 50%;
-  /* Matches the row's own trailing padding, which is where the counts end. */
-  right: 0.5rem;
-  transform: translateY(-50%);
+  flex: none;
+  width: var(--wb-changes-action-slot);
+  justify-content: flex-end;
   gap: 0.125rem;
   opacity: 0;
+  transition: opacity var(--dur-fast);
 }
 
 .wb-changes__row-action {
@@ -1451,11 +1457,7 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   margin-left: auto;
 }
 
-.wb-changes__row:hover .wb-changes__row-status,
-.wb-changes__row:focus-within .wb-changes__row-status,
-.wb-changes__row.is-selected .wb-changes__row-status {
-  visibility: hidden;
-}
+
 
 .wb-changes__stats {
   display: flex;
@@ -1514,33 +1516,10 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
    and the patch body. A path long enough to need wrapping is long in whichever
    column shows it, and a header that truncates what the body wraps is one more
    inconsistency to decode. */
-.wb-changes.is-wrapped .wb-changes__row,
-.wb-changes.is-wrapped .wb-changes__entry {
-  align-items: flex-start;
-}
-
-.wb-changes.is-wrapped .wb-changes__path {
-  overflow: visible;
-  flex-wrap: wrap;
-  white-space: normal;
-}
-
-/* min-width has to be released with overflow: the automatic minimum size of a
-   flex item is its content unless it clips, which would push the row wide
-   instead of breaking it. */
-.wb-changes.is-wrapped .wb-changes__path-dir {
-  overflow: visible;
-  min-width: 0;
-  text-overflow: clip;
-  overflow-wrap: anywhere;
-}
-
-.wb-changes.is-wrapped .wb-changes__path-base {
-  min-width: 0;
-  flex: 0 1 auto;
-  overflow-wrap: anywhere;
-}
-
+/* A list row is one line, always: a wrapped path would change the row's height
+   and with it the reserved action column's alignment. The name truncates
+   instead, which is what a source-control list does. Wrapping belongs to the
+   patch, where a long line has nowhere else to go. */
 .wb-changes.is-wrapped .wb-changes__diff-path {
   overflow: visible;
   text-overflow: clip;

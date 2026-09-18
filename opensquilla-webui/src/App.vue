@@ -813,19 +813,20 @@ const workbenchToggleTitle = computed(() => {
   return workbenchToggleHint.value ? `${label} (${workbenchToggleHint.value})` : label
 })
 
-/** The project the dock should review when it has nothing open yet. */
+/**
+ * The project the dock should review when it has nothing open yet.
+ *
+ * Only the project the current task is actually on. An earlier version fell
+ * back to the single registered project, which meant an empty task could open
+ * a review of a repository nobody had selected: with nothing chosen, the dock
+ * says so instead of answering a question the operator did not ask.
+ */
 const reviewableProject = computed(() => {
   const selected = activeProjectDraftId.value
-  if (selected) {
-    const workspace = projectWorkspaces.byId.value.get(selected)
-    if (workspace) return { workspaceId: workspace.id, workspaceName: workspace.name }
-  }
-  const projects = projectWorkspaces.workspaces.value
-  // An unambiguous single project is safe to open; several are not guessed.
-  if (projects.length === 1) {
-    return { workspaceId: projects[0].id, workspaceName: projects[0].name }
-  }
-  return null
+  if (!selected) return null
+  const workspace = projectWorkspaces.byId.value.get(selected)
+  if (!workspace) return null
+  return { workspaceId: workspace.id, workspaceName: workspace.name }
 })
 
 function toggleWorkbench() {

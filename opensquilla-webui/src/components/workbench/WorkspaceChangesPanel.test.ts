@@ -498,7 +498,7 @@ describe('WorkspaceChangesPanel', () => {
     mounted.unmount()
   })
 
-  it('keeps the trailing column to one cluster so actions can replace it', async () => {
+  it('gives the row actions their own column beside the counts', async () => {
     const mounted = mountPanel(reader({
       readChanges: vi.fn(async () => changes({
         entries: [entry({ path: 'src/a.ts', addedLines: 5, removedLines: 2 })],
@@ -507,12 +507,14 @@ describe('WorkspaceChangesPanel', () => {
     await settle()
 
     const row = mounted.element.querySelector('.wb-changes__row')
-    // The counts and the state chip belong to one cluster, and the actions are
-    // theirs to swap with: drawing them over the counts is what left the row
-    // unreadable on hover.
+    // Counts and state chip sit in one cluster, and the actions have a column of
+    // their own beside it: covering the counts and swapping them both moved
+    // something the reader was looking at.
     const status = row?.querySelector('.wb-changes__row-status')
+    const actions = row?.querySelector('.wb-changes__row-actions')
     expect(status?.querySelector('.wb-changes__stats')).not.toBeNull()
-    expect(row?.querySelector('.wb-changes__row-actions')).not.toBeNull()
+    expect(actions).not.toBeNull()
+    expect(status?.contains(actions ?? null)).toBe(false)
     expect(status?.querySelector('[data-testid="changes-index-action"]')).toBeNull()
     mounted.unmount()
   })
