@@ -1187,24 +1187,38 @@ class DashboardQueries:
     ) -> dict[str, Any]:
         if id_column not in {"acquisition_id", "device_id"}:
             raise ValueError("unsupported funnel identifier")
-        identity_expression = _DEVICE_ID_SQL if id_column == "device_id" else id_column
-        candidate_identity = (
-            _DEVICE_ID_SQL.replace("payload_json", "candidate.payload_json")
-            if id_column == "device_id" else f"candidate.{id_column}"
-        )
         if not stages:
             raise ValueError("funnel requires stages")
 
         ctes: list[str] = []
         params: list[Any] = []
+        event_table = "events"
+        if id_column == "device_id":
+            # Materialize the validated identity once so SQLite can index the
+            # stage joins by device instead of rescanning every event per device.
+            # Keep all dates: cohort membership uses the first-ever completion.
+            event_names = tuple(dict.fromkeys(stage.event_name for stage in stages))
+            placeholders = ",".join("?" for _ in event_names)
+            ctes.append(
+                f"""
+                device_events AS MATERIALIZED (
+                    SELECT event_name, occurred_at_utc, outcome,
+                           {_DEVICE_ID_SQL} AS device_id
+                    FROM events
+                    WHERE event_name IN ({placeholders})
+                )
+                """
+            )
+            params.extend(event_names)
+            event_table = "device_events"
         first = stages[0]
         first_outcome = "AND outcome = ?" if first.outcome is not None else ""
         ctes.append(
             f"""
             first_stage AS (
-                SELECT {identity_expression} AS journey_key, MIN(occurred_at_utc) AS reached_at
-                FROM events
-                WHERE ({identity_expression}) IS NOT NULL
+                SELECT {id_column} AS journey_key, MIN(occurred_at_utc) AS reached_at
+                FROM {event_table}
+                WHERE {id_column} IS NOT NULL
                   AND event_name = ?
                   {first_outcome}
                 GROUP BY journey_key
@@ -1246,8 +1260,8 @@ class DashboardQueries:
                         prior.journey_key,
                         MIN({reached_at}) AS reached_at
                     FROM stage_{previous} AS prior
-                    LEFT JOIN events AS candidate
-                      ON ({candidate_identity}) = prior.journey_key
+                    LEFT JOIN {event_table} AS candidate
+                      ON candidate.{id_column} = prior.journey_key
                      AND prior.reached_at IS NOT NULL
                      AND candidate.event_name = ?
                      {outcome_clause}

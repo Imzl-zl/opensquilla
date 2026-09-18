@@ -14,6 +14,7 @@ from opensquilla.telemetry.consent import TelemetryScope
 from opensquilla.telemetry.contracts import TELEMETRY_PROTOCOL_FINGERPRINT_SHA256
 from opensquilla.telemetry.contracts.common import ConsentScope
 from opensquilla.telemetry.server.dashboard_queries import (
+    _ACTIVATION_STAGES,
     DashboardDataError,
     DashboardQueries,
     UtcCohortWindow,
@@ -1058,6 +1059,49 @@ def test_activation_follows_desktop_order_and_accepts_legacy_readiness(
     assert [transition["windowHours"] for transition in activation["transitions"]] == [168] * 3
     if counts == [1, 1, 1, 1]:
         assert [transition["dropoffRate"] for transition in activation["transitions"]] == [0] * 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_schema", [False, True])
+async def test_activation_joins_search_by_device_on_read_only_databases(
+    tmp_path: Path, legacy_schema: bool,
+) -> None:
+    if legacy_schema:
+        growth = _legacy_database(tmp_path, TelemetryScope.GROWTH)
+    else:
+        growth = tmp_path / "growth.sqlite3"
+        storage = await TelemetryIngestStorage.open(growth, ConsentScope.GROWTH)
+        await storage.close()
+        with sqlite3.connect(growth) as connection:
+            connection.execute(
+                "INSERT INTO ingest_batches VALUES (?, ?, ?, ?, 0, 0)",
+                (_LEGACY_BATCH_ID, "a" * 64, "2026-09-01T00:00:00.000Z",
+                 "2026-09-01T00:00:00.000Z"),
+            )
+    for device_number in range(32):
+        for stage_number, stage in enumerate(_ACTIVATION_STAGES):
+            sequence = device_number * len(_ACTIVATION_STAGES) + stage_number + 1
+            _insert(
+                growth, sequence=sequence, event_id=str(UUID(int=sequence, version=4)),
+                first_batch_id=_LEGACY_BATCH_ID, event_name=stage.event_name,
+                occurred_at=f"2026-09-01T00:0{stage_number}:00.000Z",
+                analytics_user_id=f"profile-{device_number}", outcome=stage.outcome,
+            )
+    queries = DashboardQueries(reliability_db_path=growth, growth_db_path=growth)
+    with queries._open(TelemetryScope.GROWTH) as connection:
+        assert connection.execute("PRAGMA query_only").fetchone()[0] == 1
+        statements: list[str] = []
+        connection.set_trace_callback(statements.append)
+        activation = queries._funnel(
+            connection, _window(), id_column="device_id", stages=_ACTIVATION_STAGES,
+        )
+        connection.set_trace_callback(None)
+        plans = connection.execute(f"EXPLAIN QUERY PLAN {statements[-1]}").fetchall()
+    assert [stage["deduplicatedCount"] for stage in activation["stages"]] == [32] * 4
+    searches = [str(row["detail"]) for row in plans if "SEARCH candidate " in row["detail"]]
+    assert len(searches) == len(_ACTIVATION_STAGES) - 1
+    # Each stage must constrain identity, not scan all devices with this event name.
+    assert all("device_id=?" in plan and "event_name=?" in plan for plan in searches)
 
 
 def test_activation_cohort_uses_first_completed_onboarding_and_distinct_users(
