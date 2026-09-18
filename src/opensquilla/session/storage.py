@@ -385,6 +385,14 @@ class RecoverableMetaControlTask:
     entry: TranscriptEntry
 
 
+class AgentTaskTerminalConflictError(ValueError):
+    """Another lifecycle owner already committed a different terminal result."""
+
+    def __init__(self, record: AgentTaskRecord) -> None:
+        super().__init__("agent task already has a different terminal outcome")
+        self.record = record
+
+
 _SQLITE_BUSY_TIMEOUT_MS = 100
 _SQLITE_STARTUP_BUSY_TIMEOUT_SECONDS = 5.0
 _INTERACTIVE_BUSY_BUDGET_SECONDS = 2.0
@@ -9367,7 +9375,7 @@ class SessionStorage:
             if record.status not in {AgentTaskStatus.QUEUED, AgentTaskStatus.RUNNING} and (
                 record.status != fields["status"] or record.finished_at != fields["finished_at"]
             ):
-                raise ValueError("agent task already has a different terminal outcome")
+                raise AgentTaskTerminalConflictError(record)
             details = dict(record.details or {})
             for key in remove_detail_keys:
                 details.pop(key, None)

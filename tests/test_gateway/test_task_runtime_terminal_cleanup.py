@@ -382,6 +382,7 @@ async def test_plan_run_is_running_only_during_its_execution_turn() -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
     observed_statuses: list[str] = []
+    terminal_plan_statuses: list[str] = []
     events: list[tuple[str, str, dict[str, Any]]] = []
 
     async def _handler(_run: Any) -> None:
@@ -393,6 +394,10 @@ async def test_plan_run_is_running_only_during_its_execution_turn() -> None:
 
     async def _emit(session: str, name: str, payload: dict[str, Any]) -> None:
         events.append((session, name, payload))
+        if name == "task.succeeded":
+            current = await storage.get_plan_run(run.run_id)
+            assert current is not None
+            terminal_plan_statuses.append(current.status)
 
     rt = TaskRuntime(storage=storage, turn_handler=_handler, event_emitter=_emit)
     envelope = replace(
@@ -415,6 +420,7 @@ async def test_plan_run_is_running_only_during_its_execution_turn() -> None:
     assert paused is not None
     assert paused.status == "paused"
     assert paused.active_task_id is None
+    assert terminal_plan_statuses == ["paused"]
     assert [
         payload["plan_run"]["status"]
         for _session, name, payload in events

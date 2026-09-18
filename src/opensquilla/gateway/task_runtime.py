@@ -4674,7 +4674,6 @@ class TaskRuntime:
             )
         finally:
             self._user_input_broker.cancel_task(task.task_id)
-            await self._settle_attached_plan_run(task)
             _cleanup_guest_profile(task)
 
     async def _freeze_collaboration_context(self, task: _RuntimeTask) -> None:
@@ -6474,6 +6473,9 @@ class TaskRuntime:
                     status=status,
                     terminal_update=terminal_update,
                 )
+            # Settle the plan before terminal observers can read its state or
+            # admit another implementation turn on this session.
+            await self._settle_attached_plan_run(task)
             if terminal_persisted and promote_pending_steers:
                 # The terminal AgentTask row is now durable, but no public
                 # terminal/idle signal has escaped. Close every accepted steer
@@ -7322,6 +7324,8 @@ class TaskRuntime:
 
     async def _retry_terminal_updates(self) -> None:
         """Drain terminal writes without holding a session lane or execution slot."""
+        from opensquilla.session.storage import AgentTaskTerminalConflictError
+
         delay = 0.05
         attempt = 0
         try:
@@ -7335,6 +7339,13 @@ class TaskRuntime:
                         continue
                     try:
                         await self._persist_terminal_update(task_id, record.session_key, update)
+                    except AgentTaskTerminalConflictError as exc:
+                        # Goal fail-closed compensation may have settled this
+                        # task already. Retire the stale retry and projection.
+                        self._terminal_pending_updates.pop(task_id, None)
+                        self._terminal_fallback_records[task_id] = exc.record
+                        self._remember_compensated_terminal(task_id)
+                        continue
                     except KeyError:
                         # Explicit session deletion may remove the task while
                         # this retry waits. Never recreate deleted runtime data.
