@@ -39,6 +39,7 @@
     },
     "reasoning_content": "Synthetic reasoning.",
     "reasoning_tokens": 8,
+    "refusal": false,
     "stop_reason": "stop",
     "thinking_signature": null,
     "type": "DoneEvent",
