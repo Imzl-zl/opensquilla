@@ -158,6 +158,8 @@ class StorageBusyError(RuntimeError):
         retry_after_ms: int,
         stage: str | None = None,
         resource: str | None = None,
+        holder_operation: str | None = None,
+        hold_ms: int | None = None,
     ) -> None:
         super().__init__("Session storage is temporarily busy")
         self.operation = operation
@@ -165,6 +167,8 @@ class StorageBusyError(RuntimeError):
         self.retry_after_ms = retry_after_ms
         self.stage = stage
         self.resource = resource
+        self.holder_operation = holder_operation
+        self.hold_ms = hold_ms
 
 
 class StorageConnectionPoisonedError(RuntimeError):
@@ -386,6 +390,14 @@ class RecoverableMetaControlTask:
     entry: TranscriptEntry
 
 
+class AgentTaskTerminalConflictError(ValueError):
+    """Another lifecycle owner already committed a different terminal result."""
+
+    def __init__(self, record: AgentTaskRecord) -> None:
+        super().__init__("agent task already has a different terminal outcome")
+        self.record = record
+
+
 _SQLITE_BUSY_TIMEOUT_MS = 100
 _SQLITE_STARTUP_BUSY_TIMEOUT_SECONDS = 5.0
 _INTERACTIVE_BUSY_BUDGET_SECONDS = 2.0
@@ -448,6 +460,9 @@ _BOUNDED_INTERACTIVE_READS: ContextVar[bool] = ContextVar(
     "opensquilla_bounded_interactive_storage_reads",
     default=False,
 )
+_READ_CONNECTION: ContextVar[tuple[Any, Any] | None] = ContextVar(
+    "opensquilla_session_read_connection", default=None,
+)
 
 
 def _is_sqlite_busy(exc: BaseException) -> bool:
@@ -472,14 +487,38 @@ def bounded_interactive_storage_reads() -> Iterator[None]:
 def _serialized_read[**P, R](
     method: Callable[Concatenate[SessionStorage, P], Awaitable[R]],
 ) -> Callable[Concatenate[SessionStorage, P], Awaitable[R]]:
-    """Serialize a public read against multi-statement writes on the shared connection."""
+    """Read committed WAL data without queueing behind unrelated writer operations.
+
+    Each cursor owns its SELECT snapshot. The query-only connection cannot
+    observe uncommitted writer data. Memory/non-WAL storage retains the
+    shared-connection gate because it has no independent committed view.
+    """
 
     @wraps(method)
     async def _wrapped(self: SessionStorage, *args: P.args, **kwargs: P.kwargs) -> R:
+        self._raise_if_poisoned()
+        reader = self._transcript_reader
+        if reader is not None:
+            async def read() -> R:
+                token = _READ_CONNECTION.set((self, reader))
+                try:
+                    return await method(self, *args, **kwargs)
+                finally:
+                    _READ_CONNECTION.reset(token)
+
+            # Register before yielding, so close/poison retirement can drain
+            # all cursor lifetimes before retiring the query-only connection.
+            task = asyncio.create_task(read())
+            self._pending_reader_operations.add(task)
+            try:
+                return cast(R, await self._finish_sqlite_call(task))
+            finally:
+                self._pending_reader_operations.discard(task)
         if not _BOUNDED_INTERACTIVE_READS.get():
             async with self._operation_lock:
                 self._raise_if_poisoned()
-                return await method(self, *args, **kwargs)
+                with self._observe_operation(method.__name__):
+                    return await method(self, *args, **kwargs)
 
         started = self._monotonic()
         acquired = False
@@ -488,16 +527,11 @@ def _serialized_read[**P, R](
                 async with asyncio.timeout(self._busy_budget_seconds):
                     await self._operation_lock.acquire()
             except TimeoutError as exc:
-                raise StorageBusyError(
-                    method.__name__,
-                    waited_ms=max(0, int((self._monotonic() - started) * 1000)),
-                    retry_after_ms=_SQLITE_BUSY_TIMEOUT_MS,
-                    stage="lock_acquire",
-                    resource="session_storage_operation_lock",
-                ) from exc
+                raise self._operation_busy_error(method.__name__, started) from exc
             acquired = True
             self._raise_if_poisoned()
-            return await method(self, *args, **kwargs)
+            with self._observe_operation(method.__name__):
+                return await method(self, *args, **kwargs)
         finally:
             if acquired:
                 self._operation_lock.release()
@@ -1528,6 +1562,46 @@ def _transcript_preimage(
     )
 
 
+def _compaction_source_matches(
+    rows: list[Any],
+    expected: Sequence[TranscriptEntry],
+    preimage: Sequence[Sequence[Any]] | None,
+    archived: Sequence[TranscriptEntry],
+    kept: Sequence[TranscriptEntry],
+    boundary_message_id: str | None,
+    boundary_entry_id: int | None,
+) -> bool:
+    """Validate the expensive source projection before acquiring the writer gate."""
+    frozen = tuple(tuple(item) for item in (preimage or ()))
+    if len(rows) != len(expected) or frozen != _transcript_preimage(expected):
+        return False
+    if _transcript_preimage(_decode_transcript_rows(rows)) != frozen:
+        return False
+    boundary = expected[-1] if expected else None
+    if boundary_message_id is not None and (
+        boundary is None or boundary.message_id != boundary_message_id
+    ):
+        return False
+    if boundary_entry_id is not None and (
+        boundary is None or boundary.id != boundary_entry_id
+    ):
+        return False
+    count = len(archived)
+    return (
+        count <= len(expected)
+        and _transcript_preimage(archived) == frozen[:count]
+        and _transcript_preimage(kept) == frozen[count:]
+        and all(entry.id is not None for entry in archived)
+    )
+
+
+def _serialized_model_rows(models: Sequence[Any]) -> list[dict[str, Any]]:
+    return [
+        {key: _serialize(value) for key, value in model.model_dump(exclude={"id"}).items()}
+        for model in models
+    ]
+
+
 def _ordered_detail_message_ids(*values: Any) -> list[str]:
     """Normalize persisted-message detail fields without changing order."""
 
@@ -1841,8 +1915,10 @@ class SessionStorage:
         self._conn: Any | None = None
         self._connection_generation = 0
         self._transcript_reader: Any | None = None
+        self._pending_reader_operations: set[asyncio.Task[Any]] = set()
         self._meta_run_writer = meta_run_writer
         self._operation_lock = asyncio.Lock()
+        self._operation_holder: tuple[str, float] | None = None
         self._transcript_reader_lock = asyncio.Lock()
         self._transcript_reader_fallback_warned = False
         self._usage_backfill_index_lock = asyncio.Lock()
@@ -1917,22 +1993,7 @@ class SessionStorage:
         self._connection_generation += 1
         try:
             self._conn.row_factory = aiosqlite.Row
-            # Unicode-aware case folding for non-ASCII LIKE search (see _py_lower).
-            # aiosqlite proxies create_function to sqlite3 at runtime; its stub omits it.
-            await self._conn.create_function(  # type: ignore[attr-defined]
-                "py_lower", 1, _py_lower, deterministic=True
-            )
-            for name, arity, function in (
-                ("usage_nonnegative_int", 1, _sqlite_usage_nonnegative_int),
-                ("usage_invalid_int", 1, _sqlite_usage_invalid_int),
-                ("usage_cost_total", 3, _sqlite_usage_cost_total),
-                ("usage_cost_billed", 3, _sqlite_usage_cost_billed),
-                ("usage_cost_estimated", 3, _sqlite_usage_cost_estimated),
-                ("usage_cost_anomaly", 3, _sqlite_usage_cost_anomaly),
-            ):
-                await self._conn.create_function(  # type: ignore[attr-defined]
-                    name, arity, function, deterministic=True
-                )
+            await self._register_sql_functions(self._conn)
             async with self._conn.execute("PRAGMA journal_mode=WAL") as cur:
                 journal_mode_row = await cur.fetchone()
             journal_mode = (
@@ -1972,6 +2033,10 @@ class SessionStorage:
                 reader, self._transcript_reader = self._transcript_reader, None
                 conn, self._conn = self._conn, None
                 try:
+                    if self._pending_reader_operations:
+                        await self._finish_sqlite_call(asyncio.gather(
+                            *self._pending_reader_operations, return_exceptions=True,
+                        ))
                     if reader is not None:
                         await reader.close()
                 finally:
@@ -2007,6 +2072,20 @@ class SessionStorage:
             },
         )
 
+    @staticmethod
+    async def _register_sql_functions(conn: Any) -> None:
+        # Read-only and writer connections must share search/usage semantics.
+        for name, arity, function in (
+            ("py_lower", 1, _py_lower),
+            ("usage_nonnegative_int", 1, _sqlite_usage_nonnegative_int),
+            ("usage_invalid_int", 1, _sqlite_usage_invalid_int),
+            ("usage_cost_total", 3, _sqlite_usage_cost_total),
+            ("usage_cost_billed", 3, _sqlite_usage_cost_billed),
+            ("usage_cost_estimated", 3, _sqlite_usage_cost_estimated),
+            ("usage_cost_anomaly", 3, _sqlite_usage_cost_anomaly),
+        ):
+            await conn.create_function(name, arity, function, deterministic=True)
+
     async def _open_transcript_reader(self, journal_mode: str) -> None:
         if self._db_path == ":memory:":
             self._warn_transcript_reader_fallback_once("memory_database", journal_mode)
@@ -2022,6 +2101,7 @@ class SessionStorage:
         try:
             reader = await aiosqlite.connect(self._db_path, isolation_level=None)
             reader.row_factory = aiosqlite.Row
+            await self._register_sql_functions(reader)
             async with reader.execute("PRAGMA query_only=ON"):
                 pass
             async with reader.execute(
@@ -2082,11 +2162,55 @@ class SessionStorage:
                 "Session storage connection is unavailable after rollback failure"
             )
 
+    @contextlib.contextmanager
+    def _observe_operation(self, operation: str) -> Iterator[None]:
+        started = self._monotonic()
+        self._operation_holder = (operation, started)
+        try:
+            yield
+        finally:
+            hold_ms = max(0, int((self._monotonic() - started) * 1000))
+            self._operation_holder = None
+            if hold_ms >= 250:
+                log.warning(
+                    "session_storage.slow_operation operation=%s hold_ms=%d",
+                    operation, hold_ms,
+                    extra={"_opensquilla_log_metadata": {
+                        "event": "session_storage.slow_operation",
+                        "operation": operation, "hold_ms": hold_ms,
+                    }},
+                )
+
+    def _operation_busy_error(self, operation: str, started: float) -> StorageBusyError:
+        now = self._monotonic()
+        holder = self._operation_holder
+        waited_ms = max(0, int((now - started) * 1000))
+        hold_ms = max(0, int((now - holder[1]) * 1000)) if holder else None
+        log.warning(
+            "session_storage.operation_busy operation=%s waited_ms=%d "
+            "holder_operation=%s hold_ms=%s",
+            operation, waited_ms, holder[0] if holder else None, hold_ms,
+            extra={"_opensquilla_log_metadata": {
+                "event": "session_storage.operation_busy", "operation": operation,
+                "waited_ms": waited_ms, "hold_ms": hold_ms,
+                "attrs": {"operation": holder[0] if holder else None},
+            }},
+        )
+        return StorageBusyError(
+            operation, waited_ms=waited_ms, retry_after_ms=_SQLITE_BUSY_TIMEOUT_MS,
+            stage="lock_acquire", resource="session_storage_operation_lock",
+            holder_operation=holder[0] if holder else None, hold_ms=hold_ms,
+        )
+
     async def _retire_poisoned_connection(self) -> None:
         self._poisoned = True
         async with self._transcript_reader_lock:
             reader, self._transcript_reader = self._transcript_reader, None
             conn, self._conn = self._conn, None
+            if self._pending_reader_operations:
+                await self._finish_sqlite_call(asyncio.gather(
+                    *self._pending_reader_operations, return_exceptions=True,
+                ))
             if reader is not None:
                 with contextlib.suppress(BaseException):
                     await reader.close()
@@ -2182,6 +2306,7 @@ class SessionStorage:
                         operation,
                         waited_ms=waited_ms,
                         retry_after_ms=_SQLITE_BUSY_TIMEOUT_MS,
+                        stage="begin", resource="sqlite_writer",
                     ) from exc
                 await self._retry_delay(attempt, deadline)
                 attempt += 1
@@ -2212,6 +2337,7 @@ class SessionStorage:
                         operation,
                         waited_ms=waited_ms,
                         retry_after_ms=_SQLITE_BUSY_TIMEOUT_MS,
+                        stage="commit", resource="sqlite_writer",
                     ) from exc
                 await self._retry_delay(attempt, deadline)
                 attempt += 1
@@ -2236,21 +2362,18 @@ class SessionStorage:
                 async with asyncio.timeout(remaining):
                     await self._operation_lock.acquire()
             except TimeoutError as exc:
-                raise StorageBusyError(
-                    operation,
-                    waited_ms=max(0, int((self._monotonic() - started) * 1000)),
-                    retry_after_ms=_SQLITE_BUSY_TIMEOUT_MS,
-                ) from exc
+                raise self._operation_busy_error(operation, started) from exc
             acquired = True
             self._raise_if_poisoned()
             conn = self.conn
-            await self._begin_immediate(conn, operation, deadline, started)
-            try:
-                yield conn
-                await self._commit_transaction(conn, operation, deadline, started)
-            except BaseException:
-                await self._rollback_transaction(conn, operation)
-                raise
+            with self._observe_operation(operation):
+                await self._begin_immediate(conn, operation, deadline, started)
+                try:
+                    yield conn
+                    await self._commit_transaction(conn, operation, deadline, started)
+                except BaseException:
+                    await self._rollback_transaction(conn, operation)
+                    raise
         finally:
             if acquired:
                 self._operation_lock.release()
@@ -2857,6 +2980,9 @@ class SessionStorage:
 
     @property
     def conn(self) -> Any:
+        read_connection = _READ_CONNECTION.get()
+        if read_connection is not None and read_connection[0] is self:
+            return read_connection[1]
         if self._conn is None:
             raise RuntimeError("Storage not connected. Call connect() first.")
         return self._conn
@@ -9660,6 +9786,60 @@ class SessionStorage:
             updated = AgentTaskRecord(**_deserialize_row(dict(row)))
         return updated
 
+    async def settle_agent_task(
+        self,
+        task_id: str,
+        *,
+        session_key: str,
+        details_patch: dict[str, Any],
+        remove_detail_keys: Sequence[str],
+        plan_result: dict[str, Any] | None = None,
+        **fields: Any,
+    ) -> AgentTaskRecord:
+        """Merge terminal-owned details into the latest row in one transaction.
+
+        Reading details before waiting for the writer gate loses concurrent
+        audit/steer writes. Retry callers supply only their owned fields, never
+        an admission-time copy of the entire details document.
+        """
+        allowed = {"status", "finished_at", "terminal_reason", "error_class", "error_message"}
+        if set(fields) - allowed or fields.get("status") not in {
+            AgentTaskStatus.SUCCEEDED, AgentTaskStatus.FAILED, AgentTaskStatus.CANCELLED,
+            AgentTaskStatus.TIMEOUT, AgentTaskStatus.ABANDONED,
+        } or fields.get("finished_at") is None:
+            raise ValueError("invalid terminal task update")
+        async with self._write_transaction("settle_agent_task") as conn:
+            async with conn.execute(
+                "SELECT * FROM agent_tasks WHERE task_id = ? AND session_key = ?",
+                (task_id, canonicalize_session_key(session_key)),
+            ) as cur:
+                row = await cur.fetchone()
+            if row is None:
+                raise KeyError(f"Agent task not found: {task_id}")
+            record = AgentTaskRecord(**_deserialize_row(dict(row)))
+            if record.status not in {AgentTaskStatus.QUEUED, AgentTaskStatus.RUNNING} and (
+                record.status != fields["status"] or record.finished_at != fields["finished_at"]
+            ):
+                raise AgentTaskTerminalConflictError(record)
+            details = dict(record.details or {})
+            for key in remove_detail_keys:
+                details.pop(key, None)
+            details.update(details_patch)
+            metadata = dict(details.get("metadata") or {})
+            metadata.pop("plan_result", None)
+            if plan_result is not None:
+                metadata["plan_result"] = dict(plan_result)
+            if metadata or "metadata" in details:
+                details["metadata"] = metadata
+            update = {**fields, "details": details, "updated_at": _now_ms()}
+            assignments = ", ".join(f"{key} = ?" for key in update)
+            async with conn.execute(
+                f"UPDATE agent_tasks SET {assignments} WHERE task_id = ?",
+                (*(_serialize(value) for value in update.values()), task_id),
+            ):
+                pass
+        return record.model_copy(update=update)
+
     @_serialized_read
     async def list_agent_tasks(
         self,
@@ -10897,13 +11077,13 @@ class SessionStorage:
                 )
 
     @staticmethod
-    async def _select_canonical_transcript(
+    async def _fetch_canonical_transcript_rows(
         conn: Any,
         session_id: str,
         *,
         limit: int | None = None,
         offset: int = 0,
-    ) -> list[TranscriptEntry]:
+    ) -> list[Any]:
         """Read compacted archive rows plus the active tail on one connection."""
 
         limit_val = limit if limit is not None else -1
@@ -10963,7 +11143,20 @@ class SessionStorage:
             (session_id, session_id, limit_val, offset),
         ) as cur:
             rows = await cur.fetchall()
-        return [TranscriptEntry(**_deserialize_row(dict(row))) for row in rows]
+        return list(rows)
+
+    @staticmethod
+    async def _select_canonical_transcript(
+        conn: Any,
+        session_id: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[TranscriptEntry]:
+        rows = await SessionStorage._fetch_canonical_transcript_rows(
+            conn, session_id, limit=limit, offset=offset,
+        )
+        return _decode_transcript_rows(rows)
 
     @staticmethod
     async def _select_all_summaries(
@@ -14246,9 +14439,9 @@ class SessionStorage:
             if acquired:
                 self._transcript_reader_lock.release()
 
-    async def get_transcript(
+    async def _read_transcript_rows(
         self, session_id: str, limit: int | None = None, offset: int = 0
-    ) -> list[TranscriptEntry]:
+    ) -> list[Any]:
         async with self._transcript_reader_access() as reader:
             if reader is not None:
                 rows = await self._finish_sqlite_call(
@@ -14267,9 +14460,33 @@ class SessionStorage:
                 limit,
                 offset,
             )
-        return await asyncio.to_thread(_decode_transcript_rows, rows)
+        return cast(list[Any], rows)
+
+    async def _fetch_history_query(self, conn: Any, sql: str, params: Sequence[Any]) -> list[Any]:
+        async with conn.execute(sql, params) as cursor:
+            return list(await cursor.fetchall())
 
     @_serialized_read
+    async def _fetch_history_query_on_writer(self, sql: str, params: Sequence[Any]) -> list[Any]:
+        return cast(list[Any], await self._finish_sqlite_call(
+            self._fetch_history_query(self.conn, sql, params),
+        ))
+
+    async def _read_history_query(self, sql: str, params: Sequence[Any]) -> list[Any]:
+        """Keep single-statement history projections off the shared writer gate."""
+        async with self._transcript_reader_access() as reader:
+            if reader is not None:
+                return cast(list[Any], await self._finish_sqlite_call(
+                    self._fetch_history_query(reader, sql, params),
+                ))
+        return await self._fetch_history_query_on_writer(sql, params)
+
+    async def get_transcript(
+        self, session_id: str, limit: int | None = None, offset: int = 0
+    ) -> list[TranscriptEntry]:
+        rows = await self._read_transcript_rows(session_id, limit, offset)
+        return await asyncio.to_thread(_decode_transcript_rows, rows)
+
     async def get_canonical_transcript(
         self, session_id: str, limit: int | None = None, offset: int = 0
     ) -> list[TranscriptEntry]:
@@ -14279,12 +14496,28 @@ class SessionStorage:
         for recovery, diagnostics, and future provider-view construction where
         the raw transcript needs to survive destructive compaction rewrites.
         """
-        return await self._select_canonical_transcript(
-            self.conn,
-            session_id,
-            limit=limit,
-            offset=offset,
-        )
+        async with self._transcript_reader_access() as reader:
+            rows = (
+                await self._finish_sqlite_call(
+                    self._fetch_canonical_transcript_rows(
+                        reader, session_id, limit=limit, offset=offset,
+                    )
+                )
+                if reader is not None else None
+            )
+        if rows is None:
+            rows = await self._fetch_canonical_rows_on_writer(session_id, limit, offset)
+        return await asyncio.to_thread(_decode_transcript_rows, rows)
+
+    @_serialized_read
+    async def _fetch_canonical_rows_on_writer(
+        self, session_id: str, limit: int | None, offset: int,
+    ) -> list[Any]:
+        return cast(list[Any], await self._finish_sqlite_call(
+            self._fetch_canonical_transcript_rows(
+                self.conn, session_id, limit=limit, offset=offset,
+            )
+        ))
 
     @_serialized_read
     async def get_canonical_transcript_entry(
@@ -14867,7 +15100,6 @@ class SessionStorage:
                 )
         return changed > 0
 
-    @_serialized_read
     async def get_canonical_transcript_page(
         self,
         session_id: str,
@@ -15022,8 +15254,7 @@ class SessionStorage:
         # statement, so a concurrent reset, delete, or compaction lands wholly
         # before or after this snapshot.
         params = [*anchor_params, *active_params, *archived_params, fetch_size]
-        async with self.conn.execute(sql, params) as cur:
-            rows = await cur.fetchall()
+        rows = await self._read_history_query(sql, params)
 
         if not rows or not bool(rows[0]["_cursor_valid"]):
             raise HistoryCursorInvalidatedError(
@@ -15038,14 +15269,13 @@ class SessionStorage:
             if page_row is not None:
                 entry_rows.append(payload)
 
-        entries = [TranscriptEntry(**_deserialize_row(row)) for row in entry_rows]
+        entries = await asyncio.to_thread(_decode_transcript_rows, entry_rows)
         has_more = len(entries) > page_size
         entries = entries[:page_size]
         if not ascending:
             entries.reverse()
         return entries, has_more
 
-    @_serialized_read
     async def get_canonical_transcript_coverage(
         self,
         session_id: str,
@@ -15086,8 +15316,8 @@ class SessionStorage:
             WHERE session.session_id = ?
             LIMIT 1
         """
-        async with self.conn.execute(sql, (session_id,)) as cur:
-            row = await cur.fetchone()
+        rows = await self._read_history_query(sql, (session_id,))
+        row = rows[0] if rows else None
         if row is None:
             return CanonicalTranscriptCoverage(
                 canonical_complete=False,
@@ -15281,7 +15511,6 @@ class SessionStorage:
             result.setdefault(sid, 0)
         return result
 
-    @_serialized_read
     async def list_user_transcript_content_batch(
         self,
         session_ids: list[str],
@@ -15293,39 +15522,37 @@ class SessionStorage:
         ``sessions.list`` uses this to render semantic conversation titles
         without issuing one transcript query per session row.
         """
+        session_ids = list(dict.fromkeys(session_ids))
         if not session_ids:
             return {}
         chunk = 300
         result: dict[str, list[str]] = {sid: [] for sid in session_ids}
+        bounded_limit = max(0, int(limit_per_session))
+        if not bounded_limit:
+            return result
         for i in range(0, len(session_ids), chunk):
             batch = session_ids[i : i + chunk]
-            placeholders = ",".join(["?"] * len(batch))
+            values = ",".join("(?)" for _ in batch)
             sql = f"""
-                SELECT session_id, content
-                FROM (
-                    SELECT
-                        session_id,
-                        content,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY session_id
-                            ORDER BY created_at ASC, id ASC
-                        ) AS rn
-                    FROM transcript_entries
-                    WHERE session_id IN ({placeholders})
+                WITH requested(session_id) AS (VALUES {values})
+                SELECT entry.session_id, entry.content
+                FROM requested
+                JOIN transcript_entries AS entry ON entry.id IN (
+                    SELECT id FROM transcript_entries
+                    WHERE session_id = requested.session_id
                         AND role = 'user'
                         AND COALESCE(content, '') != ''
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT ?
                 )
-                WHERE rn <= ?
-                ORDER BY session_id ASC, rn ASC
+                ORDER BY entry.session_id ASC, entry.created_at ASC, entry.id ASC
             """
-            async with self.conn.execute(sql, [*batch, limit_per_session]) as cur:
-                rows = await cur.fetchall()
+            rows = await self._read_history_query(sql, [*batch, bounded_limit])
             for sid, content in rows:
                 if isinstance(content, str):
                     result.setdefault(sid, []).append(content)
         return result
 
-    @_serialized_read
     async def list_canonical_user_transcript_content_batch(
         self,
         session_ids: list[str],
@@ -15393,14 +15620,12 @@ class SessionStorage:
                 ORDER BY session_id ASC, rn ASC
             """
             params = [*batch, bounded_limit, bounded_limit, bounded_limit]
-            async with self.conn.execute(sql, params) as cur:
-                rows = await cur.fetchall()
+            rows = await self._read_history_query(sql, params)
             for sid, content in rows:
                 if isinstance(content, str):
                     result[sid].append(content)
         return result
 
-    @_serialized_read
     async def list_last_transcript_content_batch(
         self,
         session_ids: list[str],
@@ -15429,27 +15654,21 @@ class SessionStorage:
         result: dict[str, str] = {session_id: "" for session_id in session_ids}
         for index in range(0, len(session_ids), chunk):
             batch = session_ids[index : index + chunk]
-            placeholders = ",".join("?" for _ in batch)
+            values = ",".join("(?)" for _ in batch)
             sql = f"""
-                SELECT latest.session_id, substr(entry.content, 1, ?) AS content
-                FROM (
-                    SELECT
-                        session_id,
-                        id,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY session_id
-                            ORDER BY created_at DESC, id DESC
-                        ) AS rn
-                    FROM transcript_entries
-                    WHERE session_id IN ({placeholders})
+                WITH requested(session_id) AS (VALUES {values})
+                SELECT entry.session_id, substr(entry.content, 1, ?) AS content
+                FROM requested
+                JOIN transcript_entries AS entry ON entry.id = (
+                    SELECT id FROM transcript_entries
+                    WHERE session_id = requested.session_id
                         AND role IN ('user', 'assistant')
                         AND COALESCE(content, '') != ''
-                ) AS latest
-                JOIN transcript_entries AS entry ON entry.id = latest.id
-                WHERE latest.rn = 1
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                )
             """
-            async with self.conn.execute(sql, [bounded_chars, *batch]) as cur:
-                rows = await cur.fetchall()
+            rows = await self._read_history_query(sql, [*batch, bounded_chars])
             for session_id, content in rows:
                 if isinstance(content, str):
                     result[session_id] = content
@@ -15553,31 +15772,51 @@ class SessionStorage:
         entries: list[TranscriptEntry],
         compaction_id: str | None,
         compaction_index: int | None,
+        source_rows_validated: bool = False,
+        prepared_rows: list[dict[str, Any]] | None = None,
     ) -> None:
         if not entries:
             return
         archived_at = _now_ms()
-        for entry in entries:
-            entry_data = entry.model_dump(exclude={"id"})
-            entry_data["session_id"] = node.session_id
-            entry_data["session_key"] = node.session_key
-            archive_data: dict[str, Any] = {
-                "session_id": entry_data.pop("session_id"),
-                "session_key": entry_data.pop("session_key"),
-                "compaction_id": compaction_id,
-                "compaction_index": compaction_index,
-                "original_entry_id": entry.id,
-                **entry_data,
-                "archived_at": archived_at,
-            }
-            cols = list(archive_data.keys())
-            placeholders = ", ".join("?" for _ in cols)
-            values = [_serialize(archive_data[c]) for c in cols]
-            await self.conn.execute(
-                "INSERT INTO compacted_transcript_entries "
-                f"({', '.join(cols)}) VALUES ({placeholders})",
-                values,
+        cols = [key for key in TranscriptEntry.model_fields if key != "id"]
+        archive_cols = [
+            *cols, "original_entry_id", "compaction_id", "compaction_index", "archived_at",
+        ]
+        if source_rows_validated:
+            # The CAS below has verified these exact source rows. Copy their
+            # serialized values directly, without Python decoding/re-encoding
+            # megabytes of transcript while unrelated turns wait for the gate.
+            ids = [entry.id for entry in entries]
+            chunk_size = _SQLITE_VARIABLE_CHUNK_SIZE - 4
+            for start in range(0, len(ids), chunk_size):
+                chunk = ids[start:start + chunk_size]
+                placeholders = ", ".join("?" for _ in chunk)
+                async with self.conn.execute(
+                    f"INSERT INTO compacted_transcript_entries ({', '.join(archive_cols)}) "
+                    f"SELECT {', '.join(cols)}, id, ?, ?, ? FROM transcript_entries "
+                    f"WHERE session_id = ? AND id IN ({placeholders})",
+                    (compaction_id, compaction_index, archived_at, node.session_id, *chunk),
+                ) as cur:
+                    if cur.rowcount != len(chunk):
+                        raise RuntimeError("compaction archive source changed")
+            return
+        if prepared_rows is None:
+            raise ValueError("compaction archive requires prepared rows")
+        values = [
+            (
+                *(node.session_id if col == "session_id" else
+                  node.session_key if col == "session_key" else row[col] for col in cols),
+                entry.id, compaction_id, compaction_index, archived_at,
             )
+            for entry, row in zip(entries, prepared_rows, strict=True)
+        ]
+        placeholders = ", ".join("?" for _ in archive_cols)
+        async with self.conn.executemany(
+                "INSERT INTO compacted_transcript_entries "
+                f"({', '.join(archive_cols)}) VALUES ({placeholders})",
+                values,
+        ):
+            pass
 
     async def rewrite_compacted_session(
         self,
@@ -15605,6 +15844,42 @@ class SessionStorage:
         if (expected_session_id is None) != (expected_session_epoch is None):
             raise ValueError("compaction rewrite requires an exact session owner")
 
+        preserve_surviving_rows = expected_source_entries is not None
+        source_rows: list[Any] = []
+        source_matches = True
+        archive_rows: list[dict[str, Any]] | None = None
+        if expected_source_entries is not None:
+            source_rows = await self._read_transcript_rows(
+                node.session_id, len(expected_source_entries),
+            )
+            source_matches = await asyncio.to_thread(
+                _compaction_source_matches, source_rows, expected_source_entries,
+                expected_source_preimage, archived_entries or [], entries,
+                expected_source_boundary_message_id, expected_source_boundary_entry_id,
+            )
+        else:
+            archive_rows = await asyncio.to_thread(_serialized_model_rows, archived_entries or [])
+        for model in [*(context_states or []), *([summary] if summary else [])]:
+            model.session_id = node.session_id
+            model.session_key = node.session_key
+        if not preserve_surviving_rows:
+            for entry in entries:
+                entry.session_id = node.session_id
+                entry.session_key = node.session_key
+        prepared_summary = (
+            (await asyncio.to_thread(_serialized_model_rows, [summary]))[0]
+            if summary is not None else None
+        )
+        prepared_states = await asyncio.to_thread(_serialized_model_rows, context_states or [])
+        prepared_tail = (
+            await asyncio.to_thread(_serialized_model_rows, entries)
+            if not preserve_surviving_rows else []
+        )
+        prepared_node = (
+            (await asyncio.to_thread(_serialized_model_rows, [node]))[0]
+            if not preserve_surviving_rows else None
+        )
+
         async with self._write_transaction("rewrite_compacted_session") as conn:
             if expected_session_id is not None:
                 assert expected_session_epoch is not None
@@ -15624,50 +15899,18 @@ class SessionStorage:
                         expected_epoch=expected_session_epoch,
                         expected_session_id=expected_session_id,
                     )
-            preserve_surviving_rows = expected_source_entries is not None
             if expected_source_entries is not None:
-                expected_prefix = list(expected_source_entries)
+                if not source_matches:
+                    return False
                 async with conn.execute(
                     "SELECT * FROM transcript_entries WHERE session_id = ? "
-                    "ORDER BY created_at ASC, id ASC",
-                    (node.session_id,),
+                    "ORDER BY created_at ASC, id ASC LIMIT ?",
+                    (node.session_id, len(source_rows)),
                 ) as cur:
                     current_rows = await cur.fetchall()
-                current_entries = [
-                    TranscriptEntry(**_deserialize_row(dict(row))) for row in current_rows
-                ]
-                source_count = len(expected_prefix)
-                frozen_preimage = tuple(
-                    tuple(item) for item in (expected_source_preimage or ())
-                )
-                if (
-                    len(current_entries) < source_count
-                    or frozen_preimage != _transcript_preimage(expected_prefix)
-                    or _transcript_preimage(current_entries[:source_count])
-                    != frozen_preimage
-                ):
-                    return False
-                boundary = expected_prefix[-1] if expected_prefix else None
-                if expected_source_boundary_message_id is not None and (
-                    boundary is None
-                    or boundary.message_id != expected_source_boundary_message_id
-                ):
-                    return False
-                if expected_source_boundary_entry_id is not None and (
-                    boundary is None
-                    or boundary.id != expected_source_boundary_entry_id
-                ):
-                    return False
-                archived_prefix = list(archived_entries or [])
-                archived_count = len(archived_prefix)
-                if (
-                    archived_count > source_count
-                    or _transcript_preimage(archived_prefix)
-                    != _transcript_preimage(expected_prefix[:archived_count])
-                    or _transcript_preimage(entries)
-                    != _transcript_preimage(expected_prefix[archived_count:])
-                    or any(entry.id is None for entry in archived_prefix)
-                ):
+                # Recheck every stored field against the validated snapshot in
+                # the write transaction. A later suffix append is still allowed.
+                if current_rows != source_rows:
                     return False
 
             if expected_context_fingerprint is not None:
@@ -15717,6 +15960,8 @@ class SessionStorage:
                 compaction_index=summary.compaction_index
                 if summary is not None
                 else None,
+                source_rows_validated=preserve_surviving_rows,
+                prepared_rows=archive_rows,
             )
 
             if preserve_surviving_rows:
@@ -15751,10 +15996,11 @@ class SessionStorage:
                 )
 
             if summary is not None:
-                summary_data = summary.model_dump(exclude={"id"})
+                assert prepared_summary is not None
+                summary_data = {**prepared_summary, "compaction_index": summary.compaction_index}
                 summary_cols = list(summary_data.keys())
                 summary_placeholders = ", ".join("?" for _ in summary_cols)
-                summary_values = [_serialize(summary_data[c]) for c in summary_cols]
+                summary_values = [summary_data[c] for c in summary_cols]
                 async with conn.execute(
                     "INSERT INTO session_summaries "
                     f"({', '.join(summary_cols)}) VALUES ({summary_placeholders})",
@@ -15762,13 +16008,10 @@ class SessionStorage:
                 ) as cur:
                     summary.id = cur.lastrowid
 
-            for state in context_states or []:
-                state.session_id = node.session_id
-                state.session_key = node.session_key
-                state_data = state.model_dump(exclude={"id"})
+            for state, state_data in zip(context_states or [], prepared_states, strict=True):
                 state_cols = list(state_data.keys())
                 state_placeholders = ", ".join("?" for _ in state_cols)
-                state_values = [_serialize(state_data[c]) for c in state_cols]
+                state_values = [state_data[c] for c in state_cols]
                 async with conn.execute(
                     "INSERT INTO session_context_states "
                     f"({', '.join(state_cols)}) VALUES ({state_placeholders})",
@@ -15776,19 +16019,15 @@ class SessionStorage:
                 ) as cur:
                     state.id = cur.lastrowid
 
-            if not preserve_surviving_rows:
-                for entry in entries:
-                    entry.session_id = node.session_id
-                    entry.session_key = node.session_key
-                    entry_data = entry.model_dump(exclude={"id"})
-                    entry_cols = list(entry_data.keys())
-                    entry_placeholders = ", ".join("?" for _ in entry_cols)
-                    entry_values = [_serialize(entry_data[c]) for c in entry_cols]
-                    await conn.execute(
-                        "INSERT INTO transcript_entries "
-                        f"({', '.join(entry_cols)}) VALUES ({entry_placeholders})",
-                        entry_values,
-                    )
+            if prepared_tail:
+                entry_cols = list(prepared_tail[0])
+                entry_placeholders = ", ".join("?" for _ in entry_cols)
+                async with conn.executemany(
+                    "INSERT INTO transcript_entries "
+                    f"({', '.join(entry_cols)}) VALUES ({entry_placeholders})",
+                    [[row[col] for col in entry_cols] for row in prepared_tail],
+                ):
+                    pass
 
             if preserve_surviving_rows:
                 # A suffix append is allowed after the frozen source boundary.
@@ -15815,7 +16054,8 @@ class SessionStorage:
                             "session changed while committing compaction metadata"
                         )
             else:
-                node_data = node.model_dump()
+                assert prepared_node is not None
+                node_data = prepared_node
                 node_cols = list(node_data.keys())
                 node_placeholders = ", ".join("?" for _ in node_cols)
                 node_updates: list[str] = []
@@ -15826,7 +16066,7 @@ class SessionStorage:
                         node_updates.append("epoch = MAX(sessions.epoch, excluded.epoch)")
                     else:
                         node_updates.append(f"{col}=excluded.{col}")
-                node_values = [_serialize(node_data[c]) for c in node_cols]
+                node_values = [node_data[c] for c in node_cols]
                 await conn.execute(
                     f"INSERT INTO sessions ({', '.join(node_cols)}) "
                     f"VALUES ({node_placeholders}) "

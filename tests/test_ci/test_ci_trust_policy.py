@@ -170,6 +170,7 @@ def test_trust_policy_manifest_is_exact_sorted_and_self_governing() -> None:
     assert manifest["schema_version"] == 1
     assert paths == sorted(set(paths))
     assert ".github/ci/trust-policy.v1.json" in paths
+    assert ".github/scripts/windows_test_partitions.json" in paths
     assert ".github/scripts/windows_test_durations.json" not in paths
     assert all(path.startswith(".github/") and "*" not in path for path in paths)
     assert all((ROOT / path).is_file() for path in paths)
@@ -185,6 +186,7 @@ def test_trust_policy_covers_local_required_ci_execution_closure() -> None:
             ".github/ci/suites.v1.json",
             ".github/ci/trust-policy.v1.json",
             ".github/scripts/windows_test_assignments.json",
+            ".github/scripts/windows_test_partitions.json",
         }
     )
 

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from opensquilla.session.models import AgentTaskStatus, SessionStatus
+from opensquilla.session.models import AgentTaskRecord, AgentTaskStatus, SessionStatus
 
 TERMINAL_SESSION_STATUSES = frozenset(
     {
@@ -36,6 +36,7 @@ class SessionTaskSnapshot:
     running_task_id: str | None
     queued_task_ids: tuple[str, ...]
     cancel_requested_task_ids: tuple[str, ...] = ()
+    terminal_tasks: tuple[AgentTaskRecord, ...] = ()
 
     @property
     def active_task(self) -> dict[str, str] | None:

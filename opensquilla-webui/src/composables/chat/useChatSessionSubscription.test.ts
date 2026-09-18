@@ -10,6 +10,7 @@ import { useChatHistory } from './useChatHistory'
 import { createConversationRuntime } from '@/modules/conversationRuntime'
 import {
   createSessionReadLifecycle,
+  SessionReadFailure,
   SessionReadHistoryCursorError,
   SessionReadSessionMissingError,
   type SessionReadHistoryPage,
@@ -740,6 +741,39 @@ describe('useChatSessionSubscription domain lease', () => {
     expect(fixture.retryMetadata).toHaveBeenCalledOnce()
     expect(fixture.close).not.toHaveBeenCalled()
     expect(onSessionMetadata).toHaveBeenCalledWith(KEY, 12, recovered)
+  })
+
+  it('exposes deferred storage failure for recovery and clears stale working after terminal hydration', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const pendingMetadata = deferred<SessionReadMetadata>()
+    const fixture = leaseFixture({
+      live: live({ initialMetadata: metadata({ hydrationComplete: false }) }),
+      metadata: pendingMetadata.promise,
+    })
+    const lease = { ...fixture.lease, reconcile: async () => live({
+      initialMetadata: metadata({ lastTask: { task_id: 'task-1', status: 'succeeded' } }),
+    }) }
+    const subject = harness(lease, {
+      isStreaming: ref(true), activeStreamTaskId: ref('task-1'),
+      runStatus: ref({ status: 'running', label: 'running', task: { task_id: 'task-1' } }),
+    })
+    try {
+      await expect(subject.api.subscribeSession()).resolves.toMatchObject({ authoritative: true })
+      pendingMetadata.reject(new SessionReadFailure('busy', 'storage busy', true, 100))
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(subject.api.metadataRecoveryError.value).toMatchObject({ kind: 'busy' })
+      expect(subject.isStreaming.value).toBe(true)
+
+      await expect(subject.api.reconcileSession()).resolves.toMatchObject({ authoritative: true, live: false })
+      expect(subject.api.metadataRecoveryError.value).toBeNull()
+      expect(subject.runStatus.value.status).toBe('idle')
+      expect(subject.isStreaming.value).toBe(false)
+      expect(subject.loadHistory).toHaveBeenCalledOnce()
+      expect(fixture.close).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('cancels and bounds metadata retry locally', async () => {

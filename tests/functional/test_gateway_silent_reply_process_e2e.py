@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ctypes
+import datetime
 import json
 import os
 import socket
@@ -18,6 +20,7 @@ import sys
 import time
 import uuid
 from collections.abc import AsyncIterator
+from ctypes import wintypes
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -231,15 +234,76 @@ async def _wait_for_health(
     )
 
 
-def _stop_process(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
+def _open_gateway_process_handle(state_dir: Path) -> tuple[Any, int] | None:
+    """Capture the actual Windows writer before terminating its venv launcher."""
+    if os.name != "nt":
+        return None
     try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=10)
+        identity = json.loads((state_dir / "gateway.pid").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        # Boot publishes this identity before opening any database.
+        return None
+    pid = identity["pid"]
+    started = datetime.datetime.fromisoformat(identity["start_ts"])
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or started.tzinfo is None:
+        raise AssertionError("invalid Gateway process identity")
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE, *[ctypes.POINTER(wintypes.FILETIME)] * 4]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x00100000 | 0x1000, False, pid)
+    if not handle:
+        if int(getattr(ctypes, "get_last_error")()) == 87:  # Process already gone.
+            return None
+        raise getattr(ctypes, "WinError")()
+    try:
+        timestamps = [wintypes.FILETIME() for _ in range(4)]
+        if not kernel32.GetProcessTimes(handle, *(ctypes.byref(value) for value in timestamps)):
+            raise getattr(ctypes, "WinError")()
+        created = (timestamps[0].dwHighDateTime << 32) | timestamps[0].dwLowDateTime
+        recorded = int(started.timestamp() * 10_000_000) + 116_444_736_000_000_000
+        if created > recorded:
+            # The original process exited and its numeric PID was reused.
+            kernel32.CloseHandle(handle)
+            return None
+        return kernel32, int(handle)
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+
+
+def _stop_process(process: subprocess.Popen[bytes], state_dir: Path) -> None:
+    identity = None
+    deadline = time.monotonic() + 10.0
+    try:
+        try:
+            identity = _open_gateway_process_handle(state_dir)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    deadline = time.monotonic() + 10.0
+                    process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        if identity is not None:
+            kernel32, handle = identity
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            result = kernel32.WaitForSingleObject(handle, remaining_ms)
+            if result == 258:
+                raise AssertionError("Gateway writer remained alive after launcher shutdown")
+            if result != 0:
+                raise getattr(ctypes, "WinError")()
+    finally:
+        if identity is not None:
+            kernel32, handle = identity
+            kernel32.CloseHandle(handle)
 
 
 def _isolated_gateway_env(
@@ -328,6 +392,8 @@ async def _drain_available_frames(
             return
 
 
+# Fresh-profile migrations can exhaust the health deadline under CI worker load.
+@pytest.mark.ci_serial
 @pytest.mark.asyncio
 async def test_real_gateway_suppresses_goal_sentinel_everywhere(
     tmp_path: Path,
@@ -436,7 +502,7 @@ async def test_real_gateway_suppresses_goal_sentinel_everywhere(
         if subscription is not None:
             await subscription.close()
         await client.close()
-        _stop_process(process)
+        _stop_process(process, state_dir)
         gateway_stream.close()
 
     done_payloads = [
@@ -581,9 +647,10 @@ async def _sample_default_turn(*, sample_dir: Path, source_root: Path) -> dict[s
             }
         finally:
             await client.close()
-            _stop_process(process)
+            _stop_process(process, state_dir)
 
 
+@pytest.mark.ci_serial
 async def test_default_timing_sample_has_one_provider_call_and_no_goal(tmp_path: Path) -> None:
     result = await _sample_default_turn(
         sample_dir=tmp_path / "sample", source_root=Path(__file__).resolve().parents[2],

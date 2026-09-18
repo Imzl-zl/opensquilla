@@ -36,6 +36,9 @@ SHARD_NAMES: Final[tuple[str, ...]] = (
     "recovery-migration",
     "desktop-installer-contracts",
 )
+WINDOWS_SHARD_NAMES: Final[tuple[str, ...]] = tuple(
+    f"{family}-{partition}" for family in SHARD_NAMES for partition in (1, 2)
+)
 DEFAULT_PARALLEL_WORKERS: Final[int] = 4
 _CORE_WHEEL_FIXTURE: Final[str] = "isolated_core_wheel"
 _CORE_WHEEL_ENV: Final[str] = "OPENSQUILLA_TEST_CORE_WHEEL"
@@ -107,6 +110,7 @@ _HARD_PINNED_SHARDS: Final[dict[str, str]] = {
 }
 _DURATION_FILE: Final[Path] = Path(__file__).with_name("windows_test_durations.json")
 _ASSIGNMENT_FILE: Final[Path] = Path(__file__).with_name("windows_test_assignments.json")
+_PARTITION_FILE: Final[Path] = Path(__file__).with_name("windows_test_partitions.json")
 
 
 # These files are excluded from offline CI by its marker expression.
@@ -421,17 +425,92 @@ def shard_for_test(path: str) -> str:
     return "core"
 
 
+def shard_family(shard: str) -> str:
+    """Resolve a responsibility family or a Windows execution partition."""
+
+    if shard in SHARD_NAMES:
+        return shard
+    if shard in WINDOWS_SHARD_NAMES:
+        return shard.rsplit("-", 1)[0]
+    raise ValueError(f"unknown Windows shard: {shard}")
+
+
+def validate_partition_payload(payload: object) -> dict[str, str]:
+    """Validate the reviewed Windows execution map without rebalancing it."""
+
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError("unsupported Windows test partition schema")
+    partitions = payload.get("partitions")
+    if not isinstance(partitions, dict) or set(partitions) != set(WINDOWS_SHARD_NAMES):
+        raise ValueError("partitions must contain every Windows execution shard exactly once")
+    assignments: dict[str, str] = {}
+    for shard in WINDOWS_SHARD_NAMES:
+        paths = partitions[shard]
+        if not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
+            raise ValueError(f"invalid Windows partition paths in {shard!r}")
+        if paths != sorted(paths):
+            raise ValueError(f"Windows partition {shard!r} is not sorted")
+        for path in paths:
+            normalized = PurePosixPath(path)
+            if (
+                normalized.as_posix() != path
+                or not path.startswith("tests/")
+                or ".." in normalized.parts
+                or not normalized.name.startswith("test_")
+                or normalized.suffix != ".py"
+            ):
+                raise ValueError(f"invalid Windows partition test path: {path!r}")
+            if path in assignments:
+                raise ValueError(f"duplicate Windows partition test path: {path}")
+            if shard_for_test(path) != shard_family(shard):
+                raise ValueError(f"Windows partition crosses responsibility families: {path}")
+            assignments[path] = shard
+    return assignments
+
+
+@cache
+def partition_assignments() -> dict[str, str]:
+    """Load the stable partition snapshot; duration refreshes cannot move files."""
+
+    try:
+        payload = json.loads(_PARTITION_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read Windows test partitions from {_PARTITION_FILE}") from exc
+    return validate_partition_payload(payload)
+
+
+def partition_snapshot_fingerprint() -> str:
+    """Bind physical Windows reports to their reviewed execution assignment map."""
+
+    canonical = json.dumps(partition_assignments(), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def windows_shard_for_test(path: str) -> str:
+    """Select one physical Windows shard, with stable fallback for new files."""
+
+    normalized = PurePosixPath(path).as_posix()
+    assignment = partition_assignments().get(normalized)
+    if assignment is not None:
+        return assignment
+    family = shard_for_test(normalized)
+    partition = int(hashlib.sha256(normalized.encode("utf-8")).hexdigest(), 16) % 2 + 1
+    return f"{family}-{partition}"
+
+
 def files_for_shard(root: Path, shard: str) -> tuple[str, ...]:
-    if shard not in SHARD_NAMES:
-        raise ValueError(f"unknown Windows shard: {shard}")
-    return tuple(path for path in discover_test_files(root) if shard_for_test(path) == shard)
+    shard_family(shard)
+    selector = windows_shard_for_test if shard in WINDOWS_SHARD_NAMES else shard_for_test
+    return tuple(path for path in discover_test_files(root) if selector(path) == shard)
 
 
 def validated_files_for_shard(root: Path, shard: str) -> tuple[str, ...]:
     """Return one shard after validating the complete offline file inventory."""
 
     discovered = set(discover_test_files(root))
-    by_shard = {name: set(files_for_shard(root, name)) for name in SHARD_NAMES}
+    names = WINDOWS_SHARD_NAMES if shard in WINDOWS_SHARD_NAMES else SHARD_NAMES
+    shard_family(shard)
+    by_shard = {name: set(files_for_shard(root, name)) for name in names}
     assigned = set().union(*by_shard.values())
     assignment_count = sum(len(paths) for paths in by_shard.values())
     if assigned != discovered or assignment_count != len(discovered):
@@ -544,6 +623,9 @@ def _write_run_metadata(
             },
         },
     }
+    if shard in WINDOWS_SHARD_NAMES:
+        payload["family"] = shard_family(shard)
+        payload["partition_sha256"] = partition_snapshot_fingerprint()
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
@@ -810,7 +892,9 @@ def _requires_isolated_core_wheel(root: Path, files: tuple[str, ...]) -> bool:
 
     for relative in files:
         path = root / relative
-        parsed = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        # Let Python honor UTF-8 BOMs and source coding cookies during prescan,
+        # exactly as it does when pytest imports the selected test module.
+        parsed = ast.parse(path.read_bytes(), filename=str(path))
         if any(
             isinstance(node, ast.arg) and node.arg == _CORE_WHEEL_FIXTURE
             for node in ast.walk(parsed)
@@ -918,10 +1002,6 @@ def _run(args: argparse.Namespace) -> int:
 
     root = args.root.resolve()
     files = validated_files_for_shard(root, args.shard)
-    if not files:
-        print(f"Windows shard {args.shard!r} has no tests", file=sys.stderr)
-        return 2
-
     args.junit.parent.mkdir(parents=True, exist_ok=True)
     args.summary.parent.mkdir(parents=True, exist_ok=True)
     args.summary.write_text("pytest_status=started\n", encoding="utf-8")
@@ -932,6 +1012,12 @@ def _run(args: argparse.Namespace) -> int:
             files,
             parallel_workers=args.workers,
         )
+    if not files:
+        error = ValueError(f"Windows shard {args.shard!r} has no tests")
+        print(str(error), file=sys.stderr)
+        _write_runner_error_junit(args.junit, error)
+        _write_failure_summary(args.junit, args.summary, 2)
+        return 2
 
     pytest_args, marker_expression = _pytest_phase_inputs(args.pytest_args)
     parallel_junit = _phase_junit_path(args.junit, "parallel")
@@ -942,7 +1028,9 @@ def _run(args: argparse.Namespace) -> int:
     runner_error_junit.unlink(missing_ok=True)
     args.junit.unlink(missing_ok=True)
 
-    _, weight, unweighted = shard_weight_summary(root)[args.shard]
+    weights = historical_test_weights()
+    weight = sum(weights.get(path, 0.0) for path in files)
+    unweighted = sum(path not in weights for path in files)
     print(
         f"Running {len(files)} test files in CI shard {args.shard} "
         f"(historical weight: {weight:.1f}s; unweighted: {unweighted})"
@@ -983,8 +1071,7 @@ def _run(args: argparse.Namespace) -> int:
                 f"--junitxml={serial_junit}",
             ]
             print(
-                "Running serial phase in the controller process "
-                "(fresh subprocess; ci_serial only)"
+                "Running serial phase in the controller process (fresh subprocess; ci_serial only)"
             )
             raw_serial_exit_code = _run_pytest_subprocess(
                 root,
@@ -1088,7 +1175,7 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     list_parser = subparsers.add_parser("list", help="list files assigned to one shard")
-    list_parser.add_argument("shard", choices=SHARD_NAMES)
+    list_parser.add_argument("shard", choices=(*SHARD_NAMES, *WINDOWS_SHARD_NAMES))
     list_parser.add_argument("--root", type=Path, default=Path.cwd())
     list_parser.set_defaults(handler=_list)
 
@@ -1100,7 +1187,7 @@ def _parser() -> argparse.ArgumentParser:
     report_parser.set_defaults(handler=_report)
 
     run_parser = subparsers.add_parser("run", help="run one shard through pytest")
-    run_parser.add_argument("shard", choices=SHARD_NAMES)
+    run_parser.add_argument("shard", choices=(*SHARD_NAMES, *WINDOWS_SHARD_NAMES))
     run_parser.add_argument("--root", type=Path, default=Path.cwd())
     run_parser.add_argument("--junit", type=Path, required=True)
     run_parser.add_argument("--summary", type=Path, required=True)

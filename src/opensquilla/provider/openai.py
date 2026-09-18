@@ -3730,8 +3730,8 @@ class OpenAIProvider:
 
         from opensquilla.engine.context_budget import coordinate_provider_context_budget
 
-        budget_decision = coordinate_provider_context_budget(
-            payload,
+        budget_decision = await asyncio.to_thread(
+            coordinate_provider_context_budget, payload,
             projection_adapter=self._provider_kind,
             proof_budget=provider_request_character_budget(payload, cfg),
             token_budget=provider_request_token_budget(payload, cfg),
@@ -3759,8 +3759,8 @@ class OpenAIProvider:
         if budget_decision.proof is not None:
             log.info("provider.request_proof", **budget_decision.proof)
         try:
-            prove_provider_payload_from_env(
-                payload,
+            await asyncio.to_thread(
+                prove_provider_payload_from_env, payload,
                 token_budget=provider_request_token_budget(payload, cfg),
                 projection_adapter=self._provider_kind,
                 status_projection_mode="content_envelope",

@@ -120,11 +120,11 @@ async def test_batch_handles_archive_only_active_only_mixed_and_missing_sessions
     selected = [node.session_id for node in nodes.values()] + [empty.session_id, "missing"]
     queries: list[str] = []
     before_changes = storage.conn.total_changes
-    await storage.conn.set_trace_callback(queries.append)
+    await storage._transcript_reader.set_trace_callback(queries.append)
     try:
         actual = await storage.list_canonical_user_transcript_content_batch(selected)
     finally:
-        await storage.conn.set_trace_callback(None)
+        await storage._transcript_reader.set_trace_callback(None)
 
     assert actual == {
         **{node.session_id: [f"{name} sample {i}" for i in range(3)]
@@ -169,11 +169,11 @@ async def test_large_batch_chunks_reads_within_sqlite_variable_limit(
     session_ids = [f"missing-{index}" for index in range(650)]
     session_ids.insert(301, node.session_id)
     queries: list[str] = []
-    await storage.conn.set_trace_callback(queries.append)
+    await storage._transcript_reader.set_trace_callback(queries.append)
     try:
         result = await storage.list_canonical_user_transcript_content_batch(session_ids)
     finally:
-        await storage.conn.set_trace_callback(None)
+        await storage._transcript_reader.set_trace_callback(None)
 
     assert result == {
         sid: ["Sample first message"] if sid == node.session_id else []
@@ -187,12 +187,12 @@ async def test_empty_request_needs_no_read(
     storage: SessionStorage, session_ids: list[str], limit: int,
 ) -> None:
     queries: list[str] = []
-    await storage.conn.set_trace_callback(queries.append)
+    await storage._transcript_reader.set_trace_callback(queries.append)
     try:
         actual = await storage.list_canonical_user_transcript_content_batch(
             session_ids, limit_per_session=limit,
         )
     finally:
-        await storage.conn.set_trace_callback(None)
+        await storage._transcript_reader.set_trace_callback(None)
     assert actual == {sid: [] for sid in session_ids}
     assert queries == []
