@@ -172,7 +172,7 @@
               <button
                 v-if="canDiscardGroup(group)"
                 type="button"
-                class="btn btn--icon wb-changes__list-action"
+                class="wb-changes__list-action"
                 :disabled="indexBusy"
                 :aria-busy="indexBusy"
                 :aria-label="t('workbench.changes.discardAll')"
@@ -185,7 +185,7 @@
               </button>
               <button
                 type="button"
-                class="btn btn--icon wb-changes__list-action"
+                class="wb-changes__list-action"
                 :disabled="indexBusy"
                 :aria-busy="indexBusy"
                 :aria-label="t(`workbench.changes.${group.indexAction}All`)"
@@ -247,7 +247,7 @@
             <button
               v-if="entry.changeType !== 'untracked'"
               type="button"
-              class="btn btn--icon wb-changes__list-action"
+              class="wb-changes__list-action"
               :disabled="indexBusy"
               :aria-busy="indexBusy"
               :aria-label="t('workbench.changes.discard')"
@@ -260,7 +260,7 @@
             </button>
             <button
               type="button"
-              class="btn btn--icon wb-changes__list-action"
+              class="wb-changes__list-action"
               :disabled="indexBusy"
               :aria-busy="indexBusy"
               :aria-label="t(`workbench.changes.${indexAction(entry)}`)"
@@ -1123,7 +1123,11 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   display: inline-flex;
   width: 20px;
   height: 20px;
+  min-width: 0;
   flex: none;
+  /* The row is a flex line, so without this the square stretches to its
+     height; a 20x36 box is what made the hover actions look thin. */
+  align-self: center;
   align-items: center;
   justify-content: center;
   padding: 0;

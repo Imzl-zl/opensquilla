@@ -539,12 +539,15 @@ describe('WorkspaceChangesPanel', () => {
       expect(control?.querySelector('svg')?.getAttribute('width')).toBe('12')
     }
 
+    // Not a `.btn`: the app's in-list action (base.css `.sidebar-project-action`)
+    // is a standalone 20px square, and inheriting `.btn`'s padding and height is
+    // what stretched it into a thin rectangle.
     const inList = [
       mounted.element.querySelector('[data-testid="changes-group-index-action"]'),
       mounted.element.querySelector('[data-testid="changes-index-action"]'),
     ]
     for (const control of inList) {
-      expect(control?.classList.contains('btn--icon')).toBe(true)
+      expect(control?.classList.contains('btn')).toBe(false)
       expect(control?.classList.contains('wb-changes__list-action')).toBe(true)
     }
     mounted.unmount()
