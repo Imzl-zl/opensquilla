@@ -1,12 +1,13 @@
 """Tests for the workspace review panel's drafted commit messages.
 
-Covers the response parser, target resolution, the one-shot LLM call (mocked
-httpx), and the orchestrator's refusal paths. The orchestrator never writes to
-the repository, so nothing here asserts a side effect on disk.
+Covers the response parser, target resolution, the provider-adapter call, and
+the orchestrator's refusal paths. The orchestrator never writes to the
+repository, so nothing here asserts a side effect on disk.
 """
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -17,11 +18,12 @@ from opensquilla.gateway.config import (
     SquillaRouterConfig,
 )
 from opensquilla.provider.protocol import ProviderConnectionConfig
+from opensquilla.provider.types import DoneEvent, ErrorEvent, TextDeltaEvent
 from opensquilla.workspace_commit_message import (
     CommitMessageDraft,
     WorkspaceCommitMessageError,
     build_staged_diff_context,
-    call_commit_message_llm,
+    call_commit_message_provider,
     draft_workspace_commit_message,
     parse_commit_message,
     resolve_commit_message_target,
@@ -397,57 +399,100 @@ def test_resolve_target_requires_credentials():
     ) is None
 
 
-# ── call_commit_message_llm (mocked httpx) ──────────────────────────────────
+# ── call_commit_message_provider (adapter transport) ────────────────────────
 
 
-class _FakeResponse:
-    def __init__(self, content: str, finish_reason: str = "stop"):
-        self._content = content
-        self._finish_reason = finish_reason
+class _ProviderStream:
+    """Async iterator of provider stream events, recording close."""
 
-    def raise_for_status(self) -> None:
-        return None
+    def __init__(self, events):
+        self._events = iter(events)
+        self.closed = False
 
-    def json(self) -> dict:
-        return {"choices": [{
-            "message": {"content": self._content},
-            "finish_reason": self._finish_reason,
-        }]}
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._events)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
+
+    async def aclose(self):
+        self.closed = True
 
 
-def _fake_client(captured: dict, content: str):
-    class _FakeClient:
-        async def __aenter__(self):
-            return self
+class _AdapterProvider:
+    """Adapter-shaped provider stub: metadata, connection config, and chat()."""
 
-        async def __aexit__(self, exc_type, exc, tb) -> bool:
-            return False
+    provider_name = "openai"
 
-        async def post(self, url, *, json, headers):
-            captured["url"] = url
-            captured["json"] = json
-            captured["headers"] = headers
-            return _FakeResponse(content)
+    def __init__(
+        self,
+        stream_factory,
+        *,
+        accounts_physical_usage=False,
+        model="provider/model",
+    ):
+        self._stream_factory = stream_factory
+        self._model = model
+        self.calls = []
+        self.streams = []
+        self.accounts_physical_usage = accounts_physical_usage
 
-    return _FakeClient()
+    def provider_metadata(self):
+        from opensquilla.provider.protocol import ProviderMetadata
+
+        return ProviderMetadata(
+            provider_name="openai",
+            provider_kind="openrouter",
+            provider_id="openrouter",
+            model=self._model,
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+    def provider_connection_config(self):
+        return ProviderConnectionConfig(
+            provider_kind="openrouter",
+            model=self._model,
+            api_key="KEY",
+            base_url="https://openrouter.ai/api/v1",
+        )
+
+    def chat(self, messages, tools=None, config=None):
+        self.calls.append((messages, tools, config))
+        stream = self._stream_factory()
+        self.streams.append(stream)
+        return stream
+
+    async def list_models(self):
+        return []
+
+
+def _delta(text):
+    return TextDeltaEvent(text=text)
+
+
+def _done(output_tokens=5, stop_reason="end_turn"):
+    return DoneEvent(output_tokens=output_tokens, stop_reason=stop_reason)
+
+
+def _drafting_provider(events, **kwargs):
+    return _AdapterProvider(lambda: _ProviderStream(list(events)), **kwargs)
 
 
 @pytest.mark.asyncio
-async def test_call_commit_message_llm_builds_a_message_shaped_request(monkeypatch):
-    captured: dict = {}
-    monkeypatch.setattr(
-        "opensquilla.workspace_commit_message.httpx.AsyncClient",
-        lambda **kwargs: _fake_client(
-            captured,
-            "Add the retry budget\n\nCap the attempts so a stalled host fails fast.",
-        ),
-    )
+async def test_call_provider_builds_a_message_shaped_request():
+    provider = _drafting_provider([
+        _delta("Add the retry budget"),
+        _delta("\n\nCap the attempts so a stalled host fails fast."),
+        _done(),
+    ])
 
-    draft = await call_commit_message_llm(
+    draft = await call_commit_message_provider(
         "diff --git a/a.py b/a.py\n+retries = 3\n",
-        model="deepseek/deepseek-v4-pro",
-        api_key="test-key",
-        base_url="https://openrouter.ai/api/v1",
+        provider=provider,
+        model="provider/model",
         timeout=10.0,
     )
 
@@ -455,34 +500,34 @@ async def test_call_commit_message_llm_builds_a_message_shaped_request(monkeypat
         subject="Add the retry budget",
         body="Cap the attempts so a stalled host fails fast.",
     )
-    assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
-    assert captured["json"]["model"] == "deepseek/deepseek-v4-pro"
+    messages, tools, config = provider.calls[0]
+    assert tools is None
     # The budget has to cover a reasoning model's thinking before the message:
     # a 1024-token cap spent itself on deliberation and returned null content.
-    assert captured["json"]["max_tokens"] == 4096
-    assert captured["json"]["temperature"] == 0
-    assert captured["json"]["stream"] is False
-    assert captured["headers"]["Authorization"] == "Bearer test-key"
+    assert config.max_tokens == 4096
+    assert config.temperature == 0
+    assert config.thinking is False
+    assert config.timeout == 10.0
     # The patch is the user turn; the rules are the system turn.
-    assert "+retries = 3" in captured["json"]["messages"][1]["content"]
+    assert messages[0].role == "user"
+    assert "+retries = 3" in messages[0].content
+    assert "You write Git commit messages" in config.system
+    # The stream is closed even though it reached its own terminal event.
+    assert provider.streams[0].closed is True
 
 
 @pytest.mark.asyncio
-async def test_call_commit_message_llm_carries_the_configured_rule(monkeypatch):
-    captured: dict = {}
-    monkeypatch.setattr(
-        "opensquilla.workspace_commit_message.httpx.AsyncClient",
-        lambda **kwargs: _fake_client(captured, "Subject"),
-    )
+async def test_call_provider_carries_the_configured_rule():
+    provider = _drafting_provider([_delta("Subject"), _done()])
 
-    await call_commit_message_llm(
+    await call_commit_message_provider(
         "+line\n",
-        model="m",
-        api_key="k",
+        provider=provider,
+        model="provider/model",
         instructions="Use Conventional Commits prefixes.",
     )
 
-    system = captured["json"]["messages"][0]["content"]
+    system = provider.calls[0][2].system
     assert "Use Conventional Commits prefixes." in system
     # The built-in guidance survives, so a rule adds to it rather than
     # replacing the guarantees (truthfulness, no invented change).
@@ -491,95 +536,105 @@ async def test_call_commit_message_llm_carries_the_configured_rule(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_call_commit_message_llm_reports_an_answer_cut_by_the_token_limit(
-    monkeypatch,
-):
+async def test_call_provider_reports_an_answer_cut_by_the_token_limit():
     """A reasoning model that never got to the message is not a silent nothing."""
 
-    captured: dict = {}
-
-    class _Truncated:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb) -> bool:
-            return False
-
-        async def post(self, url, *, json, headers):
-            captured["json"] = json
-            return _FakeResponse(None, finish_reason="length")
-
-    monkeypatch.setattr(
-        "opensquilla.workspace_commit_message.httpx.AsyncClient",
-        lambda **kwargs: _Truncated(),
-    )
+    provider = _drafting_provider([_done(output_tokens=0, stop_reason="length")])
 
     with pytest.raises(WorkspaceCommitMessageError) as raised:
-        await call_commit_message_llm("+line\n", model="m", api_key="k")
+        await call_commit_message_provider(
+            "+line\n", provider=provider, model="provider/model"
+        )
 
     assert raised.value.reason == "answer_truncated"
     assert "output limit" in raised.value.message
 
 
-class _LimitClient:
-    """Answers with a subject and still reports the output limit."""
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
-        return False
-
-    async def post(self, url, *, json, headers):
-        return _FakeResponse("Add the retry budget", finish_reason="length")
-
-
 @pytest.mark.asyncio
-async def test_call_commit_message_llm_keeps_a_usable_answer_that_hit_the_limit(
-    monkeypatch,
-):
+async def test_call_provider_keeps_a_usable_answer_that_hit_the_limit():
     """A subject that arrived before the cap is still a usable draft."""
 
-    monkeypatch.setattr(
-        "opensquilla.workspace_commit_message.httpx.AsyncClient",
-        lambda **kwargs: _LimitClient(),
-    )
+    provider = _drafting_provider([
+        _delta("Add the retry budget"),
+        _done(stop_reason="length"),
+    ])
 
-    draft = await call_commit_message_llm("+line\n", model="m", api_key="k")
+    draft = await call_commit_message_provider(
+        "+line\n", provider=provider, model="provider/model"
+    )
 
     assert draft == CommitMessageDraft(subject="Add the retry budget", body="")
 
 
 @pytest.mark.asyncio
-async def test_call_commit_message_llm_refuses_without_a_key_or_a_patch():
-    assert await call_commit_message_llm("+line\n", model="m", api_key="") is None
-    assert await call_commit_message_llm("   ", model="m", api_key="k") is None
+async def test_call_provider_refuses_without_a_provider_or_a_patch():
+    provider = _drafting_provider([_delta("Subject"), _done()])
+
+    assert await call_commit_message_provider(
+        "+line\n", provider=None, model="provider/model"
+    ) is None
+    assert await call_commit_message_provider(
+        "   ", provider=provider, model="provider/model"
+    ) is None
+    assert provider.calls == []
 
 
 @pytest.mark.asyncio
-async def test_call_commit_message_llm_reports_a_failed_call_with_its_cause(monkeypatch):
+async def test_call_provider_returns_none_for_an_unusable_answer():
+    """An answer with no usable subject is "no message", not a failure."""
+
+    provider = _drafting_provider([_delta("commit message"), _done()])
+
+    assert await call_commit_message_provider(
+        "+line\n", provider=provider, model="provider/model"
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_call_provider_reports_a_failed_call_with_its_cause():
     """A transport failure names what failed; `None` means an unusable answer."""
 
-    class _Boom:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb) -> bool:
-            return False
-
-        async def post(self, url, *, json, headers):
-            raise RuntimeError("401 Unauthorized: invalid_api_key")
-
-    monkeypatch.setattr(
-        "opensquilla.workspace_commit_message.httpx.AsyncClient",
-        lambda **kwargs: _Boom(),
-    )
+    provider = _drafting_provider([
+        ErrorEvent(message="401 Unauthorized: invalid_api_key", code="401"),
+    ])
 
     with pytest.raises(WorkspaceCommitMessageError) as raised:
-        await call_commit_message_llm("+line\n", model="m", api_key="k")
+        await call_commit_message_provider(
+            "+line\n", provider=provider, model="provider/model"
+        )
 
     assert raised.value.reason == "call_failed"
     assert "401 Unauthorized" in raised.value.message
+
+
+@pytest.mark.asyncio
+async def test_call_provider_reports_a_stream_without_a_terminal_event():
+    provider = _drafting_provider([_delta("Partial")])
+
+    with pytest.raises(WorkspaceCommitMessageError) as raised:
+        await call_commit_message_provider(
+            "+line\n", provider=provider, model="provider/model"
+        )
+
+    assert raised.value.reason == "call_failed"
+    assert "terminal" in raised.value.message
+
+
+@pytest.mark.asyncio
+async def test_call_provider_reports_a_timeout_with_a_readable_cause():
+    async def _never():
+        yield _delta("stuck")
+        await asyncio.Event().wait()
+
+    provider = _AdapterProvider(lambda: _never())
+
+    with pytest.raises(WorkspaceCommitMessageError) as raised:
+        await call_commit_message_provider(
+            "+line\n", provider=provider, model="provider/model", timeout=0.01
+        )
+
+    assert raised.value.reason == "call_failed"
+    assert "0.01 seconds" in raised.value.message
 
 
 # ── draft_workspace_commit_message ──────────────────────────────────────────
@@ -625,13 +680,68 @@ async def test_draft_sends_the_connected_model_rather_than_the_router_tier(monke
         return CommitMessageDraft(subject="Subject", body="")
 
     monkeypatch.setattr(
-        "opensquilla.workspace_commit_message.call_commit_message_llm",
+        "opensquilla.workspace_commit_message.call_commit_message_provider",
         _capture,
     )
 
     await draft_workspace_commit_message(ctx, "+line\n")
 
     assert seen["model"] == "relay:glm-5.3"
+    # The connected deployment already serves that model, so nothing rebuilds.
+    assert seen["provider"].provider_connection_config().model == "relay:glm-5.3"
+
+
+@pytest.mark.asyncio
+async def test_draft_rebuilds_a_clone_for_an_explicit_model(monkeypatch):
+    """An explicit model reaches the adapter without rebinding the session's.
+
+    The clone is what makes ``commit_message.model`` work at all once the call
+    goes through the provider adapter: the selector's current deployment serves
+    its own model, and only a clone can carry a different one.
+    """
+
+    ctx = _ctx(GatewayConfig(commit_message=CommitMessageConfig(model="explicit/model")))
+    overrides: list[object] = []
+
+    def _resolver(_ctx, _session, *, model_override=None):
+        overrides.append(model_override)
+        return _FakeProvider(model=model_override or "connected/model")
+
+    monkeypatch.setattr(
+        "opensquilla.gateway.compaction_target.resolve_selected_compaction_provider",
+        _resolver,
+    )
+    seen: dict = {}
+
+    async def _capture(_diff, **kwargs):
+        seen.update(kwargs)
+        return CommitMessageDraft(subject="Subject", body="")
+
+    monkeypatch.setattr(
+        "opensquilla.workspace_commit_message.call_commit_message_provider",
+        _capture,
+    )
+
+    await draft_workspace_commit_message(ctx, "+line\n")
+
+    assert overrides == [None, "explicit/model"]
+    assert seen["model"] == "explicit/model"
+
+
+@pytest.mark.asyncio
+async def test_draft_refuses_when_the_explicit_model_is_not_on_the_connection(monkeypatch):
+    """A clone that still cannot serve the model is a missing target."""
+
+    ctx = _ctx(GatewayConfig(commit_message=CommitMessageConfig(model="explicit/model")))
+    monkeypatch.setattr(
+        "opensquilla.gateway.compaction_target.resolve_selected_compaction_provider",
+        lambda *_args, **_kwargs: _FakeProvider(model="connected/model"),
+    )
+
+    with pytest.raises(WorkspaceCommitMessageError) as raised:
+        await draft_workspace_commit_message(ctx, "+line\n")
+
+    assert raised.value.reason == "no_target"
 
 
 @pytest.mark.asyncio
@@ -642,14 +752,14 @@ async def test_draft_reports_an_unusable_model_answer(monkeypatch):
 
     monkeypatch.setattr(
         "opensquilla.gateway.compaction_target.resolve_selected_compaction_provider",
-        lambda *_args, **_kwargs: _FakeProvider(),
+        lambda *_args, **_kwargs: _FakeProvider(model="test/model"),
     )
 
     async def _no_message(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(
-        "opensquilla.workspace_commit_message.call_commit_message_llm",
+        "opensquilla.workspace_commit_message.call_commit_message_provider",
         _no_message,
     )
 
@@ -664,14 +774,14 @@ async def test_draft_reports_a_failed_call_rather_than_a_silent_no_message(monke
     ctx = _ctx(GatewayConfig(commit_message=CommitMessageConfig(model="test/model")))
     monkeypatch.setattr(
         "opensquilla.gateway.compaction_target.resolve_selected_compaction_provider",
-        lambda *_args, **_kwargs: _FakeProvider(),
+        lambda *_args, **_kwargs: _FakeProvider(model="test/model"),
     )
 
     async def _fail(*_args, **_kwargs):
         raise WorkspaceCommitMessageError("call_failed", "The model call failed: 401")
 
     monkeypatch.setattr(
-        "opensquilla.workspace_commit_message.call_commit_message_llm",
+        "opensquilla.workspace_commit_message.call_commit_message_provider",
         _fail,
     )
 
@@ -695,7 +805,7 @@ async def test_draft_sends_the_configured_rule_and_nothing_else(monkeypatch):
 
     monkeypatch.setattr(
         "opensquilla.gateway.compaction_target.resolve_selected_compaction_provider",
-        lambda *_args, **_kwargs: _FakeProvider(),
+        lambda *_args, **_kwargs: _FakeProvider(model="test/model"),
     )
     seen: dict = {}
 
@@ -705,7 +815,7 @@ async def test_draft_sends_the_configured_rule_and_nothing_else(monkeypatch):
         return CommitMessageDraft(subject="Subject", body="")
 
     monkeypatch.setattr(
-        "opensquilla.workspace_commit_message.call_commit_message_llm",
+        "opensquilla.workspace_commit_message.call_commit_message_provider",
         _capture,
     )
 

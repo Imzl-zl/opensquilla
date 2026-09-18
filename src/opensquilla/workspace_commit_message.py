@@ -1,10 +1,14 @@
 """Draft a commit message for a project workspace's staged index.
 
 The workspace review panel's ✨ action sends the staged diff through one
-one-shot LLM call — the same mechanism :mod:`opensquilla.session.naming` uses
-for session titles — and put the answer in the commit input for the operator
-to edit. Nothing is committed here: the draft is text, and
+one-shot auxiliary call — the same transport :mod:`opensquilla.session.naming`
+uses for session titles — and puts the answer in the commit input for the
+operator to edit. Nothing is committed here: the draft is text, and
 ``workspaces.git.commit`` stays the only writer.
+
+Transport is the active provider adapter (``provider.chat``), not a hand-rolled
+``httpx`` POST, so the request inherits the adapter's wire dialect, credential
+handling, failure classification and usage accounting.
 
 The call is deliberately *not* best-effort-silent. Auto-naming can swallow a
 failure because a truncated fallback title still exists; a commit message has
@@ -16,38 +20,32 @@ of looking like an unavailable workspace.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import httpx
 import structlog
 
-from opensquilla.env import trust_env as _trust_env
-from opensquilla.provider.app_attribution import provider_app_headers
 from opensquilla.provider.auxiliary_budget import (
     AuxiliaryRequestBudget,
     AuxiliaryRequestTooLargeError,
     ensure_auxiliary_text_fits,
     resolve_auxiliary_request_budget,
 )
-from opensquilla.provider.tokenrhythm_correlation import (
-    redact_tokenrhythm_install_ids,
-    tokenrhythm_correlation_headers,
-    tokenrhythm_install_id_headers,
+from opensquilla.provider.protocol import (
+    configured_provider_id,
+    provider_connection_config,
 )
-from opensquilla.session.naming import (
-    _OPENROUTER_REASONING_DEFAULT_MODELS,
-    NamingTarget,
-    resolve_naming_target,
-)
+from opensquilla.provider.tokenrhythm_correlation import redact_tokenrhythm_install_ids
+from opensquilla.provider.types import ChatConfig, Message
+from opensquilla.session.naming import NamingTarget, resolve_naming_target
 
 if TYPE_CHECKING:
     from opensquilla.provider.types import ProviderRequestCorrelation
 
 log = structlog.get_logger(__name__)
 
-_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 # The patch excerpts, not the whole request: a wide change has to stay
 # describable, so the file list beside them is complete and only these bytes are
 # bounded (see `build_staged_diff_context`).
@@ -138,7 +136,10 @@ def resolve_commit_message_target(
     provider: Any | None,
     fallback_model: str | None,
 ) -> NamingTarget | None:
-    """Resolve the connection for the drafting call.
+    """Resolve the model for the drafting call.
+
+    Only ``model`` and ``timeout`` are consumed: the credentials and the
+    transport come from the provider adapter, not from this target.
 
     Shares the session namer's resolution, with one deliberate difference: the
     router's *default* tier never applies here, so this passes
@@ -199,12 +200,6 @@ def _build_system_prompt(language: str, instructions: str | None) -> str:
             f"{custom}"
         )
     return prompt
-
-
-def _should_disable_openrouter_reasoning(url: str, model: str) -> bool:
-    if "openrouter.ai" not in url.lower():
-        return False
-    return model.strip().lower() in _OPENROUTER_REASONING_DEFAULT_MODELS
 
 
 def _section_paths(section: str) -> tuple[str, str]:
@@ -447,49 +442,52 @@ def parse_commit_message(raw: str | None, max_chars: int) -> CommitMessageDraft 
     return CommitMessageDraft(subject=subject, body=body)
 
 
-async def call_commit_message_llm(
+class _CommitMessageProviderError(RuntimeError):
+    """Internal marker for a provider error event or an incomplete stream."""
+
+
+async def call_commit_message_provider(
     diff_text: str,
     *,
+    provider: object | None,
     model: str,
-    api_key: str,
-    base_url: str = _DEFAULT_BASE_URL,
     timeout: float = 30.0,
     max_chars: int = 2000,
     language: str = "auto",
     instructions: str | None = None,
-    provider: str = "",
     provider_request_correlation: ProviderRequestCorrelation | None = None,
     diff_truncated: bool = False,
 ) -> CommitMessageDraft | None:
-    """Draft a commit message for ``diff_text``.
+    """Draft a commit message for ``diff_text`` through the provider adapter.
+
+    Streams one non-tool turn via ``provider.chat``, the way the session namer
+    and the other bounded auxiliary calls do, so the request goes through the
+    adapter's wire dialect, credential handling, failure classification and
+    usage accounting.
 
     Returns ``None`` when the model answered but nothing usable came back, and
     raises :class:`WorkspaceCommitMessageError` when the call itself could not
     be made or failed, so the caller can report the actual cause.
     """
 
-    if not api_key or not (diff_text or "").strip():
+    if provider is None or not (diff_text or "").strip():
+        return None
+    chat = getattr(provider, "chat", None)
+    if not callable(chat):
         return None
 
-    from opensquilla.provider._openai_compat_url import _versioned_api_url
-
-    url = _versioned_api_url(base_url, "/v1/chat/completions")
-
-    system_prompt = _build_system_prompt(language, instructions)
-    budget_provider = provider or (
-        "openrouter" if "openrouter.ai" in url.lower() else "openai_compat"
-    )
+    provider_id = configured_provider_id(provider)
+    provider_kind = provider_connection_config(provider).provider_kind.strip().lower()
     message_max_tokens = (
         _TOKENRHYTHM_MESSAGE_MAX_TOKENS
-        if str(provider or "").strip().lower() == "tokenrhythm"
+        if provider_kind == "tokenrhythm"
         else _MESSAGE_MAX_TOKENS
     )
     request_budget = resolve_auxiliary_request_budget(
-        None,
-        provider_id=budget_provider,
-        model=model,
+        provider,
         max_output_tokens=message_max_tokens,
     )
+    system_prompt = _build_system_prompt(language, instructions)
     user_content = _fit_diff_content(
         build_staged_diff_context(diff_text, truncated=diff_truncated),
         system_prompt=system_prompt,
@@ -498,7 +496,7 @@ async def call_commit_message_llm(
     if user_content is None:
         log.warning(
             "workspace_commit_message.request_too_large",
-            provider=budget_provider,
+            provider=provider_id,
             model=model,
             context_window=request_budget.context_window_tokens,
         )
@@ -506,114 +504,97 @@ async def call_commit_message_llm(
             "request_too_large",
             "The staged patch does not fit the model's request budget.",
         )
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        "max_tokens": request_budget.max_output_tokens,
-        "temperature": 0,
-        "stream": False,
-    }
-    if _should_disable_openrouter_reasoning(url, model):
-        payload["reasoning"] = {"enabled": False}
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    headers.update(provider_app_headers(url))
-    headers.update(
-        tokenrhythm_correlation_headers(
-            provider,
-            url,
-            provider_request_correlation,
-        )
+
+    messages = [Message(role="user", content=user_content)]
+    chat_config = ChatConfig(
+        max_tokens=request_budget.max_output_tokens,
+        temperature=0,
+        system=system_prompt,
+        thinking=False,
+        thinking_level="off",
+        thinking_budget_explicit=False,
+        provider_request_max_chars=request_budget.provider_request_max_chars,
+        provider_context_window_tokens=request_budget.context_window_tokens,
+        provider_request_max_chars_explicit_cap=(
+            request_budget.provider_request_max_chars_explicit_cap
+        ),
+        timeout=timeout,
+        provider_request_correlation=provider_request_correlation,
+        candidate_output_mode="inert_artifact",
+        physical_attempt_limit=1,
     )
 
     # Keep this import local: engine types import session lifecycle helpers
     # while the session package initializes the naming module.
-    from opensquilla.engine.usage_http import reserve_direct_usage_call
-
-    usage = await reserve_direct_usage_call(
-        provider=budget_provider,
-        model=model,
-        base_url=url,
+    from opensquilla.engine.usage_accounting import (
+        account_provider_stream,
+        provider_accounts_physical_usage,
     )
 
-    cancelled = False
-    client: httpx.AsyncClient | None = None
-    resp: httpx.Response | None = None
-    data: Any = None
-    raw: str | None = None
-    finish_reason = ""
+    chunks: list[str] = []
+    saw_done = False
+    stop_reason = ""
     try:
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            trust_env=_trust_env(),
-            follow_redirects=False,
-        ) as client:
-            headers.update(tokenrhythm_install_id_headers(provider, url))
-            resp = await client.post(url, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-            await usage.finalize_openai_response(
-                data,
-                raw_json=str(getattr(resp, "text", "") or ""),
+        stream: Any
+        if provider_accounts_physical_usage(provider):
+            stream = chat(messages, tools=None, config=chat_config)
+        else:
+            stream = account_provider_stream(
+                lambda: chat(messages, tools=None, config=chat_config),
+                provider=provider_id,
+                model=model,
             )
-            raw = data["choices"][0]["message"]["content"]
-            finish_reason = str(data["choices"][0].get("finish_reason") or "")
-    except asyncio.CancelledError:
-        # A propagated cancellation retains this frame. Scrub request state
-        # before accounting and raise a fresh exception outside the handler so
-        # neither the original traceback nor its context can expose the
-        # installation header.
-        headers.clear()
-        client = None
-        resp = None
-        data = None
-        raw = None
-        cancelled = True
-        try:
-            await usage.mark_unknown("cancelled")
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
+        # `aclosing` closes the accounting wrapper, which in turn closes the
+        # physical stream with the bounded helper: an error path is not
+        # guaranteed to reach a terminal event.
+        async with contextlib.aclosing(stream):
+            async with asyncio.timeout(timeout):
+                async for event in stream:
+                    kind = str(getattr(event, "kind", "") or "")
+                    if kind == "text_delta":
+                        chunks.append(str(getattr(event, "text", "") or ""))
+                    elif kind == "error":
+                        raise _CommitMessageProviderError(
+                            str(getattr(event, "message", "") or "provider error")
+                        )
+                    elif kind == "done":
+                        saw_done = True
+                        stop_reason = str(getattr(event, "stop_reason", "") or "")
+        if not saw_done:
+            raise _CommitMessageProviderError(
+                "provider stream ended before a terminal completion event"
+            )
+    except TimeoutError:
+        log.warning(
+            "workspace_commit_message.provider_call_timed_out",
+            provider=provider_id,
+            model=model,
+            timeout_seconds=timeout,
+        )
+        raise WorkspaceCommitMessageError(
+            "call_failed",
+            f"The model did not answer within {timeout:g} seconds.",
+        ) from None
     except Exception as exc:  # noqa: BLE001 - reported to the caller as a failure
         safe_error = redact_tokenrhythm_install_ids(str(exc))
-        headers.clear()
-        client = None
-        resp = None
-        data = None
-        raw = None
-        try:
-            await usage.mark_unknown("direct_request_failed")
-        except asyncio.CancelledError:
-            cancelled = True
-        except Exception:
-            pass
-        if not cancelled:
-            log.warning(
-                "workspace_commit_message.llm_call_failed",
-                model=model,
-                error=safe_error,
-            )
-            # Unlike the session namer, this call has no fallback title: the
-            # operator is waiting at the commit input, and a generic "the model
-            # said nothing useful" would send them looking at the model when
-            # the credential, the endpoint or the model id is what failed.
-            raise WorkspaceCommitMessageError(
-                "call_failed",
-                f"The model call failed: {safe_error[:_MAX_FAILURE_CHARS]}",
-            )
+        log.warning(
+            "workspace_commit_message.provider_call_failed",
+            provider=provider_id,
+            model=model,
+            error=safe_error,
+        )
+        # Unlike the session namer, this call has no fallback title: the
+        # operator is waiting at the commit input, and a generic "the model
+        # said nothing useful" would send them looking at the model when the
+        # credential, the endpoint or the model id is what failed.
+        raise WorkspaceCommitMessageError(
+            "call_failed",
+            f"The model call failed: {safe_error[:_MAX_FAILURE_CHARS]}",
+        ) from exc
 
-    if cancelled:
-        raise asyncio.CancelledError from None
-    safe_raw = redact_tokenrhythm_install_ids(raw) if isinstance(raw, str) else raw
-    draft = parse_commit_message(safe_raw, max_chars)
+    draft = parse_commit_message("".join(chunks), max_chars)
     if draft is None:
-        if finish_reason == "length":
+        if stop_reason == "length":
             # A usable partial answer is still returned above; only an answer
             # that never arrived is reported, and it is reported as the token
             # limit rather than as a model that said something unusable.
@@ -625,7 +606,11 @@ async def call_commit_message_llm(
         # is a different failure from "the call failed". The answer itself stays
         # out of the log: the gateway's privacy boundary drops free-form content
         # fields, so a field here would be a promise the log cannot keep.
-        log.warning("workspace_commit_message.answer_unusable", model=model)
+        log.warning(
+            "workspace_commit_message.answer_unusable",
+            provider=provider_id,
+            model=model,
+        )
     return draft
 
 
@@ -672,11 +657,30 @@ async def draft_workspace_commit_message(
         provider,
         effective_session_model(None),
     )
-    if target is None:
+    if target is None or provider is None:
         raise WorkspaceCommitMessageError(
             "no_target",
             "No model and credentials are available for commit message generation.",
         )
+    if provider_connection_config(provider).model != target.model:
+        # Rebuild only a clone, so an explicit `commit_message.model` reaches
+        # the physical adapter without changing the deployment that ordinary
+        # traffic uses.
+        provider = resolve_selected_compaction_provider(
+            ctx,
+            None,
+            model_override=target.model,
+        )
+        if provider is None or provider_connection_config(provider).model != target.model:
+            log.warning(
+                "workspace_commit_message.target_unavailable",
+                model=target.model,
+            )
+            raise WorkspaceCommitMessageError(
+                "no_target",
+                "The configured commit message model is not available on this "
+                "connection.",
+            )
 
     from opensquilla.engine.usage_accounting import (
         UsageAccountingScope,
@@ -715,16 +719,14 @@ async def draft_workspace_commit_message(
         correlation_kwargs["provider_request_correlation"] = provider_request_correlation
 
     with bind_usage_accounting_scope(usage_scope):
-        draft = await call_commit_message_llm(
+        draft = await call_commit_message_provider(
             diff_text,
+            provider=provider,
             model=target.model,
-            api_key=target.api_key,
-            base_url=target.base_url,
             timeout=target.timeout,
             max_chars=int(getattr(message_cfg, "max_chars", 2000)),
             language=str(getattr(message_cfg, "language", "auto")),
             instructions=rule,
-            provider=target.provider,
             diff_truncated=diff_truncated,
             **correlation_kwargs,
         )
@@ -740,7 +742,7 @@ __all__ = [
     "CommitMessageDraft",
     "WorkspaceCommitMessageError",
     "build_staged_diff_context",
-    "call_commit_message_llm",
+    "call_commit_message_provider",
     "draft_workspace_commit_message",
     "parse_commit_message",
     "resolve_commit_message_target",
