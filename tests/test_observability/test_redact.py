@@ -57,6 +57,74 @@ def test_compound_credentials_are_case_insensitive(key: str, case: str) -> None:
     )
 
 
+@pytest.mark.parametrize("separator", "!#$%&'*+^`|~")
+@pytest.mark.parametrize("suffix", ["Password", "Token", "ApiKey"])
+def test_http_header_punctuation_preserves_secret_boundaries(
+    separator: str, suffix: str,
+) -> None:
+    header = f"X{separator}{suffix}"
+    for key in (header, header.lower(), header.upper(), header.swapcase()):
+        assert scrub_json({"headers": {key: "synthetic-header-credential"}}) == {
+            "headers": {key: "[redacted]"},
+        }
+        text = f'{key}: "synthetic-header-credential"'
+        expected = f'{key}: "[redacted]"'
+        assert scrub_text(text) == expected
+        assert scrub_text(expected) == expected
+
+
+@pytest.mark.parametrize("separator", "!#$%&'*+^`|~")
+@pytest.mark.parametrize("suffix", ["requiresApiKey", "hasToken", "apiKeyEnv", "tokenCount"])
+def test_punctuation_namespaced_metadata_stays_readable(separator: str, suffix: str) -> None:
+    field = f"Vendor{separator}{suffix}"
+    for key in (field, field.lower(), field.upper(), field.swapcase()):
+        assert scrub_json({key: True}) == {key: True}
+        assert scrub_text(f"{key}=true") == f"{key}=true"
+
+
+def test_unicode_namespace_with_punctuation_masks_secret_values() -> None:
+    key = "定制+Password"
+    assert scrub_json({key: "synthetic-credential"}) == {key: "[redacted]"}
+    assert scrub_text(f"{key}=synthetic-credential") == f"{key}=[redacted]"
+
+
+@pytest.mark.parametrize("separator", "!#$%&'*+^`|~")
+@pytest.mark.parametrize("suffix", ["CSRFToken", "SecurityToken", "ProviderApiKey"])
+def test_punctuation_keeps_compound_credential_namespace(
+    separator: str, suffix: str,
+) -> None:
+    header = f"X{separator}{suffix}"
+    for key in (header, header.lower(), header.upper(), header.swapcase()):
+        assert scrub_json({"headers": {key: "synthetic-credential"}}) == {
+            "headers": {key: "[redacted]"},
+        }
+        for text, expected in (
+            (f"{key}: synthetic-credential", f"{key}: [redacted]"),
+            (f'"{key}": "synthetic-credential"', f'"{key}": "[redacted]"'),
+            (f"helper --{key}=synthetic-credential", f"helper --{key}=[redacted]"),
+        ):
+            assert scrub_text(text) == expected
+            assert scrub_text(expected) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("'api_key'='synthetic credential'", "'api_key'='[redacted]'"),
+    ("{'X!csrftoken': 'synthetic credential'}", "{'X!csrftoken': '[redacted]'}"),
+    ('"X\'providerapikey": "synthetic credential"', '"X\'providerapikey": "[redacted]"'),
+    ("GET https://example.invalid/?phase=before&corpsecret=synthetic-credential",
+     "GET https://example.invalid/?phase=before&corpsecret=[redacted]"),
+    ("GET https://example.invalid/?phase=before&x!csrftoken=synthetic-credential",
+     "GET https://example.invalid/?phase=before&x!csrftoken=[redacted]"),
+    ("GET https://example.invalid/?requiresApiKey=true&phase=before",
+     "GET https://example.invalid/?requiresApiKey=true&phase=before"),
+])
+def test_punctuation_namespaces_keep_quoting_and_query_boundaries(
+    text: str, expected: str,
+) -> None:
+    assert scrub_text(text) == expected
+    assert scrub_text(expected) == expected
+
+
 @pytest.mark.parametrize("key", [
     "requiresAuthToken", "requires_auth_token", "requiresaccesstoken", "hasAccessToken",
     "authTokenCount", "accessTokenEnv", "refreshTokenConfigured", "idTokenRequired",
@@ -365,7 +433,7 @@ def test_long_assignment_runs_and_nested_labels() -> None:
     assert scrub_text(labels + "api_key=" + ordinary) == labels + "api_key=[redacted]"
 
 
-@pytest.mark.parametrize("segment", ["a_", "a.", "定制_", "a-"])
+@pytest.mark.parametrize("segment", ["a_", "a.", "定制_", "a-", "a!", "a'"])
 def test_long_component_runs_keep_complete_assignment_boundaries(segment: str) -> None:
     prefix = segment * 20_000
     benign_key = prefix + "apiKeyConfigured"

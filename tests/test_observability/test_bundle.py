@@ -322,6 +322,10 @@ def test_bundle_masks_custom_header_and_cli_credentials(tmp_path, _hermetic_conf
     "X-SecurityToken", "x-securitytoken", "X-SECURITYTOKEN",
     "X-ProviderApiKey", "x-providerapikey", "X-PROVIDERAPIKEY",
     "X.hasH_token", "X.IsLandToken",
+    "X!Password", "X$Token", "X+ApiKey", "X%ClientSecret", "X'Authorization",
+    "X`PrivateKey", "X|CSRFToken",
+    "x!csrftoken", "x|securitytoken", "x+providerapikey", "x&securitytoken",
+    "x'providerapikey",
 ])
 def test_bundle_masks_compound_credentials_with_case_insensitive_headers(
     tmp_path, _hermetic_config, header,
@@ -335,7 +339,10 @@ def test_bundle_masks_compound_credentials_with_case_insensitive_headers(
     dest = tmp_path / "bundle.zip"
     result = collect_bundle(
         dest, home_dir=home, log_dir=log_dir,
-        extra={"headers": {header: "synthetic-opaque-credential"}},
+        extra={
+            "headers": {header: "synthetic-opaque-credential"},
+            "details": {"message": f"{header}: synthetic-opaque-credential"},
+        },
     )
     entries = _read_zip(dest)
     assert not result.manifest["collection_errors"]
@@ -343,6 +350,7 @@ def test_bundle_masks_compound_credentials_with_case_insensitive_headers(
         "headers": {header: "[redacted]"},
     }
     assert json.loads(entries["live/headers.json"]) == {header: "[redacted]"}
+    assert json.loads(entries["live/details.json"]) == {"message": f"{header}: [redacted]"}
     assert b"synthetic-opaque-credential" not in b"".join(entries.values())
 
 

@@ -31,9 +31,14 @@ _SECRET_KEY_END = (
 _SECRET_KEY_RE = re.compile(r"(?:^|[._])" + _SECRET_KEY_END, re.IGNORECASE)
 _SECRET_SUFFIX_RE = re.compile(_SECRET_KEY_END, re.IGNORECASE)
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_NAMESPACE_PUNCTUATION_RE = re.compile(r"[^\w\s.-]")
 
 
 def _is_secret_key(key: str) -> bool:
+    # Custom header/config names can use punctuation such as +, ! and $ as
+    # namespace separators. Treat these like dots, retaining Unicode letters
+    # and the existing hyphen/underscore compound-word boundaries.
+    key = _NAMESPACE_PUNCTUATION_RE.sub(".", key)
     normalized = _CAMEL_BOUNDARY_RE.sub("_", key).replace("-", "_").lower()
     # Also retain literal case-insensitive spellings: unusual casing such as
     # aPiKeY must not turn one recognized credential name into unrelated words.
@@ -80,10 +85,15 @@ _AUTH_SCHEME = r"(?:bearer|basic|token|digest)"
 # The left boundary prevents retrying an identifier at each character, keeping
 # long unbroken log runs linear. Consume optional CLI dashes before classifying
 # the complete key, so flags remain reachable without matching inside names.
+# Retain HTTP field-name punctuation so a compound credential keeps its
+# namespace. Quoted keys close with their opening quote; a lazy key match lets
+# an apostrophe remain either an internal header character or a closing quote.
+_ASSIGNMENT_KEY_CHAR = r"[\w.!#$%&'*+^`|~-]"
 _ASSIGNMENT_RE = re.compile(
-    r"""(?ix)
-    (?<![\w.-])
-    ["']?(?:--?)?(?P<key>[\w.][\w.-]*)["']?[ \t]*[=:][ \t]*
+    rf"""(?ix)
+    (?<!{_ASSIGNMENT_KEY_CHAR})
+    (?P<key_quote>["'])?(?:--?)?(?P<key>{_ASSIGNMENT_KEY_CHAR}+?)
+    (?(key_quote)(?P=key_quote)|["']?)[ \t]*[=:][ \t]*
     """,
 )
 # Notes on value shape:
