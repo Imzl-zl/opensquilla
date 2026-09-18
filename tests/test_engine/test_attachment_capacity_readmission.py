@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ import pytest
 
 from opensquilla.engine.agent import Agent
 from opensquilla.engine.runtime import TurnRunner
+from opensquilla.engine.selector_override import _capacity_deployment_fingerprint
 from opensquilla.gateway.config import GatewayConfig
 from opensquilla.provider.model_catalog import ModelCatalog
 from opensquilla.provider.openai import OpenAIProvider
@@ -27,6 +29,57 @@ from opensquilla.session.manager import SessionManager
 from opensquilla.session.storage import SessionStorage
 from opensquilla.tools.types import CallerKind, ToolContext
 from tests.helpers.image_bytes import image_bytes
+
+
+def test_capacity_fingerprint_is_stable_only_within_its_process_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ProviderConfig(
+        provider="custom", model="synthetic-model", api_key="synthetic-key",
+        base_url="https://example.invalid/v1",
+        extra_body={"settings": {"region": "west", "route": "primary"}},
+    )
+    equivalent = replace(config, extra_body={
+        "settings": {"route": "primary", "region": "west"},
+    })
+    fingerprint = _capacity_deployment_fingerprint(config, config.provider, config.model)
+    assert fingerprint == _capacity_deployment_fingerprint(config, config.provider, config.model)
+    assert fingerprint == _capacity_deployment_fingerprint(
+        equivalent, equivalent.provider, equivalent.model,
+    )
+
+    monkeypatch.setattr(
+        "opensquilla.engine.selector_override._CAPACITY_DEPLOYMENT_FINGERPRINT_KEY", b"a" * 32,
+    )
+    first_scope = _capacity_deployment_fingerprint(config, config.provider, config.model)
+    monkeypatch.setattr(
+        "opensquilla.engine.selector_override._CAPACITY_DEPLOYMENT_FINGERPRINT_KEY", b"b" * 32,
+    )
+    assert first_scope != _capacity_deployment_fingerprint(config, config.provider, config.model)
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("provider", "another-provider"),
+    ("model", "another-model"),
+    ("api_key", "another-synthetic-key"),
+    ("base_url", "https://another.example.invalid/v1"),
+    ("proxy", "http://proxy.example.invalid:8080"),
+    ("org_id", "another-synthetic-organization"),
+    ("provider_routing", {"order": "latency"}),
+    ("extra_body", {"settings": {"route": "secondary"}}),
+])
+def test_capacity_fingerprint_distinguishes_every_bound_deployment_field(
+    field: str, value: Any,
+) -> None:
+    config = ProviderConfig(
+        provider="custom", model="synthetic-model", api_key="synthetic-key",
+        base_url="https://example.invalid/v1",
+        extra_body={"settings": {"route": "primary"}},
+    )
+    changed = replace(config, **{field: value})
+    assert _capacity_deployment_fingerprint(config, config.provider, config.model) != (
+        _capacity_deployment_fingerprint(changed, changed.provider, changed.model)
+    )
 
 
 @pytest.fixture
@@ -306,7 +359,7 @@ async def test_explicit_attachment_model_admits_full_request_before_compaction(
 
 @pytest.mark.parametrize("failure", [
     "summary_failed", "history_unchanged", "disabled", "unknown", "oversized_current",
-    "deployment_changed",
+    "deployment_changed", "endpoint_changed", "extra_body_changed",
 ])
 async def test_attachment_retry_failures_never_execute_the_ordinary_provider(
     attachment_retry_stack: dict[str, Any], monkeypatch: pytest.MonkeyPatch, failure: str,
@@ -330,13 +383,18 @@ async def test_attachment_retry_failures_never_execute_the_ordinary_provider(
         monkeypatch.setattr("opensquilla.provider.model_catalog._shared_catalog", ModelCatalog())
     elif failure == "oversized_current":
         stack["message"] = "Current material " * 40_000
-    elif failure == "deployment_changed":
+    elif failure in {"deployment_changed", "endpoint_changed", "extra_body_changed"}:
         stage = stack["runner"]._compaction_and_history_stage
         original_run = stage.run
 
         async def change_deployment(inp: Any) -> Any:
             outcome = await original_run(inp)
-            stack["selectors"][-1].current_config.api_key = "other-synthetic-deployment"
+            field, value = {
+                "deployment_changed": ("api_key", "other-synthetic-deployment"),
+                "endpoint_changed": ("base_url", "https://changed.example.invalid/v1"),
+                "extra_body_changed": ("extra_body", {"settings": {"route": "secondary"}}),
+            }[failure]
+            setattr(stack["selectors"][-1].current_config, field, value)
             return outcome
 
         monkeypatch.setattr(stage, "run", change_deployment)
@@ -352,6 +410,6 @@ async def test_attachment_retry_failures_never_execute_the_ordinary_provider(
             last["history_capacity_estimated_tokens"] == first["history_capacity_estimated_tokens"]
         )
         assert last["snapshot_generation"] > first["snapshot_generation"]
-    if failure == "deployment_changed":
+    if failure in {"deployment_changed", "endpoint_changed", "extra_body_changed"}:
         assert stack["summaries"]
         assert stack["agents"][0]._durable_consumer_model_id == "synthetic-base"

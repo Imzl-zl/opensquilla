@@ -11,7 +11,9 @@ cross-provider tier path (credential resolution + continuity gate).
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import secrets
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
@@ -21,6 +23,9 @@ import structlog
 from opensquilla.engine.capacity_admission import ModelRequestCapacityAssessment
 
 log = structlog.get_logger(__name__)
+
+# This identity lives for one turn; it must not verify credential guesses off-process.
+_CAPACITY_DEPLOYMENT_FINGERPRINT_KEY = secrets.token_bytes(32)
 
 _ROUTE_SAVINGS_KEYS = (
     "savings_pct",
@@ -132,14 +137,18 @@ def provider_config_has_request_capacity(
 
 
 def _capacity_deployment_fingerprint(config: Any, provider: str, model: str) -> str:
-    """Pin a private deployment identity without placing credentials in metadata."""
+    """Pin a process-local deployment identity without exposing credential hashes."""
 
     fields = [provider.lower(), model]
     fields.extend(
         getattr(config, name, "")
         for name in ("api_key", "base_url", "proxy", "org_id", "provider_routing", "extra_body")
     )
-    return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()
+    return hmac.new(
+        _CAPACITY_DEPLOYMENT_FINGERPRINT_KEY,
+        json.dumps(fields, sort_keys=True).encode(),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def _provisional_capacity_binding_allowed(
