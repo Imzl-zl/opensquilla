@@ -182,7 +182,7 @@ test('session Router capability overrides the blocked global Ensemble scalar for
   })
   await expect(routingButton).toHaveClass(/chat-model-routing-btn--llm_ensemble/)
   await routingButton.click()
-  await page.getByRole('menuitemradio', { name: /Smart routing/ }).click()
+  await page.getByRole('menuitemradio', { name: 'Intelligent model routing', exact: true }).click()
 
   await expect.poll(() => gateway.routingSets).toEqual([{
     sessionKey: SESSION_KEY,
