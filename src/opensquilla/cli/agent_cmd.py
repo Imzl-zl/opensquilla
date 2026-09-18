@@ -290,6 +290,7 @@ async def run_agent_once(
         session_db_path=session_db_path,
         extra_agent_ids=extra_agents,
         seed_agent_workspaces=seed_agent_workspaces,
+        start_standalone_telemetry=True,
     )
     assert svc.session_manager is not None
     session_key = canonicalize_session_key(session_id or f"agent:{agent_id}:main")
@@ -439,7 +440,7 @@ async def run_agent_once(
         )
         from opensquilla.sandbox.policy_store import pin_sandbox_policy
 
-        pin_sandbox_policy(tool_ctx, service_cfg)
+        await asyncio.to_thread(pin_sandbox_policy, tool_ctx, service_cfg)
         tool_ctx.scratch_dir = effective_scratch_dir
         tool_ctx.workspace_lockdown = workspace_lockdown
         tool_ctx.workspace_write_deny_globs = list(effective_workspace_write_deny_globs)

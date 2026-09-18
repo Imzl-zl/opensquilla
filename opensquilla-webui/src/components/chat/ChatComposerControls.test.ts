@@ -89,7 +89,7 @@ describe('ChatComposer control hierarchy', () => {
   })
 
   it('completes Slash candidates without executing them from the suggestion menu', () => {
-    expect(viewSource).toContain('@click="completeSlashCmd(cmd)"')
+    expect(viewSource).toContain('@choose="completeSlashCmd"')
     expect(viewSource).not.toContain('@click="selectSlashCmd(cmd)"')
     expect(slashSource).toContain('function completeSlashCmd')
     expect(slashSource).toContain('function activateSlashCmd')

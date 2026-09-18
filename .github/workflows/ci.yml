@@ -9,6 +9,12 @@ name: CI
   schedule:
     - cron: "23 18 * * *"
   workflow_dispatch:
+    inputs:
+      gateway_timing_base:
+        description: "Optional full baseline SHA for same-runner offline Gateway timing"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   actions: read
@@ -466,7 +472,7 @@ jobs:
 
       - name: Install pinned Contract generators
         if: ${{ contains(fromJSON(needs.plan-ci.outputs.required_suites), 'frontend-validation') }}
-        run: uv sync --only-group dev --frozen
+        run: python scripts/contracts/prepare_codegen_toolchains.py
 
       - name: Verify deterministic Contract generation
         if: ${{ contains(fromJSON(needs.plan-ci.outputs.required_suites), 'frontend-validation') }}
@@ -589,7 +595,7 @@ jobs:
           enable-cache: true
 
       - name: Install pinned Contract generators
-        run: uv sync --only-group dev --frozen
+        run: python scripts/contracts/prepare_codegen_toolchains.py
 
       - name: Verify every Contract role in a separate output tree
         shell: bash
@@ -613,17 +619,15 @@ jobs:
 
   gateway-contract-windows:
     name: Gateway Contract determinism (Windows)
-    needs: [plan-ci, frontend-check, gateway-contract-verification-linux]
+    needs: [plan-ci]
     if: >-
       ${{ !cancelled()
           && needs.plan-ci.result == 'success'
-          && needs.frontend-check.result == 'success'
-          && needs.gateway-contract-verification-linux.result == 'success'
           && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'frontend-validation') }}
     runs-on: windows-latest
     # Real-toolchain generation scales with the complete Contract inventory.
-    # Keep the full Windows check, determinism replay, tests, and cross-OS hash
-    # comparison within one bounded job instead of weakening the gate.
+    # Start the complete Windows checks independently of Linux producers; the
+    # required comparison job joins both platforms after their manifests exist.
     timeout-minutes: 60
     steps:
       - name: Check out repository
@@ -651,7 +655,7 @@ jobs:
           enable-cache: true
 
       - name: Install pinned Contract generators
-        run: uv sync --only-group dev --frozen
+        run: python scripts/contracts/prepare_codegen_toolchains.py
 
       - name: Verify Windows Contract generation and real toolchain
         env:
@@ -679,21 +683,63 @@ jobs:
           uv run --no-sync python scripts/contracts/generate_gateway_contracts.py --hash-manifest $verificationManifest --profile verification --output-root $verificationRoot
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Write Windows Gateway Contract hash manifest
+        shell: pwsh
+        run: |
+          $windowsManifest = Join-Path $env:RUNNER_TEMP "gateway-contract-hashes-windows.json"
+          uv run --no-sync python scripts/contracts/generate_gateway_contracts.py --hash-manifest $windowsManifest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows Gateway Contract hash manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-contract-hashes-windows
+          path: ${{ runner.temp }}/gateway-contract-hashes-windows.json
+          if-no-files-found: error
+          retention-days: 31
+          overwrite: true
+
+      - name: Upload Windows verification hash manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-contract-verification-hashes-windows
+          path: ${{ runner.temp }}/gateway-contract-verification-hashes-windows.json
+          if-no-files-found: error
+          retention-days: 31
+          overwrite: true
+
+  gateway-contract-compare:
+    name: Gateway Contract cross-platform hashes
+    needs: [plan-ci, frontend-check, gateway-contract-verification-linux, gateway-contract-windows]
+    if: >-
+      ${{ !cancelled()
+          && needs.plan-ci.result == 'success'
+          && needs.frontend-check.result == 'success'
+          && needs.gateway-contract-verification-linux.result == 'success'
+          && needs.gateway-contract-windows.result == 'success'
+          && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'frontend-validation') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Download Linux Gateway Contract hash manifest
         uses: ./.github/actions/download-required-artifact
         with:
           name: gateway-contract-hashes-linux
           path: ${{ runner.temp }}/gateway-contract-hashes-linux
 
-      - name: Compare Linux and Windows Contract hashes
-        shell: pwsh
-        run: |
-          $windowsManifest = Join-Path $env:RUNNER_TEMP "gateway-contract-hashes-windows.json"
-          $linuxManifest = Join-Path $env:RUNNER_TEMP "gateway-contract-hashes-linux/gateway-contract-hashes.json"
-          uv run --no-sync python scripts/contracts/generate_gateway_contracts.py --hash-manifest $windowsManifest
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          uv run --no-sync python scripts/contracts/generate_gateway_contracts.py --compare-hash-manifests $linuxManifest $windowsManifest
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Download Windows Gateway Contract hash manifest
+        uses: ./.github/actions/download-required-artifact
+        with:
+          name: gateway-contract-hashes-windows
+          path: ${{ runner.temp }}/gateway-contract-hashes-windows
 
       - name: Download Linux verification hash manifest
         uses: ./.github/actions/download-required-artifact
@@ -701,13 +747,21 @@ jobs:
           name: gateway-contract-verification-hashes-linux
           path: ${{ runner.temp }}/gateway-contract-verification-hashes-linux
 
-      - name: Compare Linux and Windows verification hashes
-        shell: pwsh
+      - name: Download Windows verification hash manifest
+        uses: ./.github/actions/download-required-artifact
+        with:
+          name: gateway-contract-verification-hashes-windows
+          path: ${{ runner.temp }}/gateway-contract-verification-hashes-windows
+
+      - name: Compare Linux and Windows Contract hashes
+        shell: bash
         run: |
-          $windowsManifest = Join-Path $env:RUNNER_TEMP "gateway-contract-verification-hashes-windows.json"
-          $linuxManifest = Join-Path $env:RUNNER_TEMP "gateway-contract-verification-hashes-linux/gateway-contract-verification-hashes.json"
-          uv run --no-sync python scripts/contracts/generate_gateway_contracts.py --compare-hash-manifests $linuxManifest $windowsManifest
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/contracts/generate_gateway_contracts.py --compare-hash-manifests \
+            "${RUNNER_TEMP}/gateway-contract-hashes-linux/gateway-contract-hashes.json" \
+            "${RUNNER_TEMP}/gateway-contract-hashes-windows/gateway-contract-hashes-windows.json"
+          python scripts/contracts/generate_gateway_contracts.py --compare-hash-manifests \
+            "${RUNNER_TEMP}/gateway-contract-verification-hashes-linux/gateway-contract-verification-hashes.json" \
+            "${RUNNER_TEMP}/gateway-contract-verification-hashes-windows/gateway-contract-verification-hashes-windows.json"
 
   webui-chat-recovery:
     name: WebUI chat recovery
@@ -824,6 +878,8 @@ jobs:
           ensemble-new-task-legacy-turn.spec.ts
           goal-mode.spec.ts
           plan-questionnaire-lifecycle.spec.ts
+          plan-presentation.spec.ts
+          task-progress.spec.ts
           queue-steer.spec.ts
           share.spec.ts
           --project=chromium
@@ -949,6 +1005,8 @@ jobs:
           node scripts/test-windows-update-refresh.mjs
           node scripts/test-windows-update-network.mjs
           node scripts/test-packaged-retained-interaction-contract.mjs
+          node scripts/test-packaged-first-send-cleanup.mjs
+          node --test scripts/test-packaged-first-send-evidence.mjs
           node scripts/test-packaged-cached-handoff-contract.mjs
           node scripts/test-desktop-locale.mjs
           node scripts/test-desktop-zoom-shortcuts.mjs --contracts-only
@@ -1026,6 +1084,33 @@ jobs:
       - name: Type check
         shell: bash
         run: uv run mypy src/opensquilla --show-error-codes
+
+      - name: Compare offline Gateway startup and Default first turn
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.gateway_timing_base != '' }}
+        shell: bash
+        env:
+          TIMING_BASE: ${{ inputs.gateway_timing_base }}
+        run: |
+          set -euo pipefail
+          [[ "$TIMING_BASE" =~ ^[0-9a-f]{40}$ ]] || { echo "Expected a full baseline commit SHA" >&2; exit 2; }
+          git fetch --no-tags --depth=1 origin "$TIMING_BASE"
+          baseline_dir="$(mktemp -d "$(dirname "$GITHUB_WORKSPACE")/gateway-timing-baseline.XXXXXX")"
+          trap 'rm -rf "$baseline_dir"' EXIT
+          git archive "$TIMING_BASE" > "$RUNNER_TEMP/gateway-timing-baseline.tar"
+          git get-tar-commit-id < "$RUNNER_TEMP/gateway-timing-baseline.tar" > "$baseline_dir/.gateway-timing-source-sha"
+          tar -xf "$RUNNER_TEMP/gateway-timing-baseline.tar" -C "$baseline_dir"
+          uv run --no-sync python scripts/compare_gateway_timing.py \
+            --baseline-root "$baseline_dir" --candidate-root "$GITHUB_WORKSPACE" \
+            --baseline-sha "$TIMING_BASE" --candidate-sha "$(git rev-parse HEAD)" \
+            --samples 3 --output "$RUNNER_TEMP/gateway-timing.json"
+
+      - name: Preserve offline Gateway timing evidence
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.gateway_timing_base != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-timing-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/gateway-timing.json
+          if-no-files-found: error
 
       - name: Test targeted PR suite
         if: ${{ contains(fromJSON(needs.plan-ci.outputs.required_suites), 'python-targeted') && !contains(fromJSON(needs.plan-ci.outputs.required_suites), 'python-full') }}
@@ -1131,6 +1216,53 @@ jobs:
         shell: bash
         run: uv sync --extra dev --extra recommended --extra mcp --frozen
 
+      - name: Preflight offline test environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run python -c "import pathlib, subprocess, sys, opensquilla; print('cwd:', pathlib.Path.cwd().resolve()); print('git:', subprocess.check_output(['git', 'rev-parse', '--show-toplevel', 'HEAD'], text=True).strip()); print('python:', sys.executable); print('package:', pathlib.Path(opensquilla.__file__).resolve())"
+          regression_args=()
+          if [[ "${{ matrix.shard }}" == "desktop-installer-contracts" ]]; then
+            # Recheck every failed or unfinished file from this shard before
+            # starting its full run; other shards retain the environment probe.
+            regression_args+=(
+              tests/test_ci/test_architecture_import_contracts.py
+              tests/test_engine/turn_runner/test_stage_test_boundaries.py
+              tests/test_engine/test_runtime_artifacts.py
+              tests/test_engine/test_tokenjuice_tool_result_projection.py
+              tests/test_tools/test_tool_upgrade_compatibility.py
+              tests/test_gateway/test_goal_rpc.py
+              tests/test_tools/test_dispatch_legacy_coverage.py
+              tests/unit/cli/repl/test_slash_bridge.py
+            )
+          elif [[ "${{ matrix.shard }}" == "gateway-sqlite" ]]; then
+            regression_args+=(
+              tests/test_gateway/test_channel_turn_ingress.py
+              tests/test_gateway/test_goal_registry_cleanup.py
+              tests/test_gateway/test_task_runtime_terminal_cleanup.py
+              tests/test_gateway/test_goal_turn_authority.py
+              tests/test_gateway/test_task_progress_projection.py
+              tests/functional/test_gateway_silent_reply_process_e2e.py
+            )
+          elif [[ "${{ matrix.shard }}" == "recovery-migration" ]]; then
+            regression_args+=(tests/test_sandbox/test_windows_shell_process_runtime.py)
+          elif [[ "${{ matrix.shard }}" == "core" ]]; then
+            regression_args+=(
+              tests/test_engine/test_cancelled_turn_segments.py
+              tests/test_tools/test_shell_workdir.py
+              tests/test_sandbox/test_shell_code_network_hints.py
+              tests/test_tools/test_shell_runtime_preflight.py
+            )
+          fi
+          uv run pytest \
+            tests/test_sandbox/test_trusted_sandbox_execution.py \
+            tests/test_tools/test_approval_unification.py \
+            tests/test_live_multi_provider_matrix.py \
+            tests/test_live_provider_profile_smoke.py \
+            "${regression_args[@]}" \
+            -vv --tb=short -o faulthandler_timeout=60 --maxfail=3 \
+            2>&1 | tee "${CI_REPORT_DIR}/preflight.log"
+
       - name: Test Ubuntu full shard
         shell: bash
         run: |
@@ -1156,7 +1288,7 @@ jobs:
             --summary "${CI_REPORT_DIR}/first-failure.txt" \
             "${worker_args[@]}" \
             -- \
-            -q \
+            -vv --tb=short -o faulthandler_timeout=60 \
             -m "${markers}" \
             --durations=50 \
             "${maxfail_args[@]}" \
@@ -1281,14 +1413,23 @@ jobs:
           }
           throw "No verified native Git Bash found. Candidates: $($candidates -join '; ')"
 
+      - name: Verify PowerShell 7 for native shell contracts
+        if: ${{ matrix.shard == 'core' || startsWith(matrix.shard, 'core-') }}
+        shell: pwsh
+        run: |
+          if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw "Native shell contracts require PowerShell 7"
+          }
+          Get-Command pwsh -CommandType Application -ErrorAction Stop | Out-Null
+
       - name: Set up Bun
-        if: ${{ matrix.shard == 'core' }}
+        if: ${{ startsWith(matrix.shard, 'core-') }}
         uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: src/opensquilla/cli/tui/opentui/package/.bun-version
 
       - name: Install OpenTUI host dependencies
-        if: ${{ matrix.shard == 'core' }}
+        if: ${{ startsWith(matrix.shard, 'core-') }}
         shell: bash
         run: bun install --frozen-lockfile --cwd=src/opensquilla/cli/tui/opentui/package
 
@@ -1307,7 +1448,7 @@ jobs:
           } >> "${CI_REPORT_DIR}/environment.txt" 2>&1
 
       - name: Provision distinct Windows test volumes
-        if: ${{ matrix.shard == 'recovery-migration' }}
+        if: ${{ startsWith(matrix.shard, 'recovery-migration-') }}
         shell: pwsh
         run: |
           $token = [guid]::NewGuid().ToString("N")
@@ -1350,6 +1491,57 @@ jobs:
             throw
           }
 
+      - name: Preflight offline test environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run python -c "import pathlib, subprocess, sys, opensquilla; print('cwd:', pathlib.Path.cwd().resolve()); print('git:', subprocess.check_output(['git', 'rev-parse', '--show-toplevel', 'HEAD'], text=True).strip()); print('python:', sys.executable); print('package:', pathlib.Path(opensquilla.__file__).resolve())"
+          regression_args=()
+          shard="${{ matrix.shard }}"
+          family="${shard%-*}"
+          if [[ "${family}" == "desktop-installer-contracts" ]]; then
+            # Recheck every failed or unfinished file from this shard before
+            # starting its full run; other shards retain the environment probe.
+            regression_args+=(
+              tests/test_ci/test_architecture_import_contracts.py
+              tests/test_engine/turn_runner/test_stage_test_boundaries.py
+              tests/test_engine/test_runtime_artifacts.py
+              tests/test_engine/test_tokenjuice_tool_result_projection.py
+              tests/test_tools/test_tool_upgrade_compatibility.py
+              tests/test_gateway/test_goal_rpc.py
+              tests/test_tools/test_dispatch_legacy_coverage.py
+              tests/unit/cli/repl/test_slash_bridge.py
+            )
+          elif [[ "${family}" == "gateway-sqlite" ]]; then
+            regression_args+=(
+              tests/test_gateway/test_channel_turn_ingress.py
+              tests/test_gateway/test_goal_registry_cleanup.py
+              tests/test_gateway/test_task_runtime_terminal_cleanup.py
+              tests/test_gateway/test_goal_turn_authority.py
+              tests/test_gateway/test_task_progress_projection.py
+              tests/functional/test_gateway_silent_reply_process_e2e.py
+            )
+          elif [[ "${family}" == "recovery-migration" ]]; then
+            regression_args+=(tests/test_sandbox/test_windows_shell_process_runtime.py)
+          elif [[ "${family}" == "core" ]]; then
+            regression_args+=(
+              tests/test_ci/test_windows_signatures.py
+              tests/test_tools/test_shell_process_isolation.py
+              tests/test_engine/test_cancelled_turn_segments.py
+              tests/test_tools/test_shell_workdir.py
+              tests/test_sandbox/test_shell_code_network_hints.py
+              tests/test_tools/test_shell_runtime_preflight.py
+            )
+          fi
+          uv run pytest \
+            tests/test_sandbox/test_trusted_sandbox_execution.py \
+            tests/test_tools/test_approval_unification.py \
+            tests/test_live_multi_provider_matrix.py \
+            tests/test_live_provider_profile_smoke.py \
+            "${regression_args[@]}" \
+            -vv --tb=short -o faulthandler_timeout=60 --maxfail=3 \
+            2>&1 | tee "${CI_REPORT_DIR}/preflight.log"
+
       - name: Test Windows shard
         shell: bash
         run: |
@@ -1360,16 +1552,18 @@ jobs:
             maxfail_args+=(--maxfail=3)
           fi
 
+          shard="${{ matrix.shard }}"
+          family="${shard%-*}"
           worker_args=()
-          if [[ "${{ matrix.shard }}" == "recovery-migration" ||
-                "${{ matrix.shard }}" == "gateway-sqlite" ||
-                "${{ matrix.shard }}" == "desktop-installer-contracts" ]]; then
+          if [[ "${family}" == "recovery-migration" ||
+                "${family}" == "gateway-sqlite" ||
+                "${family}" == "desktop-installer-contracts" ]]; then
             # These shards start Windows ``spawn`` children, Node/Electron
             # processes, or gateways from several tests.  Leave runner
             # headroom for those process-start handshakes instead of changing
             # their bounded readiness/timing assertions.
-            if [[ "${{ matrix.shard }}" == "recovery-migration" ||
-                  "${{ matrix.shard }}" == "gateway-sqlite" ]]; then
+            if [[ "${family}" == "recovery-migration" ||
+                  "${family}" == "gateway-sqlite" ]]; then
               worker_args+=(--workers=3)
             else
               worker_args+=(--workers=2)
@@ -1383,14 +1577,14 @@ jobs:
             --metadata "${CI_REPORT_DIR}/windows-shard-metadata.json" \
             "${worker_args[@]}" \
             -- \
-            -q \
+            -vv --tb=short -o faulthandler_timeout=60 \
             -m "${markers}" \
             --durations=50 \
             "${maxfail_args[@]}" \
             2>&1 | tee "${CI_REPORT_DIR}/pytest.log"
 
       - name: Clean up Windows test volumes
-        if: ${{ always() && matrix.shard == 'recovery-migration' }}
+        if: ${{ always() && startsWith(matrix.shard, 'recovery-migration-') }}
         shell: pwsh
         run: |
           $testRoots = @(
@@ -1478,6 +1672,19 @@ jobs:
         shell: bash
         run: uv sync --extra dev --extra recommended --extra mcp --frozen
 
+      - name: Preflight offline test environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run python -c "import pathlib, subprocess, sys, opensquilla; print('cwd:', pathlib.Path.cwd().resolve()); print('git:', subprocess.check_output(['git', 'rev-parse', '--show-toplevel', 'HEAD'], text=True).strip()); print('python:', sys.executable); print('package:', pathlib.Path(opensquilla.__file__).resolve())"
+          uv run pytest \
+            tests/test_sandbox/test_trusted_sandbox_execution.py \
+            tests/test_tools/test_approval_unification.py \
+            tests/test_live_multi_provider_matrix.py \
+            tests/test_live_provider_profile_smoke.py \
+            -vv --tb=short --maxfail=3 \
+            2>&1 | tee "${CI_REPORT_DIR}/preflight.log"
+
       - name: Test native profile recovery contracts
         shell: bash
         run: |
@@ -1489,8 +1696,30 @@ jobs:
             tests/test_engine/test_request_execution_identity.py
             tests/test_gateway/test_session_model_routing_rpc.py
             tests/test_tools/test_execution_status.py
+            tests/test_tools/test_shell_native_argv.py
             tests/test_provider_ensemble.py
-            -q
+            tests/test_gateway/test_goal_rpc.py
+            tests/test_gateway/test_goal_child_wait.py
+            tests/test_gateway/test_goal_plan_rpc_admission.py
+            tests/test_gateway/test_plan_cancel_tree.py
+            tests/test_gateway/test_plan_rpc.py
+            tests/test_gateway/test_task_runtime_wait_slots.py
+            tests/test_gateway/test_task_progress_projection.py
+            tests/test_gateway/test_usage_ledger_runtime.py
+            tests/test_engine/test_plan_run_reconciliation.py
+            tests/test_engine/test_goal_context_prompt.py
+            tests/test_session/test_goal_storage.py
+            tests/test_session/test_goal_plan_admission.py
+            tests/test_session/test_plan_storage.py
+            tests/test_session/test_plan_presentation.py
+            tests/test_session/test_task_progress.py
+            tests/test_persistence/test_usage_ledger.py
+            tests/test_persistence/test_migration_compatibility.py
+            tests/test_migrations/test_v045_goal_runtime_accounting.py
+            tests/test_tools/test_plan_access.py
+            -vv
+            --tb=short
+            -o faulthandler_timeout=60
             --durations=50
             --junitxml="${CI_REPORT_DIR}/junit.xml"
           )
@@ -1689,6 +1918,11 @@ jobs:
             --grep "@session-hang-recovery" \
             --retries=0 \
             2>&1 | tee "${CI_REPORT_DIR}/session-hang-recovery.log"
+          npm run test:e2e -- \
+            plan-presentation.spec.ts task-progress.spec.ts goal-mode.spec.ts \
+            --project=chromium --workers=1 --retries=0 \
+            --grep "@plan-goal-runtime" \
+            2>&1 | tee "${CI_REPORT_DIR}/plan-goal-runtime.log"
 
       - name: Install Desktop workbench browser
         if: ${{ matrix.shard == 'all' || matrix.shard == 'ownership-workbench' || matrix.shard == 'workbench' }}
@@ -2275,6 +2509,7 @@ jobs:
           command -v pwsh
           uv run pytest \
             tests/test_ci/test_upgrade_baselines.py \
+            tests/test_ci/test_nsis_fresh_interaction.py \
             tests/test_ci/test_windows_signed_update_audit.py \
             tests/test_ci/test_release_signing_preflight.py \
             tests/test_ci/test_windows_signatures.py \
@@ -2394,6 +2629,12 @@ jobs:
           tests/functional/test_gateway_silent_reply_process_e2e.py
           -q --durations=10
 
+  windows-nsis-regression:
+    name: Windows NSIS acceptance
+    needs: plan-ci
+    if: ${{ !cancelled() && needs.plan-ci.result == 'success' && contains(fromJSON(needs.plan-ci.outputs.required_suites), 'windows-nsis-regression') }}
+    uses: ./.github/workflows/windows-nsis-upgrade-regression.yml
+
   ci-result:
     name: CI result
     needs:
@@ -2406,6 +2647,7 @@ jobs:
       - frontend-check
       - gateway-contract-verification-linux
       - gateway-contract-windows
+      - gateway-contract-compare
       - webui-chat-recovery
       - tui-check
       - desktop-check
@@ -2418,6 +2660,7 @@ jobs:
       - release-packaging
       - managed-toolchain-artifacts
       - main-canary
+      - windows-nsis-regression
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -2512,6 +2755,7 @@ jobs:
           RESULT_FRONTEND: ${{ needs.frontend-check.result }}
           RESULT_CONTRACT_VERIFICATION_LINUX: ${{ needs.gateway-contract-verification-linux.result }}
           RESULT_CONTRACT_WINDOWS: ${{ needs.gateway-contract-windows.result }}
+          RESULT_CONTRACT_COMPARE: ${{ needs.gateway-contract-compare.result }}
           RESULT_TUI: ${{ needs.tui-check.result }}
           RESULT_DESKTOP: ${{ needs.desktop-check.result }}
           RESULT_UBUNTU: ${{ needs.ubuntu-quality.result }}
@@ -2521,6 +2765,7 @@ jobs:
           RESULT_DESKTOP_RECOVERY_E2E: ${{ needs.desktop-recovery-e2e.result }}
           RESULT_WEBUI_CHAT_RECOVERY: ${{ needs.webui-chat-recovery.result }}
           RESULT_SKILL_HUB: ${{ needs.skill-hub.result }}
+          RESULT_WINDOWS_NSIS: ${{ needs.windows-nsis-regression.result }}
           RESULT_RELEASE: ${{ needs.release-packaging.result }}
           RESULT_MANAGED_TOOLCHAIN_ARTIFACTS: ${{ needs.managed-toolchain-artifacts.result }}
           REQUIRED_SUITES: ${{ needs.plan-ci.outputs.required_suites }}

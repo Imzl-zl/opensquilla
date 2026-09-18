@@ -8,6 +8,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Plan proposals can be hidden and restored without losing history or stopping
+  work. Queued and running implementations expose the normal task cancellation
+  control. Retried implementation requests preserve their original identity.
+- Ordinary tasks, Plan implementation and Goals share adjustable `update_plan`
+  progress. Planning can investigate with normal tools and permissions;
+  implementation no longer requires ordered checkpoints or a delivery-only phase.
+- Goals support natural control within the current task, optional token budgets
+  and explicitly enabled background continuation. Physical usage is attributed
+  to the root Goal across children and late results. Unknown usage pauses
+  budget-driven continuation; Gateway restart always requires explicit resume.
+  Upgraded Goals can budget newly recorded usage. Clients check Gateway support
+  before offering budget and background settings.
+- Human input and approval waits release compute capacity while preserving task
+  identity and session exclusion. Cancelled questionnaires are closed in the
+  history used by subsequent turns, while their original questions are preserved.
+  Unsupported legacy database lineages are
+  preserved and rejected consistently, and preview/nightly Desktop profiles
+  are isolated from stable data.
+- Shell calls with an authorized but invalid working directory now report a
+  correctable argument error without executing the command or requesting broader
+  sandbox permissions.
+
 - Browser extensions can now reach state-changing HTTP and WebSocket endpoints
   through a loopback request authority when their exact custom-scheme origin
   (for example `chrome-extension://<id>`) is listed in `cors.allowed_origins`.
@@ -63,6 +85,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Source clients now report TUI launches and active use through the default
+  local Gateway, and short commands attempt a bounded final V2 upload before
+  exiting. Standalone CLI/TUI V1 installation reporting is enabled and daily
+  counters survive temporary sessions in a dedicated counts-only database;
+  later clients or Gateways can upload completed days. Source Gateway startup
+  results are reported without duplicating Desktop-owned startup events.
+  Existing reporting preferences, queued event identities and historical daily
+  acknowledgements remain in effect.
+- DeepSeek settings now discover official models for the model picker and expose
+  refresh, loading, and discovery errors in the provider editor. New configurations
+  use `deepseek-flash` with current vision support and peak-rate cost estimates;
+  saved legacy model IDs remain unchanged.
+
+- Python code execution in packaged Gateways now uses the bundled Python runtime,
+  allowing tools to create documents with bundled dependencies such as `python-pptx`.
+  Linux Bubblewrap also retains read-only access to the selected Python runtime
+  instead of unnecessarily falling back to a system Python without those dependencies.
 - Automatic session titles now fall back to the first user message when the
   naming model refuses. Known historical refusal titles also use this display
   fallback, including the original message archived by context compaction;

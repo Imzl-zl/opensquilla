@@ -221,3 +221,53 @@ describe('useChatDraftPersistence', () => {
     expect(inputText2.value).toBe('user is already typing')
   })
 })
+
+describe('skill draft persistence', () => {
+  it('restores skill identity with its own session and preserves it through namespace binding', async () => {
+    const selectedSkills = ref([{ name: 'tables', instanceId: 'skill:tables', digest: 'a'.repeat(64) }])
+    const sessionKey = ref('agent:main:webchat:one')
+    const inputText = ref('Analyze this')
+    const scope = effectScope()
+    const api = scope.run(() => useChatDraftPersistence({ sessionKey, inputText, selectedSkills }))!
+    inputText.value += ' report'
+    await nextTick()
+    sessionKey.value = 'agent:main:webchat:two'
+    await nextTick()
+    expect(selectedSkills.value).toEqual([])
+    sessionKey.value = 'agent:main:webchat:one'
+    await nextTick()
+    expect(inputText.value).toBe('Analyze this report')
+    expect(selectedSkills.value[0]?.instanceId).toBe('skill:tables')
+    api.rebindCurrentDraft('agent:main:webchat:bound')
+    await nextTick()
+    expect(selectedSkills.value[0]?.instanceId).toBe('skill:tables')
+    expect(localStorage.getItem('opensquilla.chat.draft:agent:main:webchat:one')).toBeNull()
+    scope.stop()
+    const restoredSkills = ref<typeof selectedSkills.value>([])
+    const restoredText = ref('')
+    const restoredScope = effectScope()
+    restoredScope.run(() => useChatDraftPersistence({ sessionKey, inputText: restoredText, selectedSkills: restoredSkills }))
+    expect(restoredSkills.value).toEqual(selectedSkills.value)
+    expect(restoredText.value).toBe(inputText.value)
+    restoredScope.stop()
+  })
+})
+
+it('consumes only the exact accepted offscreen skill draft after the session watcher saves it', async () => {
+  const skills = [{ name: 'tables', instanceId: 'skill:tables', digest: 'a'.repeat(64) }]
+  const sessionKey = ref('agent:main:webchat:source')
+  const inputText = ref('Pending request')
+  const selectedSkills = ref(skills)
+  const scope = effectScope()
+  const api = scope.run(() => useChatDraftPersistence({ sessionKey, inputText, selectedSkills }))!
+  sessionKey.value = 'agent:main:webchat:other'
+  await api.consumeAcceptedDraft('agent:main:webchat:source', { text: 'Pending request', selectedSkills: skills })
+  expect(api.loadDraft('agent:main:webchat:source')).toBe('')
+  api.saveDraft('agent:main:webchat:source', 'Newer draft', skills)
+  await api.consumeAcceptedDraft('agent:main:webchat:source', { text: 'Pending request', selectedSkills: skills })
+  expect(api.loadDraft('agent:main:webchat:source')).toBe('Newer draft')
+  api.saveDraft('agent:main:webchat:source', 'Pending request', [{ ...skills[0]!, digest: 'b'.repeat(64) }])
+  await api.consumeAcceptedDraft('agent:main:webchat:source', { text: 'Pending request', selectedSkills: skills })
+  expect(api.loadDraft('agent:main:webchat:source')).toBe('Pending request')
+  scope.stop()
+})

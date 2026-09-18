@@ -1,3 +1,5 @@
+import { skillLoadReceipt } from '@/types/skillLoads'
+import { normalizeTaskProgress } from '@/utils/chat/taskProgress'
 import type { ConversationCronResult, ConversationEventData, ConversationEventContext, ConversationRoutingSnapshot, ConversationUsage } from '@/modules/conversationEventContent'
 import type { ConversationEventProjection, ConversationSemanticEventKind } from '@/modules/conversationEvents'
 import { normalizeToolName, normalizeToolPresentation, toolResultIsError } from '@/utils/chat/toolDisplay'
@@ -181,6 +183,10 @@ export function projectConversationRoutingSnapshot(value: unknown): Conversation
 export function projectConversationContent(payload: unknown, kind?: ConversationSemanticEventKind): ConversationEventData {
   const source = object(payload)
   const result: Record<string, unknown> = {}
+  if (kind === 'skill-load') {
+    const receipt = skillLoadReceipt(source.content)
+    if (receipt) result.skillLoad = receipt
+  }
   for (const key of STRING_FIELDS) {
     const value = alias(source, key)
     if (typeof value === 'string') result[key] = value
@@ -382,6 +388,13 @@ function projectKnownConversationContent(
   semanticKind: Exclude<ConversationSemanticEventKind, 'unknown'>,
   rawPayload: unknown,
 ): ConversationContentProjection {
+  if (semanticKind === 'execution-progress') {
+    const progress = normalizeTaskProgress(object(rawPayload).progress)
+    return { kind: 'known', semanticKind, payload: {
+      ...projectConversationContent(rawPayload, semanticKind),
+      ...(progress ? { progress } : {}),
+    } }
+  }
   if (semanticKind === 'turn-committed') {
     const raw = object(rawPayload)
     const optionalText = ['session_id', 'client_message_id', 'user_message_id', 'surface_id', 'stream_generation']

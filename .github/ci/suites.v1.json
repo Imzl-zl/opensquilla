@@ -1,13 +1,38 @@
 {
   "schema_version": 1,
   "windows_test_assignments": ".github/scripts/windows_test_assignments.json",
+  "windows_test_partitions": ".github/scripts/windows_test_partitions.json",
   "macos_recovery_test_inputs": [
     "tests/test_recovery/**",
     "tests/test_migration/test_opensquilla_home_migration.py",
     "tests/test_desktop/test_electron_startup_contract.py",
+    "tests/test_gateway/test_goal_rpc.py",
+    "tests/test_gateway/test_goal_child_wait.py",
+    "tests/test_gateway/test_goal_plan_rpc_admission.py",
+    "tests/test_gateway/test_plan_cancel_tree.py",
+    "tests/test_gateway/test_plan_rpc.py",
+    "tests/test_gateway/test_task_runtime_wait_slots.py",
+    "tests/test_gateway/test_task_progress_projection.py",
+    "tests/test_gateway/test_usage_ledger_runtime.py",
+    "tests/test_engine/test_plan_run_reconciliation.py",
+    "tests/test_engine/test_goal_context_prompt.py",
+    "tests/test_session/test_goal_storage.py",
+    "tests/test_session/test_goal_plan_admission.py",
+    "tests/test_session/test_plan_storage.py",
+    "tests/test_session/test_plan_presentation.py",
+    "tests/test_session/test_task_progress.py",
+    "tests/test_persistence/test_usage_ledger.py",
+    "tests/test_persistence/test_migration_compatibility.py",
+    "tests/test_migrations/test_v045_goal_runtime_accounting.py",
+    "tests/test_tools/test_plan_access.py",
+    "tests/test_sandbox/test_trusted_sandbox_execution.py",
+    "tests/test_tools/test_approval_unification.py",
+    "tests/test_live_multi_provider_matrix.py",
+    "tests/test_live_provider_profile_smoke.py",
     "tests/test_engine/test_request_execution_identity.py",
     "tests/test_gateway/test_session_model_routing_rpc.py",
     "tests/test_tools/test_execution_status.py",
+    "tests/test_tools/test_shell_native_argv.py",
     "tests/test_provider_ensemble.py"
   ],
   "baseline_suites": [
@@ -31,6 +56,7 @@
     "webui-chat-recovery",
     "wheel-webui-roundtrip",
     "windows-high-risk",
+    "windows-nsis-regression",
     "workflow-lint"
   ],
   "full_desktop_matrix": [
@@ -71,10 +97,14 @@
       "desktop-installer-contracts"
     ],
     "windows": [
-      "core",
-      "gateway-sqlite",
-      "recovery-migration",
-      "desktop-installer-contracts"
+      "core-1",
+      "core-2",
+      "gateway-sqlite-1",
+      "gateway-sqlite-2",
+      "recovery-migration-1",
+      "recovery-migration-2",
+      "desktop-installer-contracts-1",
+      "desktop-installer-contracts-2"
     ]
   },
   "desktop_groups": {
@@ -145,13 +175,35 @@
     }
   },
   "suites": {
+    "windows-nsis-regression": {
+      "execution_inputs": [
+        ".github/actions/download-required-artifact/action.yml",
+        ".github/scripts/audit_dependencies.py",
+        ".github/scripts/verify-nsis-upgrade-regression.py",
+        ".github/scripts/verify-release-profile-preservation.py",
+        ".github/scripts/upgrade_baseline.py",
+        ".github/scripts/verify-release-windows-upgrade.ps1",
+        ".github/scripts/verify-sandbox-package.mjs",
+        ".github/workflows/windows-nsis-upgrade-regression.yml",
+        "desktop/electron/**",
+        "migrations/**",
+        "opensquilla-webui/**",
+        "pyproject.toml",
+        "scripts/build_wheelhouse_zip.py",
+        "scripts/release_dependency_inventory.py",
+        "src/opensquilla/**",
+        "tests/fixtures/upgrade-v054/**",
+        "uv.lock"
+      ]
+    },
     "workflow-lint": {
       "execution_inputs": [
         ".github/workflows/**",
         ".github/scripts/check_ci_results.py",
         ".github/scripts/plan_ci.py",
         ".github/ci/suites.v1.json",
-        ".github/ci/trust-policy.v1.json"
+        ".github/ci/trust-policy.v1.json",
+        ".github/scripts/windows_test_partitions.json"
       ]
     },
     "readme-locale": {
@@ -243,6 +295,7 @@
         ".github/scripts/**",
         ".github/signing/**",
         ".github/scripts/windows_test_assignments.json",
+        ".github/scripts/windows_test_partitions.json",
         ".github/scripts/windows_test_durations.json",
         ".github/workflows/desktop-fault-injection.yml",
         ".github/workflows/wheelhouse-release.yml",
@@ -288,6 +341,7 @@
         "src/opensquilla/engine/**",
         "src/opensquilla/provider/**",
         "src/opensquilla/tools/**",
+        "src/opensquilla/process_tree.py",
         "src/opensquilla/gateway/**",
         "src/opensquilla/router_control.py",
         "src/opensquilla/persistence/**",
@@ -296,9 +350,33 @@
         "tests/test_desktop/test_electron_startup_contract.py",
         "tests/test_migration/test_opensquilla_home_migration.py",
         "tests/test_recovery/**",
+        "tests/test_gateway/test_goal_rpc.py",
+        "tests/test_gateway/test_goal_child_wait.py",
+        "tests/test_gateway/test_goal_plan_rpc_admission.py",
+        "tests/test_gateway/test_plan_cancel_tree.py",
+        "tests/test_gateway/test_plan_rpc.py",
+        "tests/test_gateway/test_task_runtime_wait_slots.py",
+        "tests/test_gateway/test_task_progress_projection.py",
+        "tests/test_gateway/test_usage_ledger_runtime.py",
+        "tests/test_engine/test_plan_run_reconciliation.py",
+        "tests/test_engine/test_goal_context_prompt.py",
+        "tests/test_session/test_goal_storage.py",
+        "tests/test_session/test_goal_plan_admission.py",
+        "tests/test_session/test_plan_storage.py",
+        "tests/test_session/test_plan_presentation.py",
+        "tests/test_session/test_task_progress.py",
+        "tests/test_persistence/test_usage_ledger.py",
+        "tests/test_persistence/test_migration_compatibility.py",
+        "tests/test_migrations/test_v045_goal_runtime_accounting.py",
+        "tests/test_tools/test_plan_access.py",
+        "tests/test_sandbox/test_trusted_sandbox_execution.py",
+        "tests/test_tools/test_approval_unification.py",
+        "tests/test_live_multi_provider_matrix.py",
+        "tests/test_live_provider_profile_smoke.py",
         "tests/test_engine/test_request_execution_identity.py",
         "tests/test_gateway/test_session_model_routing_rpc.py",
         "tests/test_tools/test_execution_status.py",
+        "tests/test_tools/test_shell_native_argv.py",
         "tests/test_provider_ensemble.py"
       ]
     },
@@ -341,6 +419,7 @@
         "scripts/install_source.*",
         "start.*",
         "tests/test_ci/test_upgrade_baselines.py",
+        "tests/test_ci/test_nsis_fresh_interaction.py",
         "tests/fixtures/upgrade-v054/**",
         "scripts/build_v054_upgrade_fixture.py",
         "tests/test_ci/test_windows_signed_update_audit.py",

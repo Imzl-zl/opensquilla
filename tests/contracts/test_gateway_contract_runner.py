@@ -447,6 +447,10 @@ def test_only_the_exact_production_sessions_list_schema_is_grandfathered(
         "sessions/sessions-list.schema.json",
         copied_document,
     )
+    with pytest.raises(runner.ContractConfigurationError, match="repository-pinned toolchain"):
+        runner.load_contract(copied_schema, contract_root=tmp_path)
+    copied_document["x-opensquilla-codegen"] = runner.PINNED_CODEGEN
+    _write_schema(tmp_path, "sessions/sessions-list.schema.json", copied_document)
     with pytest.raises(runner.ContractConfigurationError, match="declare kind"):
         runner.load_contract(copied_schema, contract_root=tmp_path)
 
@@ -493,15 +497,41 @@ def test_compatibility_manifest_is_schema_derived_and_deterministic() -> None:
     assert manifest["protocol"] == runner.GATEWAY_PROTOCOL
     assert manifest["wireVersion"] == 4
     assert manifest["source"] == {
-        "schemaCount": 226,
-        "methodCount": 216,
+        "schemaCount": 229,
+        "methodCount": 219,
         "eventFamilyCount": 10,
         "schemaTreeSha256": runner._schema_tree_digest(specs),
         "generatorSha256": runner._generator_digest(),
+        "toolchains": {
+            "ordinaryTypes": {
+                "python": {
+                    "tool": "datamodel-code-generator",
+                    "version": "0.81.0",
+                    "target": "pydantic_v2.BaseModel",
+                },
+                "typescript": {"tool": "json-schema-to-typescript", "version": "16.0.0"},
+            },
+            "legacyTypes": {
+                "python": {
+                    "tool": "datamodel-code-generator",
+                    "version": "0.75.1",
+                    "target": "pydantic_v2.BaseModel",
+                },
+                "typescript": {"tool": "json-schema-to-typescript", "version": "15.0.4"},
+            },
+            "runtimeValidation": {
+                "tool": "ajv",
+                "version": "8.20.0",
+                "mode": "standalone-adapter-only",
+            },
+        },
     }
     assert any(entry["name"] == "skills.install.status" for entry in manifest["methods"])
+    assert {"skills.candidates", "skills.setEnabled"}.issubset(
+        {entry["name"] for entry in manifest["methods"]}
+    )
     assert Counter(entry["lifecycle"] for entry in manifest["methods"]) == {
-        "stable": 213,
+        "stable": 216,
         "legacy": 3,
     }
     assert [
@@ -510,13 +540,19 @@ def test_compatibility_manifest_is_schema_derived_and_deterministic() -> None:
         if entry["name"] == "telemetry.product_active.record"
     ] == ["stable"]
     profile_save_activate = next(
-        entry for entry in manifest["methods"]
+        entry
+        for entry in manifest["methods"]
         if entry["name"] == "onboarding.llmProfile.upsertAndActivate"
     )
     assert profile_save_activate["lifecycle"] == "stable"
     assert profile_save_activate["schema"] == (
         "platform/onboarding-llm-profile-upsert-and-activate.schema.json"
     )
+    plan_presentation = next(
+        entry for entry in manifest["methods"] if entry["name"] == "plans.setPresentation"
+    )
+    assert plan_presentation["lifecycle"] == "stable"
+    assert plan_presentation["schema"] == "plans/plans-set-presentation.schema.json"
     capacity_resolve = next(
         entry for entry in manifest["methods"] if entry["name"] == "models.capacity.resolve"
     )
@@ -660,6 +696,10 @@ def test_generic_renderer_derives_all_adapter_only_artifacts(
             output.write_text("export interface SessionsResolveRequestFrame {}\n", encoding="utf-8")
 
     monkeypatch.setattr(runner, "_run", fake_run)
+    # This test synthesizes generator output; version discovery belongs to the
+    # same external-tool boundary, not the Python-only rendering contract.
+    monkeypatch.setattr(runner, "distribution_version", lambda _: "0.81.0")
+    monkeypatch.setattr(runner, "_verify_npm_generator", lambda *args: None)
     monkeypatch.setattr(
         runner,
         "_capture",
@@ -749,6 +789,37 @@ def test_python_renderer_keeps_field_alias_metadata_when_tightening_nullability(
         "status: StrictStr = Field(None, alias='wireStatus')  # type: ignore[assignment]"
         in rendered
     )
+
+
+def test_python_renderer_keeps_omittable_non_nullable_collection_constraints(
+    tmp_path: Path,
+) -> None:
+    from pydantic import ValidationError
+
+    document = _method_schema("sessions.resolve")
+    document["$defs"]["SessionsResolveResult"] = {
+        "type": "object",
+        "properties": {"values": {"type": "array", "items": {"type": "string"}, "maxItems": 2}},
+    }
+    schema = _write_schema(tmp_path, "sessions/sessions-resolve.schema.json", document)
+    spec = runner.load_contract(schema, contract_root=tmp_path)
+    generated = (
+        "from pydantic import BaseModel, Field\n\n"
+        "class SessionsResolveResult(BaseModel):\n"
+        "    values: list[str] | None = Field(None, max_length=2)\n"
+    )
+    rendered = runner._normalise_optional_non_nullable_defaults(spec, generated)
+    assert "list[str] = Field(None, max_length=2)  # type: ignore[assignment, arg-type]" in rendered
+    namespace: dict[str, Any] = {}
+    exec(rendered, namespace)
+    model = namespace["SessionsResolveResult"]
+    model.model_rebuild(_types_namespace=namespace)
+    assert model().model_dump(exclude_unset=True) == {}
+    assert model(values=[]).model_dump() == {"values": []}
+    with pytest.raises(ValidationError):
+        model(values=None)
+    with pytest.raises(ValidationError):
+        model(values=["one", "two", "three"])
 
 
 def test_python_renderer_aligns_json_integer_acceptance_with_ajv(

@@ -3730,8 +3730,8 @@ class OpenAIProvider:
 
         from opensquilla.engine.context_budget import coordinate_provider_context_budget
 
-        budget_decision = coordinate_provider_context_budget(
-            payload,
+        budget_decision = await asyncio.to_thread(
+            coordinate_provider_context_budget, payload,
             projection_adapter=self._provider_kind,
             proof_budget=provider_request_character_budget(payload, cfg),
             token_budget=provider_request_token_budget(payload, cfg),
@@ -3759,8 +3759,8 @@ class OpenAIProvider:
         if budget_decision.proof is not None:
             log.info("provider.request_proof", **budget_decision.proof)
         try:
-            prove_provider_payload_from_env(
-                payload,
+            await asyncio.to_thread(
+                prove_provider_payload_from_env, payload,
                 token_budget=provider_request_token_budget(payload, cfg),
                 projection_adapter=self._provider_kind,
                 status_projection_mode="content_envelope",
@@ -3877,6 +3877,7 @@ class OpenAIProvider:
         emitted_stream_event = False
         saw_done_sentinel = False
         finish_reasons: list[str] = []
+        refusal = False
         deferred_native_events = _DeferredStreamEventBuffer()
         deferred_post_native_events = _DeferredStreamEventBuffer()
         pending_native_identity_events: dict[Any, _DeferredStreamEventBuffer] = {}
@@ -4391,6 +4392,8 @@ class OpenAIProvider:
                                     code="invalid_stream_frame",
                                 )
                                 return
+
+                            refusal = refusal or bool(delta.get("refusal"))
 
                             # Reasoning content (always parsed, not gated on thinking).
                             # Streamed in real time as ReasoningDeltaEvent; the
@@ -5276,6 +5279,7 @@ class OpenAIProvider:
                         yield TextDeltaEvent(text=candidate_artifact_text)
                     yield DoneEvent(
                         stop_reason=stop_reason,
+                        refusal=refusal,
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
                         reasoning_content=(
@@ -5830,6 +5834,7 @@ class OpenAIProvider:
         trace_tool_calls: list[dict[str, Any]] = []
         tools_by_name = _tool_by_name(tools)
         finish_reasons: list[str] = []
+        refusal = False
         text_tool_dialects = self._compat.text_tool_profile.dialects_for_model(
             self._model,
             self._base_url,
@@ -5858,6 +5863,7 @@ class OpenAIProvider:
                 stop_reason = choice["finish_reason"]
                 finish_reasons.append(str(choice["finish_reason"]))
             message = choice.get("message") or {}
+            refusal = refusal or bool(message.get("refusal"))
 
             text = message.get("content")
             if isinstance(text, str) and text:
@@ -6265,6 +6271,7 @@ class OpenAIProvider:
             yield TextDeltaEvent(text=candidate_artifact_text)
         yield DoneEvent(
             stop_reason=stop_reason,
+            refusal=refusal,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             reasoning_content=reasoning_text or ("" if reasoning_text_present else None),

@@ -13,6 +13,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, cast
 
+import structlog
+
 from opensquilla.gateway.model_routing import (
     ModelRoutingMode,
     capture_model_routing_config,
@@ -20,6 +22,8 @@ from opensquilla.gateway.model_routing import (
     model_routing_snapshot,
 )
 from opensquilla.gateway.session_services import get_session_storage
+
+log = structlog.get_logger(__name__)
 
 # This is intentionally an allow-list rather than a deny-list.  New system
 # run kinds must opt in deliberately, which keeps cron, retries, maintenance,
@@ -262,7 +266,9 @@ async def prepare_model_routing_runtime(
     Per-session routing can be enabled while the global strategy is Direct,
     which deliberately skips boot preloading. The local model cold start is
     readiness work, not classification, and must not consume the 5s routing
-    deadline. No admission/state lock may be held while awaiting this helper.
+    deadline. A failed/slow warmup still leaves routing to the existing bounded
+    pipeline step, whose fallback policy must remain authoritative. No
+    admission/state lock may be held while awaiting this helper.
     """
     router_config = getattr(config, "squilla_router", None)
     if not bool(getattr(router_config, "enabled", False)):
@@ -274,10 +280,16 @@ async def prepare_model_routing_runtime(
             asyncio.to_thread(preload_strategy, router_config),
             timeout=initialization_timeout,
         )
-    except TimeoutError as exc:
-        raise TimeoutError(
-            "The local routing model is still initializing; retry when it is ready."
-        ) from exc
+    except TimeoutError:
+        log.warning(
+            "squilla_router.preload_deferred", reason="timeout",
+            timeout_seconds=initialization_timeout,
+        )
+    except Exception as exc:  # noqa: BLE001 - the routing step owns fail-open policy
+        log.warning(
+            "squilla_router.preload_deferred", reason="initialization_failed",
+            error_type=type(exc).__name__,
+        )
 
 
 async def accepted_model_routing_stream(

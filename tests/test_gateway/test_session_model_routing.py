@@ -378,14 +378,86 @@ async def test_non_router_readiness_does_not_load_local_models(monkeypatch, mode
 
 
 @pytest.mark.asyncio
-async def test_router_initialization_failure_is_not_silently_a_direct_turn(monkeypatch):
+async def test_router_initialization_failure_keeps_routing_pipeline_authoritative(monkeypatch):
+    from opensquilla.gateway import session_model_routing
     from opensquilla.gateway.session_model_routing import prepare_model_routing_runtime
 
     def fail(_config):
         raise RuntimeError("local router readiness failed")
 
+    warnings = []
+    monkeypatch.setattr(session_model_routing.log, "warning", lambda *a, **kw: warnings.append(kw))
     monkeypatch.setattr("opensquilla.engine.steps.squilla_router.preload_strategy", fail)
-    with pytest.raises(RuntimeError, match="local router readiness failed"):
-        await prepare_model_routing_runtime(
-            capture_model_routing_config(GatewayConfig(), session_mode="router")
-        )
+    accepted = capture_model_routing_config(GatewayConfig(), session_mode="router")
+    await prepare_model_routing_runtime(accepted)
+    assert accepted.squilla_router.enabled is True
+    assert warnings == [{"reason": "initialization_failed", "error_type": "RuntimeError"}]
+
+
+@pytest.mark.asyncio
+async def test_router_initialization_timeout_does_not_reject_accepted_turn(monkeypatch):
+    import asyncio
+    import threading
+    from types import SimpleNamespace
+
+    from opensquilla.gateway import session_model_routing
+    from opensquilla.gateway.boot import dispatch_task_runtime_turn
+    from opensquilla.gateway.routing import build_cli_route_envelope
+
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    real_prepare = session_model_routing.prepare_model_routing_runtime
+    real_wait_for = asyncio.wait_for
+    warnings = []
+
+    def blocked_preload(_config):
+        loop.call_soon_threadsafe(entered.set)
+        release.wait(5)
+
+    async def wait_for_started_preload(awaitable, timeout):
+        task = asyncio.ensure_future(awaitable)
+        await real_wait_for(entered.wait(), 2)
+        return await real_wait_for(task, timeout)
+
+    async def bounded_prepare(config):
+        await real_prepare(config, initialization_timeout=0.01)
+
+    monkeypatch.setattr("opensquilla.engine.steps.squilla_router.preload_strategy", blocked_preload)
+    monkeypatch.setattr(session_model_routing, "asyncio", SimpleNamespace(
+        **(vars(asyncio) | {"wait_for": wait_for_started_preload}),
+    ))
+    monkeypatch.setattr(session_model_routing.log, "warning", lambda *a, **kw: warnings.append(kw))
+    monkeypatch.setattr(session_model_routing, "prepare_model_routing_runtime", bounded_prepare)
+    config = GatewayConfig(agent_stream_heartbeat_interval_seconds=0)
+    accepted = capture_model_routing_config(config, session_mode="router")
+    session_key = "agent:main:router-warmup-timeout"
+    calls = []
+
+    class RecordingRunner:
+        async def run(self, message, key, **kwargs):
+            calls.append((message, key))
+            assert accepted.squilla_router.enabled is True
+            yield DoneEvent()
+
+    run = SimpleNamespace(
+        agent_id="main", task_id="warmup-timeout", session_key=session_key,
+        message="hello",
+        envelope=build_cli_route_envelope(session_key=session_key, agent_id="main"),
+        attachments=[], input_provenance={}, run_kind="channel_turn", no_memory_capture=False,
+        ingress_pipeline_steps=[], semantic_message=None, stream_event_sink=None,
+        accepted_config=accepted,
+    )
+
+    async def emit(*_args):
+        pass
+
+    try:
+        await real_wait_for(dispatch_task_runtime_turn(
+            run, config=config, session_manager=None,
+            turn_runner=RecordingRunner(), event_emitter=emit,
+        ), 3)
+        assert calls == [("hello", session_key)]
+        assert warnings == [{"reason": "timeout", "timeout_seconds": 0.01}]
+    finally:
+        release.set()

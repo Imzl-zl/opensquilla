@@ -813,7 +813,7 @@ class TokenRhythmCatalogCoordinator:
         self._aligned_at: dict[str, float] = {}
         self._ephemeral_aligned_at: dict[str, float] = {}
         self._failures: dict[tuple[str, str], float] = {}
-        self._last_declared_errors: dict[str, BaseException] = {}
+        self._last_declared_errors: dict[str, dict[str, BaseException]] = {}
         self._inflight: dict[tuple[str, str], asyncio.Task[_RefreshOutcome]] = {}
         # Source flights may outlive the operation that first awaited them
         # (callers use shield for singleflight). Keep a drain reference even
@@ -1402,9 +1402,11 @@ class TokenRhythmCatalogCoordinator:
             else dict(entitlement.models) if entitlement is not None else {}
         )
         declared_available = transient_declared is not None or entitlement is not None
+        # A draft proxy has its own transport. Its authentication failure
+        # must not hide the same account's working saved connection.
         error = declared_error or self._last_declared_errors.get(
-            request.authority_identity
-        )
+            request.authority_identity, {}
+        ).get(request.transport_fingerprint)
         return _CatalogView(
             published=dict(self._published.models),
             declared=declared,
@@ -1724,7 +1726,11 @@ class TokenRhythmCatalogCoordinator:
             if fetch_declared:
                 if outcome.declared is not None:
                     transient_declared = outcome.declared
-                    self._last_declared_errors.pop(request.authority_identity, None)
+                    errors = self._last_declared_errors.get(request.authority_identity)
+                    if errors is not None:
+                        errors.pop(request.transport_fingerprint, None)
+                        if not errors:
+                            self._last_declared_errors.pop(request.authority_identity, None)
                     self._failures.pop(
                         (request.transport_fingerprint, "declared"), None
                     )
@@ -1767,9 +1773,9 @@ class TokenRhythmCatalogCoordinator:
                         self._aligned_at.pop(request.authority_identity, None)
                         self._ephemeral_aligned_at.pop(request.authority_identity, None)
                         should_persist = True
-                    self._last_declared_errors[
-                        request.authority_identity
-                    ] = outcome.declared_error
+                    self._last_declared_errors.setdefault(
+                        request.authority_identity, {}
+                    )[request.transport_fingerprint] = outcome.declared_error
                     self._failures[
                         (request.transport_fingerprint, "declared")
                     ] = outcome.completed_at

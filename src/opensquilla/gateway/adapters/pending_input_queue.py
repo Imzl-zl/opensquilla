@@ -206,8 +206,10 @@ class GatewayPendingInputQueueAdapter:
         for field in ("initialModel", "initial_model", "initialProvider", "initial_provider"):
             if field in raw:
                 params[field] = raw[field]
-        for field in ("pageContext", "promptAnnotationIds", "prompt_annotation_ids",
-                      "documentContext", "document_context"):
+        for field in (
+            "pageContext", "selectedSkills", "promptAnnotationIds", "prompt_annotation_ids",
+            "documentContext", "document_context",
+        ):
             if field in raw:
                 params[field] = raw[field]
         confirmed = raw.get("confirmedPlainText", raw.get("confirmed_plain_text", False))

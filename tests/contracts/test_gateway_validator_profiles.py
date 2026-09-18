@@ -22,14 +22,16 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
     specs = runner.discover_contracts()
     targets = runner.load_production_targets(specs)
 
-    assert len(targets) == 198
+    assert len(targets) == 201
+    assert targets[("method", "skills.candidates")] == ("result",)
+    assert targets[("method", "skills.setEnabled")] == ("result",)
     assert Counter(role for roles in targets.values() for role in roles) == {
-        "result": 188,
+        "result": 191,
         "params": 22,
         "payload": 9,
         "frame": 1,
     }
-    assert sum(len(spec.targets) for spec in specs) == 874
+    assert sum(len(spec.targets) for spec in specs) == 886
     assert targets[("method", "models.list")] == ("params", "result")
     assert targets[("method", "models.capacity.resolve")] == ("params", "result")
     assert targets[("method", "sessions.executionLog.read")] == ("params", "result")
@@ -44,6 +46,7 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
         "params", "result",
     )
     assert targets[("method", "models.routing.resetRecommended")] == ("params", "result")
+    assert targets[("method", "plans.setPresentation")] == ("result",)
     assert targets[("event", "transport.flow.dirty")] == ("payload",)
 
     retired_writes = {
@@ -57,6 +60,9 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
         "artifacts.source.patch",
     }
     method_specs = {spec.wire_name: spec for spec in specs if spec.contract_type == "method"}
+    assert {role for role, _ in method_specs["plans.setPresentation"].targets} == {
+        "request", "params", "response", "result",
+    }
     assert retired_writes.isdisjoint(method_specs)
     assert all(("method", name) not in targets for name in retired_writes)
 
@@ -83,6 +89,8 @@ def test_sessions_list_uses_browser_safe_esm_for_its_selected_validator(
         return "export const validateSessionsListResult = () => true\n"
 
     monkeypatch.setattr(runner, "_capture", capture)
+    # The child process is simulated; this must also run without node_modules.
+    monkeypatch.setattr(runner, "_verify_npm_generator", lambda *args: None)
     rendered = runner._render_validators(sessions_list, ("result",))
 
     assert set(rendered) == set(sessions_list.outputs[3:])
@@ -134,6 +142,8 @@ def test_production_render_keeps_types_but_not_unselected_validators(
 
     monkeypatch.setattr(runner, "_run", emit_tool_output)
     monkeypatch.setattr(runner, "_capture", lambda *args, **kwargs: "standalone validator\n")
+    monkeypatch.setattr(runner, "distribution_version", lambda _: "0.81.0")
+    monkeypatch.setattr(runner, "_verify_npm_generator", lambda *args: None)
     full = runner.render_generic(spec)
     selected = runner.render_generic(spec, validator_roles=("result",))
     types_only = runner.render_generic(spec, validator_roles=())

@@ -128,6 +128,14 @@ class DoneEvent:
     billing_receipt: ProviderBillingReceipt | None = None
     generation_epoch: int | None = None
     provider_replay: ProviderReplayState | None = None
+    # Structured provider refusal evidence, without retaining refusal content.
+    # False means no explicit signal was observed, not a refusal classifier.
+    # Consumers may decline an auxiliary artifact while still accounting usage.
+    refusal: bool = False
+    # Composite providers retain additive input_tokens for billing, while
+    # recovery decisions need the input size of the terminal physical request.
+    # None means input_tokens already describes the current request.
+    terminal_request_input_tokens: int | None = None
 
     @property
     def upstream_cost_usd(self) -> float:
@@ -212,6 +220,8 @@ class ErrorEvent:
     model_usage_breakdown: list[dict[str, Any]] = field(default_factory=list)
     usage_missing_count: int = 0
     generation_epoch: int | None = None
+    # Preserve request accounting when an ensemble's terminal call fails.
+    ensemble_trace: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

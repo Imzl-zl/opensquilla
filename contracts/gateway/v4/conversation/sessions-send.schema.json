@@ -21,16 +21,16 @@
   "x-opensquilla-codegen": {
     "python": {
       "tool": "datamodel-code-generator",
-      "version": "0.75.1",
+      "version": "0.81.0",
       "target": "pydantic_v2.BaseModel"
     },
     "typescript": {
       "tool": "json-schema-to-typescript",
-      "version": "15.0.4"
+      "version": "16.0.0"
     },
     "runtimeValidation": {
       "tool": "ajv",
-      "version": "8.17.1",
+      "version": "8.20.0",
       "mode": "standalone-adapter-only"
     }
   },
@@ -167,6 +167,13 @@
               "type": "null"
             }
           ]
+        },
+        "selectedSkills": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/SelectedSkillRef"
+          }
         }
       }
     },
@@ -330,7 +337,10 @@
       "additionalProperties": false,
       "properties": {
         "pagePath": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1,
           "maxLength": 4096,
           "pattern": "\\S",
@@ -394,6 +404,32 @@
           ],
           "maxLength": 16384,
           "description": "The Gateway enforces a 16384-byte UTF-8 limit."
+        }
+      }
+    },
+    "SelectedSkillRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "instanceId",
+        "digest"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "instanceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
         }
       }
     }

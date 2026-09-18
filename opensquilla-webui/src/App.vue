@@ -520,7 +520,7 @@ import {
   LOCAL_SESSIONS_DELETED_EVENT,
 } from './utils/sessionSync'
 import { activeTaskWasDeletedWithProjectHistory } from './utils/projectHistory'
-import { createCoalescedRefresh } from './utils/coalescedRefresh'
+import { createAppAutomaticRpc } from './utils/appAutomaticRpc'
 import {
   optionalSessionRpcAllowed,
   optionalSessionReadOptions,
@@ -654,6 +654,7 @@ const {
   hasMore,
   loadSessions,
   loadMoreSessions,
+  cancelPendingRequests,
 } = useSessions(sessionDirectory)
 const { bottomRoutes, workNav } = useNavigation()
 // Axis-B: the active expressive skin for the routed content area (meta.skin).
@@ -1160,7 +1161,6 @@ function onPinSidebarSession(payload: { key: string; pinned: boolean }) {
 }
 
 let appAutomaticRpcMounted = false
-let appAutomaticRpcStarted = false
 
 // Hide the bottom tab bar while the on-screen keyboard owns the bottom edge.
 // A visual-viewport shrink well beyond browser-chrome changes (>140px) is the
@@ -1686,11 +1686,7 @@ function openDesktopRuntimeSettings() {
 }
 
 function scheduleSessionRefresh() {
-  sidebarRefresh.schedule()
-}
-
-function flushScheduledSidebarRefresh() {
-  sidebarRefresh.flush()
+  automaticAppRpc.schedule()
 }
 
 async function performSidebarLoad(): Promise<void> {
@@ -1706,22 +1702,18 @@ async function performSidebarLoad(): Promise<void> {
   await Promise.allSettled(requests)
 }
 
-const sidebarRefresh = createCoalescedRefresh({
-  run: performSidebarLoad,
-  allowed: () => appAutomaticRpcMounted && optionalSessionRpcAllowed.value,
-  delayMs: 150,
+const automaticAppRpc = createAppAutomaticRpc({
+  available: () => gatewayAccess.isAvailable,
+  admitted: () => optionalSessionRpcAllowed.value,
+  resumeDirectory: () => sessionDirectoryChanges.resume(),
+  subscribeCron: subscribeCronEventsWhenAdmitted,
+  loadAgents,
+  loadSidebar: performSidebarLoad,
+  cancelSidebar: cancelPendingRequests,
 })
 
 function loadSidebarData(): Promise<void> {
-  return sidebarRefresh.load()
-}
-
-function refreshSidebarDataWhenAdmitted(): void | Promise<void> {
-  if (!optionalSessionRpcAllowed.value) {
-    sidebarRefresh.defer()
-    return
-  }
-  return loadSidebarData()
+  return automaticAppRpc.load()
 }
 
 const sessionDirectoryChangesSubscription = sessionDirectoryChanges.subscribe(change => {
@@ -1745,35 +1737,16 @@ function subscribeCronEventsWhenAdmitted() {
   cronFinishedSubscription = cronScheduler.subscribe(handleCronRunFinished)
 }
 
-function resumeAutomaticAppRpc() {
-  if (!appAutomaticRpcMounted || !optionalSessionRpcAllowed.value) return
-  subscribeCronEventsWhenAdmitted()
-  void sessionDirectoryChanges.resume()
-  if (!appAutomaticRpcStarted) {
-    appAutomaticRpcStarted = true
-    void loadAgents()
-    void loadSidebarData()
-  }
-  flushScheduledSidebarRefresh()
-}
-
-watch(optionalSessionRpcAllowed, admitted => {
-  if (admitted) resumeAutomaticAppRpc()
+watch(optionalSessionRpcAllowed, () => {
+  void automaticAppRpc.admissionChanged()
 }, { flush: 'sync' })
 
 watch(
   () => gatewayAccess.availability,
-  state => {
-    if (state !== 'available') return
-    subscribeCronEventsWhenAdmitted()
-    if (!appAutomaticRpcMounted || !optionalSessionRpcAllowed.value) return
-    // The event stream is live-only. Rebind the logical lease and refresh a
-    // complete directory snapshot after every physical reconnect so events
-    // missed during the gap cannot leave the sidebar stale.
-    void sessionDirectoryChanges.resume().then(() => {
-      if (appAutomaticRpcStarted) void refreshSidebarDataWhenAdmitted()
-    })
+  () => {
+    void automaticAppRpc.availabilityChanged()
   },
+  { flush: 'sync' },
 )
 
 function handleKeydown(e: KeyboardEvent) {
@@ -1858,6 +1831,7 @@ function errorMessage(err: unknown): string {
 // ---------------------------------------------------------------------------
 
 const approvalSubscriptions: ApprovalSubscription[] = []
+let approvalSeedGeneration = 0
 
 function approvalItemToPending(item: ApprovalItem): PendingApproval | null {
   const approvalId = item.id.trim()
@@ -1874,8 +1848,12 @@ function approvalItemToPending(item: ApprovalItem): PendingApproval | null {
 // while a request is already pending. The
 // snapshot is ordered oldest-first, which the deep-link relies on.
 async function seedPendingApprovals() {
+  if (!appAutomaticRpcMounted || gatewayAccess.availability !== 'available') return
+  const generation = ++approvalSeedGeneration
   try {
     const snapshot = await approvalCenter.snapshot()
+    if (!appAutomaticRpcMounted || generation !== approvalSeedGeneration
+      || gatewayAccess.availability !== 'available') return
     const items = snapshot.pending
       .map(approvalItemToPending)
       .filter((item): item is PendingApproval => item !== null)
@@ -1900,6 +1878,7 @@ function onApprovalEvent(event: ApprovalEvent) {
 // was down); the push events keep it live thereafter.
 function onApprovalAvailability(state: 'available' | 'recovering' | 'unavailable') {
   if (state !== 'available') {
+    approvalSeedGeneration++
     appStore.setPendingApprovals([])
     return
   }
@@ -1914,6 +1893,7 @@ function subscribeApprovals() {
 }
 
 function unsubscribeApprovals() {
+  approvalSeedGeneration++
   approvalSubscriptions.splice(0).forEach(subscription => subscription.close())
   approvalCenter.dispose()
 }
@@ -1950,7 +1930,7 @@ onMounted(() => {
   window.addEventListener(LOCAL_SESSIONS_DELETED_EVENT, handleLocalSessionsDeleted)
   window.addEventListener('focus', markCurrentSessionReadIfVisible)
   document.addEventListener('visibilitychange', markCurrentSessionReadIfVisible)
-  resumeAutomaticAppRpc()
+  void automaticAppRpc.mount()
   // Keep the approval badge/count live app-wide, not just on the Approvals page.
   subscribeApprovals()
   // Seed now in case an approval was pending before mount. Availability events
@@ -1960,7 +1940,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   appAutomaticRpcMounted = false
-  sidebarRefresh.dispose()
+  automaticAppRpc.dispose()
   window.removeEventListener(LOCAL_SESSIONS_DELETED_EVENT, handleLocalSessionsDeleted)
   window.removeEventListener('focus', markCurrentSessionReadIfVisible)
   document.removeEventListener('visibilitychange', markCurrentSessionReadIfVisible)

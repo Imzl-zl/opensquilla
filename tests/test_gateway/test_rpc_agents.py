@@ -569,3 +569,97 @@ async def test_models_configured_scope_does_not_call_parallel_runtime_listing(mo
     assert [(m["provider"], m["id"]) for m in result.payload["models"]] == [
         ("openai", "private-id"),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("listed", [True, False])
+async def test_models_configured_scope_discovers_connection_without_default_model(
+    monkeypatch, listed,
+):
+    from opensquilla.onboarding.probe import ProviderModelsDiscoverResult
+
+    cfg = GatewayConfig(llm_profiles={
+        "custom": {"base_url": "http://127.0.0.1:11434/v1", "api_key": "synthetic-key"},
+    })
+    calls = []
+
+    async def discover(**kwargs):
+        calls.append(kwargs["provider_id"])
+        return ProviderModelsDiscoverResult(
+            ok=True, provider_id="custom", source="live" if listed else "none",
+            models=[{
+                "id": "server-model", "name": "Server Model", "contextWindow": 32000,
+                "maxOutputTokens": 4096, "capabilities": ["chat"],
+            }] if listed else [],
+        )
+
+    monkeypatch.setattr(
+        "opensquilla.onboarding.probe.discover_selectable_provider_models", discover,
+    )
+    result = await get_dispatcher().dispatch(
+        "r", "models.list", {"scope": "configured"}, RpcContext(conn_id="test", config=cfg),
+    )
+    assert result.error is None
+    assert calls == ["custom"]
+    assert [m["id"] for m in result.payload["models"]] == (["server-model"] if listed else [])
+    assert result.payload["errors"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exhausted", [False, True])
+async def test_models_configured_scope_observes_parked_pool_credentials_without_acquiring(
+    monkeypatch, exhausted,
+):
+    from opensquilla.gateway.llm_runtime import ProfileCredentialPools
+    from opensquilla.onboarding.probe import ProviderModelsDiscoverResult
+    from opensquilla.provider.failures import ProviderFailureKind
+
+    names = ["CATALOG_POOL_FIRST", "CATALOG_POOL_SECOND"]
+    monkeypatch.setenv(names[0], "synthetic-rejected")
+    monkeypatch.setenv(names[1], "synthetic-healthy")
+    pools = ProfileCredentialPools()
+    first = pools.acquire_for_session("openrouter", names, "previous-turn")
+    assert first is not None and first.env_name == names[0]
+    pools.report_failure("openrouter", "previous-turn", ProviderFailureKind.AUTH_INVALID)
+    if exhausted:
+        second = pools.acquire_for_session("openrouter", names, "previous-turn")
+        assert second is not None and second.env_name == names[1]
+        pools.report_failure("openrouter", "previous-turn", ProviderFailureKind.AUTH_INVALID)
+
+    def unexpected_acquisition(*_args, **_kwargs):
+        raise AssertionError("Opening a model menu must not acquire or pin a credential")
+
+    monkeypatch.setattr(pools, "acquire_for_session", unexpected_acquisition)
+    monkeypatch.setattr("opensquilla.gateway.llm_runtime.profile_credential_pools", lambda: pools)
+    cfg = GatewayConfig(llm_profiles={
+        "openrouter": {"model": "configured-model", "api_key_env_pool": names},
+    })
+    calls = []
+
+    async def discover(**kwargs):
+        calls.append(kwargs["api_key"])
+        return ProviderModelsDiscoverResult(
+            ok=True, provider_id="openrouter", source="live", models=[{
+                "id": "healthy-model", "name": "Healthy Model", "contextWindow": 32000,
+                "maxOutputTokens": 4096, "capabilities": ["chat"],
+            }],
+        )
+
+    monkeypatch.setattr(
+        "opensquilla.onboarding.probe.discover_selectable_provider_models", discover,
+    )
+    result = await get_dispatcher().dispatch(
+        "r", "models.list", {"scope": "configured"}, RpcContext(conn_id="test", config=cfg),
+    )
+    assert result.error is None
+    if exhausted:
+        assert calls == []
+        assert result.payload["models"] == []
+        assert result.payload["errors"] == [{
+            "provider": "openrouter", "kind": "deployment_unavailable",
+            "detail": "credential_pool_exhausted",
+        }]
+    else:
+        assert calls == ["synthetic-healthy"]
+        assert [m["id"] for m in result.payload["models"]] == ["healthy-model"]
+        assert result.payload["errors"] == []

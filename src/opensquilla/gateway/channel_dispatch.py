@@ -2217,7 +2217,7 @@ async def _run_turn_with_streaming(
     )
     from opensquilla.sandbox.policy_store import pin_sandbox_policy
 
-    pin_sandbox_policy(tool_ctx, config)
+    await asyncio.to_thread(pin_sandbox_policy, tool_ctx, config)
     from opensquilla.gateway.session_model_routing import (
         capture_accepted_model_routing_config,
     )

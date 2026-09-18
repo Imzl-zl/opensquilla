@@ -34,6 +34,117 @@ _TRANSCRIPT_SESSION_KEY = "agent:main:webchat:transcript-reader"
 _TRANSCRIPT_SESSION_ID = "session-transcript-reader"
 
 
+@pytest.mark.asyncio
+async def test_startup_waits_for_writer_before_restoring_interactive_timeout(
+    tmp_path, monkeypatch,
+) -> None:
+    path = tmp_path / "sessions.db"
+    initial = await SessionStorage.open(str(path))
+    await initial.close()
+    storage = SessionStorage(str(path))
+    writer_started = threading.Event()
+    startup_write = threading.Event()
+    release_writer = threading.Event()
+    initialize_schema = storage._initialize_schema
+
+    def observe_write(statement: str) -> None:
+        if "INSERT OR IGNORE INTO usage_billing_receipt_state" in statement:
+            startup_write.set()
+
+    async def observe_initialization(*, goal_pause_reason: str) -> None:
+        await storage.conn.set_trace_callback(observe_write)
+        try:
+            await initialize_schema(goal_pause_reason=goal_pause_reason)
+        finally:
+            await storage.conn.set_trace_callback(None)
+
+    def hold_writer() -> None:
+        writer = sqlite3.connect(path, isolation_level=None)
+        try:
+            writer.execute("BEGIN IMMEDIATE")
+            writer_started.set()
+            assert startup_write.wait(30), "startup did not reach its singleton write"
+            # Hold a real SQLite writer beyond the interactive 100 ms handler.
+            # Release on this thread so event-loop scheduling cannot extend it.
+            release_writer.wait(0.25)
+        finally:
+            writer.rollback()
+            writer.close()
+
+    monkeypatch.setattr(storage, "_initialize_schema", observe_initialization)
+    writer_task = asyncio.create_task(asyncio.to_thread(hold_writer))
+    try:
+        assert await asyncio.to_thread(writer_started.wait, 30)
+        await storage.connect()
+        assert startup_write.is_set()
+        for connection in (storage.conn, storage._transcript_reader):
+            assert connection is not None
+            async with connection.execute("PRAGMA busy_timeout") as cursor:
+                row = await cursor.fetchone()
+            assert row[0] == 100
+        async with storage.conn.execute(
+            "SELECT count(*) FROM usage_billing_receipt_state"
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 1
+    finally:
+        release_writer.set()
+        startup_write.set()
+        await writer_task
+        await storage.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["native", "sqlite3"])
+@pytest.mark.parametrize("cancelled", [False, True], ids=["failure", "cancellation"])
+async def test_failed_startup_closes_its_connection(
+    tmp_path, monkeypatch, cancelled, backend,
+) -> None:
+    # Select each real backend directly: the compatibility wrapper may legitimately
+    # fall back after a native connection timeout, making this coverage load-dependent.
+    if backend == "native":
+        native = storage_module.aiosqlite._native_aiosqlite
+        assert native is not None
+        connect = native.connect
+        connection_type = native.Connection
+        closed_error = ValueError
+        closed_message = "^no active connection$"
+    else:
+        connect = storage_module.aiosqlite._connect_sqlite3
+        connection_type = storage_module.aiosqlite._AsyncConnection
+        closed_error = sqlite3.ProgrammingError
+        closed_message = r"^Cannot operate on a closed database\.$"
+    monkeypatch.setattr(storage_module.aiosqlite, "connect", connect)
+
+    storage = SessionStorage(str(tmp_path / "sessions.db"))
+    connections = []
+    failure = (
+        asyncio.CancelledError("synthetic initialization cancellation")
+        if cancelled else RuntimeError("synthetic initialization failure")
+    )
+
+    async def reject_initialization(*, goal_pause_reason: str) -> None:
+        assert isinstance(storage.conn, connection_type)
+        connections.append(storage.conn)
+        raise failure
+
+    monkeypatch.setattr(storage, "_initialize_schema", reject_initialization)
+    try:
+        with pytest.raises(type(failure)) as caught:
+            await storage.connect()
+        assert caught.value is failure
+        assert len(connections) == 1
+        assert storage._conn is None
+        assert storage._transcript_reader is None
+        assert storage._meta_launch_draft_gc_task is None
+        with pytest.raises(closed_error, match=closed_message):
+            await connections[0].execute("SELECT 1")
+    finally:
+        await storage.close()
+        for connection in connections:
+            await connection.close()
+
+
 def _agent_task(task_id: str) -> AgentTaskRecord:
     return AgentTaskRecord(
         task_id=task_id,
@@ -260,10 +371,11 @@ async def test_concurrent_task_creates_do_not_share_a_transaction(tmp_path) -> N
 
 
 @pytest.mark.asyncio
-async def test_read_waits_instead_of_observing_an_uncommitted_task(tmp_path) -> None:
-    """Reads on the shared connection must not expose another operation's phantom."""
+@pytest.mark.parametrize("memory", [False, True])
+async def test_read_never_observes_an_uncommitted_task(tmp_path, memory) -> None:
+    """WAL reads see committed data; shared-connection fallbacks wait for commit."""
 
-    storage = await SessionStorage.open(str(tmp_path / "sessions.db"))
+    storage = await SessionStorage.open(":memory:" if memory else str(tmp_path / "sessions.db"))
     gate = _CommitGateConnection(storage.conn, commit_count=1)
     storage._conn = gate
     writer = asyncio.create_task(storage.create_agent_task(_agent_task("pending-task")))
@@ -272,15 +384,17 @@ async def test_read_waits_instead_of_observing_an_uncommitted_task(tmp_path) -> 
         await gate.wait_until_commit(0)
         reader = asyncio.create_task(storage.get_agent_task("pending-task"))
 
-        # A transaction-level operation gate keeps the read pending until the
-        # write is committed.  Without it, the same connection sees its own
-        # uncommitted INSERT and returns a phantom row.
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(reader), timeout=0.1)
+        if memory:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(reader), timeout=0.1)
+        else:
+            assert await asyncio.wait_for(reader, timeout=0.1) is None
 
         gate.release_commit(0)
         await writer
-        assert (await reader) is not None
+        if memory:
+            assert (await reader) is not None
+        assert await storage.get_agent_task("pending-task") is not None
     finally:
         gate.release_all()
         pending: list[asyncio.Task[Any]] = [writer]
@@ -328,9 +442,9 @@ async def test_operation_gate_wait_is_bounded_by_the_write_busy_budget(tmp_path)
 
 @pytest.mark.asyncio
 async def test_read_operation_gate_wait_is_bounded_by_the_busy_budget(tmp_path) -> None:
-    """An explicitly interactive read returns busy instead of waiting forever."""
+    """An interactive shared-connection fallback still has a bounded gate wait."""
 
-    storage = await SessionStorage.open(str(tmp_path / "sessions.db"))
+    storage = await SessionStorage.open(":memory:")
     storage._busy_budget_seconds = 0.05
     await storage._operation_lock.acquire()
     with bounded_interactive_storage_reads():
@@ -359,9 +473,9 @@ async def test_read_operation_gate_wait_is_bounded_by_the_busy_budget(tmp_path) 
 async def test_internal_read_operation_gate_keeps_waiting_without_interactive_scope(
     tmp_path,
 ) -> None:
-    """Internal and CLI reads retain the pre-existing wait-for-writer contract."""
+    """Internal shared-connection fallbacks retain the wait-for-writer contract."""
 
-    storage = await SessionStorage.open(str(tmp_path / "sessions.db"))
+    storage = await SessionStorage.open(":memory:")
     storage._busy_budget_seconds = 0.01
     await storage._operation_lock.acquire()
     read = asyncio.create_task(storage.get_session("agent:main:webchat:internal-read"))

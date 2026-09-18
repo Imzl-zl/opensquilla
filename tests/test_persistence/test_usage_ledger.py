@@ -432,9 +432,12 @@ async def test_completed_range_query_uses_time_ordered_index_without_temp_sort(
         assert "USE TEMP B-TREE" not in details
 
         traced: list[str] = []
-        await storage.conn.set_trace_callback(traced.append)
-        await storage.query_usage_events(0, 1000, statuses=("finalized", "unknown"))
-        await storage.conn.set_trace_callback(None)
+        reader = storage._transcript_reader or storage.conn
+        await reader.set_trace_callback(traced.append)
+        try:
+            await storage.query_usage_events(0, 1000, statuses=("finalized", "unknown"))
+        finally:
+            await reader.set_trace_callback(None)
         select_sql = next(statement for statement in traced if "FROM usage_events" in statement)
         assert "INDEXED BY idx_usage_events_completed" in select_sql
     finally:

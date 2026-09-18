@@ -69,6 +69,7 @@ function metadataFields(hydrationComplete = true) {
     pendingUserInputs: [{ request_id: 'input-1' }],
     collaboration: { mode_name: 'delegate' },
     routing: { mode: 'recommended' },
+    planPresentations: [{ revisionId: 'plan-1', dismissed: true, stateRevision: 2 }],
     currentPlan: { plan_id: 'plan-1' },
     activePlanRun: { run_id: 'run-1' },
     goal: { goal_id: 'goal-1' },
@@ -271,6 +272,33 @@ async function flushAsyncWork() {
 }
 
 describe('v4 SessionReadPort Adapter', () => {
+  it('recovers admission on the same lease after ready times out without a socket generation change', async () => {
+    const harness = makeHarness()
+    harness.rpc.ready.mockRejectedValueOnce(new RpcTimeoutError('ready', 15_000))
+    const lease = createV4SessionReadPort(harness.rpc).open(openRequest())
+    // All initial consumers see the bounded failure, rather than hiding it.
+    await Promise.all([
+      expect(lease.live).rejects.toMatchObject({ kind: 'timeout' }),
+      expect(lease.metadata).rejects.toMatchObject({ kind: 'timeout' }),
+      expect(lease.criticalRequestsQueued).rejects.toMatchObject({ kind: 'timeout' }),
+    ])
+    expect(harness.calls).toHaveLength(0)
+
+    harness.results.set(SESSIONS_MESSAGES_SNAPSHOT_METHOD, snapshotResult({ task_id: null, events: [] }))
+    harness.results.set(SESSIONS_MESSAGES_HYDRATE_METHOD, hydrateResult({
+      run_status: 'idle', active_task: null,
+      last_task: { task_id: 'task-1', status: 'succeeded' },
+    }))
+    const [first, second] = await Promise.all([lease.reconcile(), lease.reconcile()])
+    expect(first).toBe(second)
+    expect(first.initialMetadata.runStatus).toBe('idle')
+    expect(harness.rpc.ready).toHaveBeenCalledTimes(2)
+    expect(harness.calls.filter(call => call.method === SESSIONS_MESSAGES_SUBSCRIBE_METHOD)).toHaveLength(1)
+    await expect(lease.readHistory({ direction: 'latest', limit: 100,
+      signal: new AbortController().signal })).resolves.toMatchObject({ loadedCount: 1 })
+    await lease.close()
+  })
+
   it('refreshes a live subscription in place and coalesces concurrent reconciliation', async () => {
     const harness = makeHarness()
     const lease = createV4SessionReadPort(harness.rpc).open(openRequest())
@@ -304,6 +332,7 @@ describe('v4 SessionReadPort Adapter', () => {
     const events = createConversationEventsTestHarness()
     const interruptState = ref<ReadonlyMap<string, InterruptViewState>>(new Map())
     const approvals = scope.run(() => useChatApprovals({
+      gatewayAvailability: ref('available'),
       approvalCenter: {
         snapshot: vi.fn(async () => ({ pending: [], mode: 'prompt' as const })),
         subscribe: vi.fn(() => ({ close: vi.fn() })),
@@ -656,6 +685,7 @@ describe('v4 SessionReadPort Adapter', () => {
       runModeLock: { locked: true, runMode: 'safe', source: 'profile' },
       pendingUserInputs: [{ request_id: 'input-1' }],
       collaboration: { mode_name: 'delegate' },
+      planPresentations: [{ revisionId: 'plan-1', dismissed: true, stateRevision: 2 }],
       currentPlan: { plan_id: 'plan-1' },
       activePlanRun: { run_id: 'run-1' },
       goal: { goal_id: 'goal-1' },

@@ -1104,7 +1104,7 @@ async def _accept_turn_in_scope(
 
     task_runtime = task_runtime_candidate
     requested_mode = command.queue_mode or getattr(session, "queue_mode", None) or "followup"
-    if requested_mode == "steer":
+    if requested_mode == "steer" and not command.selected_skills:
         log.info(
             "sessions.send.legacy_steer_queue_mode_used",
             session_key=key,
@@ -1113,7 +1113,10 @@ async def _accept_turn_in_scope(
             replacement="sessions.steer.v2",
         )
         ports.steer_metric("legacy_interrupt_requested", session_key=key)
-    runtime_mode = "interrupt" if requested_mode == "steer" else requested_mode
+    runtime_mode = (
+        "followup" if command.selected_skills
+        else "interrupt" if requested_mode == "steer" else requested_mode
+    )
     if durable_meta_control is not None:
         # A control must begin a fresh pipeline turn and must not interrupt
         # another accepted control. Collect could lose the pipeline marker;
@@ -1172,7 +1175,10 @@ async def _accept_turn_in_scope(
 
     if prepared_acceptance:
         persist_content = message_text
-        if raw_attachments or display_text is not None or page_context is not None:
+        if (
+            raw_attachments or display_text is not None
+            or page_context is not None or command.selected_skills
+        ):
             if raw_attachments and hasattr(ports.sessions, "stamp_user_text"):
                 stamped = session_manager.stamp_user_text(message_text)
                 if isinstance(stamped, str):
@@ -1186,6 +1192,8 @@ async def _accept_turn_in_scope(
                 persist_enabled=persist_enabled,
                 disk_budget_bytes=disk_budget if isinstance(disk_budget, int) else None,
                 page_context=page_context,
+                **({"selected_skills": list(command.selected_skills)}
+                   if command.selected_skills else {}),
             )
 
         assert callable(prepare_message)
@@ -1200,6 +1208,7 @@ async def _accept_turn_in_scope(
             not raw_attachments
             and display_text is None
             and page_context is None
+            and not command.selected_skills
             and isinstance(persisted_entry.content, str)
         ):
             message_text = persisted_entry.content
@@ -1993,7 +2002,10 @@ async def _accept_turn_in_scope(
         )
         if callable(get_transcript):
             fresh_user_session = not bool(await get_transcript(key))
-        if raw_attachments or display_text is not None or page_context is not None:
+        if (
+            raw_attachments or display_text is not None
+            or page_context is not None or command.selected_skills
+        ):
             # Stamp up-front so both the stored envelope and the LLM path agree.
             if raw_attachments and hasattr(ports.sessions, "stamp_user_text"):
                 _stamped = session_manager.stamp_user_text(message_text)
@@ -2009,6 +2021,8 @@ async def _accept_turn_in_scope(
                 persist_enabled=persist_enabled,
                 disk_budget_bytes=disk_budget if isinstance(disk_budget, int) else None,
                 page_context=page_context,
+                **({"selected_skills": list(command.selected_skills)}
+                   if command.selected_skills else {}),
             )
             legacy_persisted_entry = await session_manager.append_message(
                 key,
@@ -2128,7 +2142,10 @@ async def _accept_turn_in_scope(
 
     if task_runtime is not None:
         requested_mode = command.queue_mode or getattr(session, "queue_mode", None) or "followup"
-        runtime_mode = "interrupt" if requested_mode == "steer" else requested_mode
+        runtime_mode = (
+            "followup" if command.selected_skills
+            else "interrupt" if requested_mode == "steer" else requested_mode
+        )
         try:
             handle = await ports.start_turn(
                 task_runtime,

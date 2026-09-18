@@ -89,6 +89,9 @@
           :fork-busy="forkBusy"
           :plan-action-pending="planActionPending"
           :plan-actions-disabled="planActionsDisabled"
+          :plan-presentations="planPresentations"
+          :plan-presentation-available="planPresentationAvailable && !shareMode"
+          :plan-presentation-pending="planPresentationPending"
           :show-turn-outcome="isTurnTip(entry.index)"
           :goal-outcome="goalOutcomeFor(messages[entry.index], entry.index)"
           :goal-elapsed="goalElapsed"
@@ -112,6 +115,7 @@
           @plan-implement-current="$emit('planImplementCurrent', $event)"
           @plan-implement-new="$emit('planImplementNew', $event)"
           @plan-replan="$emit('planReplan', $event)"
+          @plan-presentation-change="$emit('planPresentationChange', $event)"
           @goal-clear="$emit('goalClear', $event)"
         />
         <SystemMessage
@@ -123,6 +127,11 @@
           :has-partial-answer="Boolean(messages[entry.index].turnId && visibleAnswerTurns.has(messages[entry.index].turnId!))"
           @resume="$emit('resumeSandbox')"
           @retry="forwardSystemRetry"
+        />
+        <SkillLoadStatus
+          v-if="messages[entry.index].displayRole !== 'assistant'"
+          standalone
+          :receipts="messages[entry.index]?.skillLoads || []"
         />
       </div>
     </template>
@@ -137,6 +146,7 @@
 </template>
 
 <script setup lang="ts">
+import SkillLoadStatus from './SkillLoadStatus.vue'
 import {
   computed,
   nextTick,
@@ -162,7 +172,7 @@ import {
   goalHasSettledTerminalOutcome,
   type GoalSnapshot,
 } from '@/composables/chat/useChatGoals'
-import type { PlanCardAction, PlanCardActionTarget } from '@/types/plans'
+import type { PlanCardAction, PlanCardActionTarget, PlanPresentationSnapshot, PlanPresentationRequest } from '@/types/plans'
 import type { PromptAnnotationSnapshot } from '@/types/promptAnnotations'
 import type { WorkbenchResource } from '@/types/workbenchResources'
 import { chatMessageKey } from '@/utils/chat/messageIdentity'
@@ -205,6 +215,9 @@ const props = defineProps<{
   forkBusy?: boolean
   planActionPending?: PlanCardAction | null
   planActionsDisabled?: boolean
+  planPresentations?: Record<string, PlanPresentationSnapshot>
+  planPresentationAvailable?: boolean
+  planPresentationPending?: string | null
   isStreaming?: boolean
   goal?: GoalSnapshot | null
   goalElapsed?: string
@@ -250,6 +263,7 @@ const emit = defineEmits<{
   planImplementCurrent: [target: PlanCardActionTarget]
   planImplementNew: [target: PlanCardActionTarget]
   planReplan: [target: PlanCardActionTarget]
+  planPresentationChange: [request: PlanPresentationRequest]
   goalClear: [goal: GoalSnapshot]
 }>()
 

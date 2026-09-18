@@ -24,6 +24,68 @@ MERGE_CRITICAL_INPUTS = json.loads(TRUST_POLICY_PATH.read_text(encoding="utf-8")
 ]
 
 
+def test_native_acceptance_tracks_dependency_and_probe_changes_without_running_for_docs(
+    tmp_path: Path, suite_config: dict[str, Any],
+) -> None:
+    paths = (
+        "pyproject.toml", "uv.lock", "desktop/electron/package.json",
+        "desktop/electron/package-lock.json", "opensquilla-webui/package.json",
+        "opensquilla-webui/package-lock.json",
+        "desktop/electron/scripts/nsis/include.nsh",
+        "desktop/electron/scripts/test-nsis-upgrade.mjs",
+        "desktop/electron/scripts/test-packaged-first-send-renderer.mjs",
+        "desktop/electron/scripts/packaged-first-send-cleanup.mjs",
+        "desktop/electron/scripts/packaged-smoke-helpers.mjs",
+        "desktop/electron/scripts/test-packaged-retained-interaction.mjs",
+        "desktop/electron/scripts/fixtures/packaged-retained-interaction/provider.mjs",
+        "desktop/electron/scripts/e2e-shutdown-helpers.mjs",
+        "desktop/electron/scripts/build-gateway.mjs",
+        "desktop/electron/scripts/gateway-integrity.mjs",
+        "scripts/release_dependency_inventory.py", "scripts/build_wheelhouse_zip.py",
+        ".github/scripts/verify-nsis-upgrade-regression.py",
+        ".github/scripts/verify-release-profile-preservation.py",
+        ".github/scripts/upgrade_baseline.py",
+        "tests/fixtures/upgrade-v054/manifest.json",
+        "tests/fixtures/upgrade-v054/sessions.sql",
+        ".github/workflows/windows-nsis-upgrade-regression.yml",
+    )
+    for path in paths:
+        plan = _plan(tmp_path, suite_config, path)
+        assert "windows-nsis-regression" in plan["required_suites"], path
+    docs = _plan(tmp_path, suite_config, "docs/providers.md")
+    assert "windows-nsis-regression" not in docs["required_suites"]
+
+
+def test_native_acceptance_evidence_covers_the_actual_complete_reusable_matrix(
+    tmp_path: Path, suite_config: dict[str, Any],
+) -> None:
+    import itertools
+
+    import yaml
+
+    jobs = yaml.safe_load(Path(".github/workflows/windows-nsis-upgrade-regression.yml").read_text(
+        encoding="utf-8",
+    ))["jobs"]
+    matrix = jobs["upgrade-and-start"]["strategy"]["matrix"]
+    cases = {
+        f"{baseline}-{install_path}-{scenario}"
+        for baseline, install_path, scenario in itertools.product(
+            matrix["baseline"], matrix["install-path"], matrix["scenario"],
+        )
+    } | {f"{item['baseline']}-{item['install-path']}-{item['scenario']}"
+         for item in matrix["include"]}
+    assert len(cases) == 14
+    assert {"fresh-default-fresh", "fresh-custom-fresh"} <= cases
+    expected = {(jobs["build"]["runs-on"], "build")}
+    expected.update((jobs["wheelhouse-security"]["runs-on"], f"wheelhouse-{profile}")
+                    for profile in jobs["wheelhouse-security"]["strategy"]["matrix"]["profile"])
+    expected.update((jobs["upgrade-and-start"]["runs-on"], case) for case in cases)
+    assert len(expected) == 17
+    for path in ("uv.lock", ".ci/run-all"):
+        plan = _plan(tmp_path, suite_config, path)
+        assert _platform_cells(plan, "windows-nsis-regression") == expected
+
+
 @pytest.fixture
 def suite_config() -> dict[str, Any]:
     return load_config(CONFIG_PATH, repo=Path.cwd())
@@ -61,6 +123,16 @@ def _platform_cells(plan: dict[str, Any], suite: str) -> set[tuple[str, str]]:
         for cell in plan["platform_matrix"]
         if cell["suite"] == suite
     }
+
+
+def _windows_partitions_for(*paths: str) -> list[str]:
+    snapshot = json.loads(
+        Path(".github/scripts/windows_test_partitions.json").read_text(encoding="utf-8")
+    )
+    ownership = {
+        path: shard for shard, files in snapshot["partitions"].items() for path in files
+    }
+    return sorted({ownership[path] for path in paths})
 
 
 def test_docs_only_plan_is_small_and_canonical(
@@ -161,11 +233,7 @@ def test_pr_1347_test_only_change_uses_exact_targets_and_windows_shards(
     assert plan["python_targets"] == sorted([*paths, importing_consumer])
     assert plan["python_matrix"] == {
         "ubuntu": [],
-        "windows": [
-            "desktop-installer-contracts",
-            "gateway-sqlite",
-            "recovery-migration",
-        ],
+        "windows": _windows_partitions_for(*paths, importing_consumer),
     }
     assert plan["desktop_matrix"] == []
     assert set(plan["required_suites"]) == {
@@ -193,8 +261,69 @@ def test_deleted_governed_test_uses_existing_parent_and_keeps_windows_shard(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == ["tests/test_gateway"]
-    assert plan["python_matrix"]["windows"] == ["gateway-sqlite"]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(path)
     assert "deleted_test_targeted" in plan["reason_codes"]
+
+
+def test_test_only_change_selects_one_physical_windows_partition(
+    tmp_path: Path, suite_config: dict[str, Any]
+) -> None:
+    path = "tests/functional/test_gateway_attachment_history_e2e.py"
+    _write_test_module(tmp_path, path)
+
+    plan = plan_changes([path], repo=tmp_path, config=suite_config)
+
+    assert plan["full_fallback"] is False
+    assert plan["python_targets"] == [path]
+    expected = _windows_partitions_for(path)
+    assert len(expected) == 1
+    assert plan["python_matrix"] == {"ubuntu": [], "windows": expected}
+    assert _platform_cells(plan, "windows-high-risk") == {
+        ("windows-latest", expected[0])
+    }
+
+
+def test_windows_family_request_expands_only_its_two_physical_cells(
+    suite_config: dict[str, Any]
+) -> None:
+    python, platforms = MODULE["_execution_matrices"](
+        ["windows-high-risk"], set(), {"gateway-sqlite"}, False, suite_config
+    )
+
+    assert python == {
+        "ubuntu": [], "windows": ["gateway-sqlite-1", "gateway-sqlite-2"]
+    }
+    assert platforms == [
+        {"suite": "windows-high-risk", "os": "windows-latest", "shard": shard}
+        for shard in ("gateway-sqlite-1", "gateway-sqlite-2")
+    ]
+
+
+@pytest.mark.parametrize("invalid", ["missing-cell", "duplicate-file", "wrong-family"])
+def test_windows_partition_contract_rejects_incomplete_or_ambiguous_ownership(
+    tmp_path: Path, suite_config: dict[str, Any], invalid: str
+) -> None:
+    path = "tests/test_gateway/test_rpc_sessions.py"
+    partitions = {
+        shard: [] for shard in suite_config["full_python_matrix"]["windows"]
+    }
+    partitions["gateway-sqlite-1"] = [path]
+    if invalid == "missing-cell":
+        del partitions["core-2"]
+    elif invalid == "duplicate-file":
+        partitions["gateway-sqlite-2"] = [path]
+    else:
+        partitions["gateway-sqlite-1"] = []
+        partitions["core-1"] = [path]
+    snapshot = tmp_path / "partitions.json"
+    snapshot.write_text(json.dumps({"schema_version": 1, "partitions": partitions}))
+
+    with pytest.raises(PlanError):
+        MODULE["_load_windows_test_partitions"](
+            snapshot,
+            assignments={path: "gateway-sqlite"},
+            allowed_shards=set(suite_config["full_python_matrix"]["windows"]),
+        )
 
 
 def test_governed_test_rename_targets_old_parent_and_new_exact_file(
@@ -210,7 +339,7 @@ def test_governed_test_rename_targets_old_parent_and_new_exact_file(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == ["tests/test_gateway", new_path]
-    assert plan["python_matrix"]["windows"] == ["gateway-sqlite"]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(old_path, new_path)
     assert "deleted_test_targeted" in plan["reason_codes"]
 
 
@@ -230,7 +359,7 @@ def test_cross_shard_test_helper_adds_importing_consumer_and_shard(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == [helper, consumer]
-    assert plan["python_matrix"]["windows"] == ["core", "recovery-migration"]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(helper, consumer)
     assert "test_dependency_closure" in plan["reason_codes"]
 
 
@@ -262,7 +391,7 @@ def test_dynamic_import_alias_adds_cross_shard_consumer(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == [helper, consumer]
-    assert plan["python_matrix"]["windows"] == ["core", "recovery-migration"]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(helper, consumer)
     assert "test_dependency_closure" in plan["reason_codes"]
 
 
@@ -282,7 +411,7 @@ def test_pytest_plugins_adds_cross_shard_consumer(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == [helper, consumer]
-    assert plan["python_matrix"]["windows"] == ["core", "recovery-migration"]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(helper, consumer)
 
 
 @pytest.mark.parametrize(
@@ -337,11 +466,7 @@ def test_test_helper_dependency_closure_is_recursive_and_cycle_safe(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == sorted([core, recovery, desktop])
-    assert plan["python_matrix"]["windows"] == [
-        "core",
-        "desktop-installer-contracts",
-        "recovery-migration",
-    ]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(core, desktop, recovery)
     assert "test_dependency_closure" in plan["reason_codes"]
 
 
@@ -394,7 +519,7 @@ def test_deleted_test_helper_keeps_cross_directory_consumer(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == ["tests/test_skills", consumer]
-    assert plan["python_matrix"]["windows"] == ["core", "recovery-migration"]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(helper, consumer)
     assert "deleted_test_targeted" in plan["reason_codes"]
     assert "test_dependency_closure" in plan["reason_codes"]
 
@@ -436,7 +561,9 @@ def test_deleted_governed_test_at_ref_uses_parent_tree(
 
     assert plan["full_fallback"] is False
     assert plan["python_targets"] == ["tests/test_gateway"]
-    assert plan["python_matrix"]["windows"] == ["gateway-sqlite"]
+    assert plan["python_matrix"]["windows"] == _windows_partitions_for(
+        "tests/test_gateway/test_rpc_sessions.py"
+    )
     assert "deleted_test_targeted" in plan["reason_codes"]
 
 
@@ -713,6 +840,57 @@ def test_macos_recovery_test_routing_is_covered_by_suite_digest(
     assert set(suite_config["macos_recovery_test_inputs"]) <= set(
         suite_config["suites"]["macos-recovery"]["execution_inputs"]
     )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/opensquilla/tools/builtin/shell.py",
+        "tests/test_tools/test_shell_native_argv.py",
+    ],
+)
+def test_native_shell_changes_require_all_three_platforms(
+    tmp_path: Path, suite_config: dict[str, Any], path: str,
+) -> None:
+    plan = _plan(tmp_path, suite_config, path)
+
+    assert plan["full_fallback"] is False
+    assert {"python-targeted", "windows-high-risk", "macos-recovery"} <= set(
+        plan["required_suites"]
+    )
+    expected_windows = (
+        ["core-1"] if path.startswith("tests/")
+        else suite_config["full_python_matrix"]["windows"]
+    )
+    assert plan["python_matrix"]["windows"] == expected_windows
+    assert _platform_cells(plan, "macos-recovery") == {
+        ("macos-latest", "recovery")
+    }
+    assert any(
+        "tests/test_tools/test_shell_native_argv.py" == target
+        or "tests/test_tools" == target
+        for target in plan["python_targets"]
+    )
+
+
+def test_native_shell_contracts_execute_in_required_macos_job() -> None:
+    import yaml
+
+    jobs = yaml.safe_load(Path(".github/workflows/ci.yml").read_text(encoding="utf-8"))[
+        "jobs"
+    ]
+    macos = jobs["macos-recovery"]
+    assert macos["runs-on"] == "macos-latest"
+    assert "'macos-recovery'" in macos["if"]
+    assert "macos-recovery" in jobs["ci-result"]["needs"]
+    native_step = next(
+        step for step in macos["steps"]
+        if "tests/test_tools/test_shell_native_argv.py" in step.get("run", "")
+    )
+    assert "uv run pytest" in native_step["run"]
+    assert "exit \"${status}\"" in native_step["run"]
+    assert not native_step.get("continue-on-error", False)
+    assert not native_step.get("if")
 
 
 def test_macos_recovery_test_routing_without_digest_coverage_is_rejected(
@@ -1145,6 +1323,12 @@ def test_windows_shard_metadata_does_not_invalidate_unrelated_suites(
     assert assignments["full_fallback"] is True
     assert assignments["required_suites"] == sorted(suite_config["full_suites"])
     assert assignments["reason_codes"] == ["ci_policy_changed"]
+    partitions = _plan(
+        tmp_path, suite_config, ".github/scripts/windows_test_partitions.json"
+    )
+    assert partitions["full_fallback"] is True
+    assert partitions["required_suites"] == sorted(suite_config["full_suites"])
+    assert partitions["reason_codes"] == ["ci_policy_changed"]
 
 
 @pytest.mark.parametrize(
@@ -1211,6 +1395,7 @@ def test_python_dependency_changes_select_reviewed_full_ecosystem_coverage(
         "webui-chat-recovery",
         "wheel-webui-roundtrip",
         "windows-high-risk",
+        "windows-nsis-regression",
         "workflow-lint",
     }
     assert plan["desktop_matrix"] == sorted(
@@ -1236,6 +1421,7 @@ def test_python_dependency_changes_select_reviewed_full_ecosystem_coverage(
         ("ubuntu-latest", "validation"),
         ("ubuntu-latest", "contract-verification"),
         ("windows-latest", "contract-determinism"),
+        ("ubuntu-latest", "contract-compare"),
     }
 
 
@@ -1259,6 +1445,7 @@ def test_webui_dependency_changes_stay_in_webui_ecosystem(
         "readme-locale",
         "webui-chat-recovery",
         "wheel-webui-roundtrip",
+        "windows-nsis-regression",
         "workflow-lint",
     }
     assert plan["desktop_matrix"] == []
@@ -1286,6 +1473,7 @@ def test_electron_dependency_changes_select_full_desktop_matrix_only(
         "frontend-artifact",
         "readme-locale",
         "release-packaging",
+        "windows-nsis-regression",
         "workflow-lint",
     }
     assert plan["desktop_matrix"] == sorted(

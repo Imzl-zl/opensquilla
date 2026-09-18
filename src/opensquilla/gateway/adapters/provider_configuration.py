@@ -178,6 +178,7 @@ class GatewayModelCatalogPort:
         # Settings and chat share the same selectable-discovery policy. Only
         # durable deployments are resolved here; draft credentials never enter
         # the chat catalog, and named auth profiles need a separate identity.
+        from opensquilla.engine.selector_override import peek_profile_credential
         from opensquilla.onboarding.probe import (
             TRANSIENT_MODEL_DISCOVERY_FAILURES,
             ProviderModelsDiscoverResult,
@@ -209,7 +210,11 @@ class GatewayModelCatalogPort:
             except UnknownProviderError:
                 return None
             resolution = resolve_provider_deployment(
-                self._config, provider, model, inherited_provider_config=inherited,
+                # Listing only needs a connection, not a configured model.
+                # Keep the placeholder out of the fallback rows below.
+                self._config, provider, model or "catalog-discovery",
+                inherited_provider_config=inherited,
+                credential_pool_acquirer=peek_profile_credential,
             )
             if not resolution.ready:
                 return provider, model, resolution, None

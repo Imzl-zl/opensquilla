@@ -1985,10 +1985,98 @@
           "label": "Entprellfenster (s)"
         },
         "transport_name": {
+          "label": "Verbindungsart",
           "choices": {
             "polling": "Polling",
             "webhook": "Webhook"
           }
+        },
+        "access_token": {
+          "label": "Zugriffs-Token"
+        },
+        "agent_id_int": {
+          "label": "Agent-ID (int)"
+        },
+        "app_password": {
+          "label": "App-Passwort"
+        },
+        "app_token": {
+          "label": "Token auf App-Ebene (xapp-...)"
+        },
+        "application_id": {
+          "label": "Anwendungs-ID"
+        },
+        "cool_app_code": {
+          "label": "Cool App Code"
+        },
+        "corp_id": {
+          "label": "Unternehmens-ID"
+        },
+        "default_channel_id": {
+          "label": "Standardkanal-ID"
+        },
+        "device_id": {
+          "label": "Geräte-ID"
+        },
+        "domain": {
+          "label": "Domain"
+        },
+        "drop_pending_updates": {
+          "label": "Ausstehende Updates verwerfen"
+        },
+        "encoding_aes_key": {
+          "label": "Encoding-AES-Schlüssel"
+        },
+        "encrypt_key": {
+          "label": "Verschlüsselungsschlüssel"
+        },
+        "encryption": {
+          "label": "Verschlüsselung"
+        },
+        "gateway_url": {
+          "label": "Gateway-URL"
+        },
+        "intents": {
+          "label": "Intents-Bitmaske"
+        },
+        "password": {
+          "label": "Passwort"
+        },
+        "poll_idle_sleep_s": {
+          "label": "Polling-Leerlaufwartezeit (s)"
+        },
+        "poll_limit": {
+          "label": "Polling-Limit"
+        },
+        "poll_timeout_s": {
+          "label": "Polling-Timeout (s)"
+        },
+        "reply_in_thread": {
+          "label": "Im Thread antworten"
+        },
+        "robot_code": {
+          "label": "Roboter-Code"
+        },
+        "slack_channel_id": {
+          "label": "Standardkanal-ID"
+        },
+        "token": {
+          "label": "Bot-Token (xoxb-...)"
+        },
+        "verification_token": {
+          "label": "Verifizierungs-Token"
+        },
+        "webhook_path": {
+          "label": "Webhook-Pfad"
+        },
+        "webhook_secret_token": {
+          "label": "Webhook-Geheimtoken"
+        },
+        "webhook_url": {
+          "label": "Webhook-URL (nur Webhook)"
+        },
+        "websocket_url": {
+          "label": "WebSocket-URL"
         }
       },
       "groups": {
@@ -2424,6 +2512,13 @@
       "enable": "Aktivieren",
       "disable": "Deaktivieren",
       "notReported": "Nicht gemeldet",
+      "transport": {
+        "polling": "Polling",
+        "webhook": "Webhook",
+        "websocket": "WebSocket",
+        "http_sync": "HTTP-Sync",
+        "mixed": "Mehrere Verbindungsarten"
+      },
       "tabs": {
         "overview": "Übersicht",
         "pairings": "Mitglieder",
@@ -3060,6 +3155,15 @@
       "add": "Hinzufügen"
     },
     "skillDetail": {
+      "allowUse": "Allow use",
+      "allowUseHelp": "Applies to every skill with this name. Dependencies are installed separately.",
+      "enable": "Allow use",
+      "disable": "Disable use",
+      "saving": "Saving…",
+      "enabledSaved": "Skill use allowed.",
+      "disabledSaved": "Skill use disabled.",
+      "refreshPending": "Saved, but live refresh failed. Restart the Gateway before using this skill.",
+      "disabledContent": "Use is disabled. Allow use to read the skill instructions.",
       "dialogLabel": "Skill-Details: {name}",
       "triggers": "Auslöser",
       "composition": "Zusammensetzung ({kind}, {count} Unterfähigkeiten)",
@@ -3457,6 +3561,94 @@
     }
   },
   "chat": {
+    "skillPalette": {
+      "title": "Commands and skills",
+      "command": "Commands",
+      "skill": "Skills",
+      "meta": "Workflows",
+      "empty": "No matching commands or skills",
+      "loading": "Loading skills…",
+      "autoHint": "Scrollen oder Namen suchen · Skills werden automatisch zugeordnet",
+      "upgrade": "Update the Gateway to select skills for a message.",
+      "loadFailed": "Skills could not be loaded. Close and reopen the menu to retry.",
+      "disabled": "Disabled · Manage",
+      "needsSetup": "Needs setup · Manage",
+      "manualOnly": "Manual use only",
+      "thisMessage": "This message",
+      "remove": "Remove {name} from this message",
+      "queuedHint": "This message will run after the current task.",
+      "limit": "Select up to 16 skills per message.",
+      "metaTextOnly": "This workflow accepts text. Keep attachments and selected skills in a separate message.",
+      "commandAtStart": "Use this command at the start of a message.",
+      "usage": "Usage: {tokens} tokens",
+      "usageFailed": "Unable to load usage. Try again.",
+      "workflowTitle": "Start {name}",
+      "workflowRequest": "What would you like this workflow to do?",
+      "loaded": "Loaded",
+      "failed": "Load failed",
+      "loadingSkill": "Loading",
+      "user": "User selected",
+      "auto": "Automatic",
+      "selected": "Selected",
+      "unsupported": "Update the Gateway before sending a message with selected skills.",
+      "continue": "Continue",
+      "commandWithSkills": "Selected skills apply to a chat message. Remove the skill labels before running a command.",
+      "commandDescriptions": {
+        "new": "Neuen Chat starten",
+        "compact": "Aktuellen Kontext kürzen",
+        "goal": "Langfristiges Ziel festlegen",
+        "meta": "Workflow auswählen",
+        "plan": "Aktuelle Aufgabe planen",
+        "reset": "Unterhaltung zurücksetzen",
+        "usage": "Token-Nutzung anzeigen"
+      },
+      "items": {
+        "xlsx": {
+          "name": "Excel spreadsheets",
+          "description": "Create, edit, and analyze spreadsheets"
+        },
+        "docx": {
+          "name": "Word documents",
+          "description": "Create and edit documents"
+        },
+        "pptx": {
+          "name": "PowerPoint slides",
+          "description": "Create and edit presentations"
+        },
+        "pdf": {
+          "name": "PDF tools",
+          "description": "Read, merge, and edit PDFs"
+        },
+        "github": {
+          "name": "GitHub",
+          "description": "Work with issues and pull requests"
+        },
+        "html": {
+          "name": "Web pages",
+          "description": "Build and edit HTML pages"
+        },
+        "webpage": {
+          "name": "Website builder",
+          "description": "Build a complete website"
+        },
+        "kidsProject": {
+          "name": "Kids’ projects",
+          "description": "Plan a creative project for children"
+        },
+        "shortDrama": {
+          "name": "Short drama",
+          "description": "Turn an idea into a video"
+        },
+        "skillCreator": {
+          "name": "Workflow builder",
+          "description": "Combine skills into a workflow"
+        },
+        "paperWriting": {
+          "name": "Academic writing",
+          "description": "Research and draft a paper"
+        }
+      }
+    },
     "sessionCreated": {
       "title": "Chat erstellt",
       "open": "Chat öffnen",
@@ -3892,6 +4084,8 @@
       }
     },
     "plan": {
+      "hidePlan": "Plan ausblenden",
+      "showPlan": "Plan anzeigen",
       "label": "Plan",
       "process": "Planungsprozess",
       "revision": "Revision {id}",
@@ -3944,7 +4138,7 @@
     },
     "planMode": {
       "label": "Planmodus",
-      "readOnly": "Der Agent recherchiert und erstellt einen Plan, ohne Dateien zu ändern.",
+      "readOnly": "Zuerst recherchieren und den Plan besprechen, noch nicht umsetzen. Tests und Builds unterliegen den üblichen Berechtigungen.",
       "nextTurn": "Gilt ab dem nächsten Durchgang",
       "updating": "Wird aktualisiert…",
       "turnOff": "Planmodus ausschalten",
@@ -3990,6 +4184,26 @@
       }
     },
     "goal": {
+      "settings": "Zieleinstellungen",
+      "tokenBudget": "Token-Budget",
+      "noTokenBudget": "Kein Token-Limit",
+      "invalidTokenBudget": "Eine positive ganze Zahl eingeben.",
+      "partialUsageHistory": "Frühere Nutzungsdaten sind unvollständig und werden nicht auf das Token-Budget angerechnet.",
+      "pendingUsageReceipts": "Warten auf Nutzungsbelege. Setze das Ziel fort, sobald die Nutzung vollständig erfasst ist.",
+      "usageReceiptsRecovered": "Die Nutzungsbelege sind vollständig. Setze das Ziel fort, wenn du bereit bist.",
+      "usageAccountingSince": "Das Token-Budget zählt die seit {time} erfasste Nutzung.",
+      "usageAccountingPending": "Die Budgeterfassung beginnt mit der nächsten Modellanfrage.",
+      "usageCoverageUnavailable": "Die Nutzungserfassung ist nicht verfügbar. Ein Token-Budget kann nicht festgelegt werden.",
+      "settingsNotConfirmed": "Diese Verbindung hat die ausgewählten Zieleinstellungen nicht bestätigt. Ihre Änderungen wurden nicht angewendet und bleiben für einen erneuten Versuch erhalten.",
+      "emptyContinuations": "Nach mehreren Runden ohne Ausgabe oder Werkzeugaktivität pausiert. Prüfe das Ziel und setze es fort, wenn du bereit bist.",
+      "removeTokenBudget": "Token-Budget entfernen",
+      "executionPolicy": "Weiter ausführen",
+      "foreground": "Während der Verbindung",
+      "background": "Im Hintergrund",
+      "backgroundHint": "Läuft nach dem Trennen weiter. Ein Serverneustart pausiert das Ziel.",
+      "backgroundActive": "Hintergrund",
+      "tokenBudgetReached": "Token-Budget erreicht",
+      "tokenBudgetUsage": "{used} / {budget} Tokens",
       "placeholder": "Beschreibe das Ziel und sende, um daran zu arbeiten",
       "modeLabel": "Zielmodus",
       "modeDescription": "Ein langfristiges Ziel starten",

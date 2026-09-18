@@ -2014,3 +2014,47 @@ async def test_saved_auth_rejection_revokes_entitlement_lkg(monkeypatch, tmp_pat
     await restored.hydrate(config)
     assert restored.cached(config) == []
     await restored.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_draft_proxy_auth_failure_does_not_hide_saved_catalog(
+    monkeypatch, tmp_path, status,
+):
+    import httpx
+
+    import opensquilla.gateway.model_catalog_refresh as refresh_module
+
+    calls = []
+    _patch_fetches(monkeypatch, calls)
+    config = _config(tmp_path)
+    coordinator = TokenRhythmCatalogCoordinator(ModelCatalog(), clock=FakeClock())
+    monkeypatch.setattr(refresh_module, "_coordinator", coordinator)
+    kwargs = {
+        "provider_id": "tokenrhythm", "api_key": config.llm.api_key,
+        "base_url": config.llm.base_url, "config": config,
+    }
+    try:
+        before = await refresh_module.discover_tokenrhythm_models(
+            **kwargs, persist_entitlement=True,
+        )
+        assert before.ok and before.models
+
+        async def reject_draft(*_args, **options):
+            if options.get("proxy"):
+                request = httpx.Request("GET", "https://tokenrhythm.studio/v1/models")
+                response = httpx.Response(status, request=request)
+                raise httpx.HTTPStatusError("Unauthorized", request=request, response=response)
+            return _declared()
+
+        monkeypatch.setattr(refresh_module, "fetch_tokenrhythm_declared", reject_draft)
+        draft = await refresh_module.discover_tokenrhythm_models(
+            **kwargs, proxy="http://127.0.0.1:9999", force=True,
+        )
+        assert not draft.ok and draft.failure_kind == "auth_invalid"
+        after = await refresh_module.discover_tokenrhythm_models(**kwargs, persist_entitlement=True)
+        assert after.ok
+        assert after.models == before.models
+        assert coordinator.cached(config)
+    finally:
+        await coordinator.close()

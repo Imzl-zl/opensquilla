@@ -1,3 +1,4 @@
+import type { TaskProgressSnapshot } from '@/types/taskProgress'
 import type {
   ChatModelCallSegment,
   ChatRunTask,
@@ -29,6 +30,8 @@ export type ConversationEventIdentity = {
 }
 
 export type ConversationEventData = ConversationEventIdentity & {
+  skillLoad?: import('@/types/skillLoads').SkillLoadReceipt
+  progress?: TaskProgressSnapshot
   modelCapacity?: import('./providerConfiguration').ModelCapacityFailure
   execution_log_handle?: string
   reason?: string

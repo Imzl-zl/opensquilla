@@ -50,7 +50,7 @@ test('moving modal close waits for actionability and receives a real pointer cli
   } finally { await f.close() }
 })
 
-function controlledFrameDriver({ renderFrames = true, covered = false } = {}) {
+function controlledFrameDriver({ renderFrames = true, covered = false, rendererClockOffsetMs = 0 } = {}) {
   let now = 0, frame = 0, nextId = 0, pumping = false
   const tasks = new Map(), inputs = [], deadlines = [], cancelledFrames = []
   const pump = () => {
@@ -99,6 +99,7 @@ function controlledFrameDriver({ renderFrames = true, covered = false } = {}) {
   const button = new Control()
   const renderer = {
     ...clock, Element: Control,
+    Date: { now: () => now + rendererClockOffsetMs },
     document: { getElementById: () => null, querySelectorAll: () => [button], elementFromPoint: () => covered ? null : button },
     getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
     innerWidth: 800, innerHeight: 700,
@@ -145,6 +146,14 @@ test('the action deadline preserves the last confirmed covered-control failure',
   const f = controlledFrameDriver({ covered: true })
   await assert.rejects(f.driver.click('Close'), /SEMANTIC_CONTROL_COVERED/)
   assert.deepEqual(f.inputs, [])
+  assert.equal(f.pending(), 0)
+})
+
+test('an earlier renderer deadline preserves the confirmed covered-control failure', async () => {
+  const f = controlledFrameDriver({ covered: true, rendererClockOffsetMs: 100 })
+  await assert.rejects(f.driver.click('Close'), /SEMANTIC_CONTROL_COVERED/)
+  assert.deepEqual(f.inputs, [])
+  assert.ok(f.elapsed() <= 4000, 'renderer deadline exhaustion must not restart the action budget')
   assert.equal(f.pending(), 0)
 })
 

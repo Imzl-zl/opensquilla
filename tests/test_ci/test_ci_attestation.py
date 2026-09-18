@@ -607,6 +607,8 @@ def test_validate_candidate_rejects_non_green_or_mismatched_runs(tmp_path: Path)
         ("planner-digest", "planner digest"),
         ("execution-digest", "execution digest"),
         ("platform-matrix", "platform matrix"),
+        ("legacy-windows-matrix", "platform matrix"),
+        ("missing-contract-comparison", "platform matrix"),
     ),
 )
 def test_validate_candidate_rejects_independent_evidence_contract_mismatches(
@@ -642,6 +644,28 @@ def test_validate_candidate_rejects_independent_evidence_contract_mismatches(
     elif mismatch == "platform-matrix":
         assert tampered["platform_matrix"]
         tampered["platform_matrix"] = tampered["platform_matrix"][:-1]
+    elif mismatch == "legacy-windows-matrix":
+        cells = [
+            cell for cell in tampered["platform_matrix"]
+            if cell["suite"] != "windows-high-risk"
+        ]
+        cells.extend(
+            {"suite": "windows-high-risk", "os": "windows-latest", "shard": family}
+            for family in (
+                "core", "gateway-sqlite", "recovery-migration", "desktop-installer-contracts"
+            )
+        )
+        tampered["platform_matrix"] = sorted(
+            cells, key=lambda cell: (cell["suite"], cell["os"], cell["shard"])
+        )
+    elif mismatch == "missing-contract-comparison":
+        tampered["platform_matrix"] = [
+            cell for cell in tampered["platform_matrix"]
+            if not (
+                cell["suite"] == "frontend-validation"
+                and cell["shard"] == "contract-compare"
+            )
+        ]
     else:  # pragma: no cover - the parametrization is exhaustive
         raise AssertionError(f"unknown mismatch: {mismatch}")
 
@@ -697,6 +721,45 @@ def test_validate_candidate_rejects_self_reported_incomplete_suite_coverage(
             },
             repo=repo,
         )
+
+
+def test_exact_dependency_evidence_cannot_omit_native_acceptance_or_one_install_case(
+    tmp_path: Path,
+) -> None:
+    changed = "opensquilla-webui/package-lock.json"
+    repo, base_sha, head_sha, merge_sha = _merge_preview_repo(tmp_path, feature_path=changed)
+    event = _event(base_sha, head_sha, merge_sha)
+    evidence = create_attestation(
+        repo=repo, repository="opensquilla/opensquilla", event=event,
+        workflow_run_id=123, workflow_run_attempt=1,
+        workflow_ref="opensquilla/opensquilla/.github/workflows/ci.yml@refs/pull/42/merge",
+        optimization_mode="enforce", **_evidence_metadata(repo, [changed]),
+    )
+    suite = "windows-nsis-regression"
+    assert suite in evidence["successful_suites"]
+    assert len([c for c in evidence["platform_matrix"] if c["suite"] == suite]) == 17
+    arguments = {
+        "run": _run(evidence), "repository": "opensquilla/opensquilla",
+        "queue_tree_sha": str(evidence["tested_tree_sha"]), "queue_base_sha": base_sha,
+        "queue_policy_digest": str(evidence["trust_policy_digest"]),
+        "current_pull_request": {"number": 42, **event["pull_request"]}, "repo": repo,
+    }
+    validate_candidate(attestation=evidence, **arguments)
+    for mutation in ("omitted-suite", "omitted-fresh", "changed-execution"):
+        tampered = json.loads(json.dumps(evidence))
+        if mutation == "omitted-suite":
+            tampered["successful_suites"].remove(suite)
+            del tampered["suite_execution_digests"][suite]
+            tampered["platform_matrix"] = [c for c in tampered["platform_matrix"]
+                                            if c["suite"] != suite]
+        elif mutation == "omitted-fresh":
+            tampered["platform_matrix"] = [c for c in tampered["platform_matrix"]
+                                            if not (c["suite"] == suite
+                                                    and c["shard"] == "fresh-custom-fresh")]
+        else:
+            tampered["suite_execution_digests"][suite] = "f" * 64
+        with pytest.raises(AttestationError):
+            validate_candidate(attestation=tampered, **arguments)
 
 
 def test_validate_candidate_rejects_expired_root_evidence(tmp_path: Path) -> None:
@@ -1086,6 +1149,7 @@ def test_queue_reuses_unchanged_suite_and_requires_remaining_full_matrix(
     assert suite not in plan["required_suites"]
     assert "frontend-artifact" in plan["required_suites"]
     assert "windows-high-risk" in plan["required_suites"]
+    assert "windows-nsis-regression" in plan["required_suites"]
     assert plan["python_matrix"] == full["python_matrix"]
     assert plan["desktop_matrix"] == full["desktop_matrix"]
     assert plan["platform_matrix"] == [c for c in full["platform_matrix"] if c["suite"] != suite]
@@ -1150,6 +1214,13 @@ def test_partial_queue_supplements_only_invalidated_allowlisted_suites(
     plan = json.loads(str(details["partial_plan"]))
     assert plan["reused_suites"] == expected
     assert set(plan["required_suites"]) & set(expected) == set()
+    # Even complete successful native PR evidence must rerun on an advanced tree.
+    assert "windows-nsis-regression" in evidence["successful_suites"]
+    assert "windows-nsis-regression" not in plan["reused_suites"]
+    assert "windows-nsis-regression" in plan["required_suites"]
+    native_cells = [c for c in plan["platform_matrix"]
+                    if c["suite"] == "windows-nsis-regression"]
+    assert len(native_cells) == 17
 
 
 @pytest.mark.parametrize(

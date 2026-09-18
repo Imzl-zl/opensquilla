@@ -9,6 +9,8 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
@@ -322,6 +324,35 @@ async def test_preflight_empty_transcript_is_noop() -> None:
     await runner._maybe_preflight_compact("user:session", 200_000)
 
     mock_sm.compact.assert_not_called()
+
+
+async def test_preflight_measures_history_once_without_blocking_event_loop(monkeypatch):
+    entries = [_make_entry("synthetic history"), _make_entry("synthetic follow-up")]
+    manager = MagicMock()
+    manager.get_transcript = AsyncMock(return_value=entries)
+    runner = TurnRunner(provider_selector=MagicMock(), session_manager=manager)
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    measured = []
+
+    def estimate(entry):
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5)
+        measured.append(entry)
+        return 10
+
+    monkeypatch.setattr(
+        "opensquilla.session.compaction.estimate_entry_model_replay_tokens", estimate,
+    )
+    task = asyncio.create_task(runner._maybe_preflight_compact("user:session", 200_000))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        assert not task.done()
+    finally:
+        release.set()
+        await task
+    assert measured == entries
 
 
 def test_current_turn_suffix_uses_bound_prompt_and_includes_queued_prompts() -> None:

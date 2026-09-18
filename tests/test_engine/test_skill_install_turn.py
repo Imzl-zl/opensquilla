@@ -163,8 +163,12 @@ def test_mixed_quoted_or_ambiguous_requests_do_not_finalize(user_text: str) -> N
 
 
 @pytest.mark.asyncio
-async def test_install_only_blocks_same_batch_verification_and_finishes_once(setup) -> None:
+@pytest.mark.parametrize("plan_run_id", [None, "approved-run"])
+async def test_install_only_blocks_same_batch_verification_and_finishes_once(
+    setup, plan_run_id: str | None,
+) -> None:
     source, loader, ctx, calls, make_agent = setup
+    ctx.plan_run_id = plan_run_id
     provider = ScriptedProvider([[('skill_install_community', {'identifier': 'demo'}),
                                   ('skill_list', {})], [('skill_view', {'name': 'demo'})]])
     agent = make_agent(provider)
@@ -240,7 +244,8 @@ def test_first_schema_surfaces_install_but_preserves_authority(setup, overrides)
     runner = TurnRunner(provider_selector=None, config=GatewayConfig())
     runner._tool_registry = get_default_registry()
     definitions, _ = runner._build_tools(ctx)
-    assert ("skill_install_community" in {item.name for item in definitions}) == (not overrides)
+    expected = not overrides or overrides == {"collaboration_mode": "plan"}
+    assert ("skill_install_community" in {item.name for item in definitions}) == expected
 
 
 def test_install_tool_has_dedicated_execution_budget(setup) -> None:
@@ -286,6 +291,7 @@ def test_final_receipt_never_claims_unusable_skill_is_ready(axis, state, hint) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.ci_serial
 async def test_explicit_turn_deadline_cancels_install_and_preserves_receipt(setup, monkeypatch):
     import asyncio
 
@@ -339,7 +345,19 @@ async def test_explicit_turn_deadline_cancels_install_and_preserves_receipt(setu
                 install_tasks.update(futures)
                 deadline_budgets.append(timeout)
                 assert timeout == pytest.approx(agent.config.timeout)
-                await fetch_started.wait()
+                fetch_waiter = asyncio.create_task(fetch_started.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {*futures, fetch_waiter}, return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if not fetch_started.is_set():
+                        pytest.fail(
+                            "install ended before fetch started: "
+                            f"{[task.result() for task in done]!r}",
+                        )
+                finally:
+                    fetch_waiter.cancel()
+                    await asyncio.gather(fetch_waiter, return_exceptions=True)
                 clock.now += timeout
                 return await asyncio.wait(futures, timeout=0, return_when=return_when)
             # Other waits do not advance this test's controlled deadline.
@@ -356,6 +374,8 @@ async def test_explicit_turn_deadline_cancels_install_and_preserves_receipt(setu
     async def collect_turn():
         return [event async for event in agent.run_turn("install demo")]
 
+    # Real filesystem setup/settlement shares this watchdog with cancellation.
+    # Keep the integration case out of the saturated parallel Windows phase.
     # The watchdog uses the real loop; production cancellation and receipts do too.
     turn = asyncio.create_task(collect_turn())
     try:

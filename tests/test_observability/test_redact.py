@@ -2,11 +2,208 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from copy import deepcopy
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from opensquilla.observability.redact import scrub_text
+import pytest
+
+from opensquilla.observability.redact import scrub_json, scrub_text
 
 FAKE_KEY = "sk-FAKE1234567890abcdef"
+
+
+@pytest.mark.parametrize("key", [
+    "requiresApiKey", "REQUIRESAPIKEY", "requires_api_key", "requires-api-key",
+    "apiKeyConfigured", "APIKEYConfigured", "apiKeyEnv", "ApiKeyEnv", "api_key_env",
+    "hasToken", "isSecret",
+    "tokenCount", "session_key", "monkey", "notasecret",
+    "rEqUiReS_api_key", "hAs_Api_KEY", "iS_Password", "sUpPoRtS_PRIVATE_KEY",
+])
+def test_metadata_assignments_keep_complete_key_boundaries(key: str) -> None:
+    text = f'{key}=true "{key}": false {key}: null'
+    assert scrub_text(text) == text
+    assert scrub_json({key: True}) == {key: True}
+
+
+@pytest.mark.parametrize("key", [
+    "apiKey", "API_KEY", "api-key", "Authorization", "accessToken",
+    "PROVIDER_API_KEY", "providerApiKey", "clientSecret", "client-secret",
+    "AWS_SECRET_ACCESS_KEY", "aws_secret_access_key", "awsSecretAccessKey",
+    "sshPrivateKey", "providerSecretKey", "x-api-key", "providerEncryptKey",
+    "channelEncodingAesKey", "proxy-authorization", "_token", "_api_key",
+    "aPiKeY", "sEcReT", "API_kEy", "aWs_sEcReT_aCcEsS_kEy", "pRiVaTe_KeY",
+])
+def test_complete_secret_assignments_remain_redacted(key: str) -> None:
+    assert scrub_text(f'{key}="synthetic credential"') == f'{key}="[redacted]"'
+    assert scrub_json({key: "synthetic credential"}) == {key: "[redacted]"}
+
+
+@pytest.mark.parametrize("key", [
+    "X-AuthToken", "X-AccessToken", "refreshToken", "idToken", "bearerToken",
+    "apiToken", "appToken", "clientSecret",
+    "X-CSRFToken", "X-SecurityToken", "X-ProviderApiKey", "X-CustomPassword",
+    "X-CustomSecret", "X-CustomPrivateKey", "Vendor.CustomToken", "定制_CustomToken",
+    "X-CustomPrivate_Key", "X-CustomSecret_Access_Key",
+])
+@pytest.mark.parametrize("case", ["original", "lower", "upper", "swapcase"])
+def test_compound_credentials_are_case_insensitive(key: str, case: str) -> None:
+    key = key if case == "original" else getattr(key, case)()
+    assert scrub_json({"headers": [{key: "synthetic-opaque-credential"}]}) == {
+        "headers": [{key: "[redacted]"}],
+    }
+    assert scrub_text(f'{key}: "synthetic-opaque-credential"') == f'{key}: "[redacted]"'
+    assert scrub_text(f'helper --{key}=synthetic-opaque-credential') == (
+        f'helper --{key}=[redacted]'
+    )
+
+
+@pytest.mark.parametrize("separator", "!#$%&'*+^`|~")
+@pytest.mark.parametrize("suffix", ["Password", "Token", "ApiKey"])
+def test_http_header_punctuation_preserves_secret_boundaries(
+    separator: str, suffix: str,
+) -> None:
+    header = f"X{separator}{suffix}"
+    for key in (header, header.lower(), header.upper(), header.swapcase()):
+        assert scrub_json({"headers": {key: "synthetic-header-credential"}}) == {
+            "headers": {key: "[redacted]"},
+        }
+        text = f'{key}: "synthetic-header-credential"'
+        expected = f'{key}: "[redacted]"'
+        assert scrub_text(text) == expected
+        assert scrub_text(expected) == expected
+
+
+@pytest.mark.parametrize("separator", "!#$%&'*+^`|~")
+@pytest.mark.parametrize("suffix", ["requiresApiKey", "hasToken", "apiKeyEnv", "tokenCount"])
+def test_punctuation_namespaced_metadata_stays_readable(separator: str, suffix: str) -> None:
+    field = f"Vendor{separator}{suffix}"
+    for key in (field, field.lower(), field.upper(), field.swapcase()):
+        assert scrub_json({key: True}) == {key: True}
+        assert scrub_text(f"{key}=true") == f"{key}=true"
+
+
+def test_unicode_namespace_with_punctuation_masks_secret_values() -> None:
+    key = "定制+Password"
+    assert scrub_json({key: "synthetic-credential"}) == {key: "[redacted]"}
+    assert scrub_text(f"{key}=synthetic-credential") == f"{key}=[redacted]"
+
+
+@pytest.mark.parametrize("separator", "!#$%&'*+^`|~")
+@pytest.mark.parametrize("suffix", ["CSRFToken", "SecurityToken", "ProviderApiKey"])
+def test_punctuation_keeps_compound_credential_namespace(
+    separator: str, suffix: str,
+) -> None:
+    header = f"X{separator}{suffix}"
+    for key in (header, header.lower(), header.upper(), header.swapcase()):
+        assert scrub_json({"headers": {key: "synthetic-credential"}}) == {
+            "headers": {key: "[redacted]"},
+        }
+        for text, expected in (
+            (f"{key}: synthetic-credential", f"{key}: [redacted]"),
+            (f'"{key}": "synthetic-credential"', f'"{key}": "[redacted]"'),
+            (f"helper --{key}=synthetic-credential", f"helper --{key}=[redacted]"),
+        ):
+            assert scrub_text(text) == expected
+            assert scrub_text(expected) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("'api_key'='synthetic credential'", "'api_key'='[redacted]'"),
+    ("{'X!csrftoken': 'synthetic credential'}", "{'X!csrftoken': '[redacted]'}"),
+    ('"X\'providerapikey": "synthetic credential"', '"X\'providerapikey": "[redacted]"'),
+    ("GET https://example.invalid/?phase=before&corpsecret=synthetic-credential",
+     "GET https://example.invalid/?phase=before&corpsecret=[redacted]"),
+    ("GET https://example.invalid/?phase=before&x!csrftoken=synthetic-credential",
+     "GET https://example.invalid/?phase=before&x!csrftoken=[redacted]"),
+    ("GET https://example.invalid/?requiresApiKey=true&phase=before",
+     "GET https://example.invalid/?requiresApiKey=true&phase=before"),
+])
+def test_punctuation_namespaces_keep_quoting_and_query_boundaries(
+    text: str, expected: str,
+) -> None:
+    assert scrub_text(text) == expected
+    assert scrub_text(expected) == expected
+
+
+@pytest.mark.parametrize("key", [
+    "requiresAuthToken", "requires_auth_token", "requiresaccesstoken", "hasAccessToken",
+    "authTokenCount", "accessTokenEnv", "refreshTokenConfigured", "idTokenRequired",
+    "clientSecretEnv", "notasecret",
+    "X.requiresApiKey", "Vendor.Key.hasToken", "X.securityTokenCount",
+    "X.providerApiKeyEnv",
+])
+def test_compound_credential_metadata_keeps_case_insensitive_boundaries(key: str) -> None:
+    for spelling in (key, key.lower(), key.upper(), key.swapcase()):
+        payload = {"metadata": {spelling: [True, False, 3, 1.25, None]}}
+        assert scrub_json(payload) == payload
+        assert scrub_text(f"{spelling}=true") == f"{spelling}=true"
+
+
+@pytest.mark.parametrize("key", [
+    "X.Provider-Token", "Vendor.Key-Api-Key", "定制_api_key", "厂商.Password",
+    "corpsecret", "CORPSECRET", "this_is_app_secret", "service_has_token",
+    "island_token", "hash_token", "isLand_token", "hasH_token",
+    "X.isLand_token", "X.hasH_token", "X.IsLandToken",
+    "ISLand_tOKEn", "X.IsLAND_ToKEn",
+])
+def test_custom_secret_fields_and_aliases_are_masked(key: str) -> None:
+    payload = {"headers": [{key: "synthetic-custom-credential"}]}
+    expected = {"headers": [{key: "[redacted]"}]}
+    assert scrub_json(payload) == expected
+    assert scrub_text(f'{key}="synthetic-custom-credential"') == f'{key}="[redacted]"'
+    assert scrub_json(expected) == expected
+
+
+@pytest.mark.parametrize("key", ["X-notasecret", "X.notasecret", "X-NOTASECRET"])
+def test_ambiguous_namespaced_secret_suffix_is_conservatively_masked(key: str) -> None:
+    # A custom namespace can qualify arbitrary credentials. An unqualified
+    # ordinary word remains benign, but its namespaced use is ambiguous.
+    assert scrub_json({key: "synthetic-credential", "notasecret": True}) == {
+        key: "[redacted]", "notasecret": True,
+    }
+    assert scrub_text(f"{key}=synthetic-credential") == f"{key}=[redacted]"
+
+
+@pytest.mark.parametrize("key", [
+    "api-key", "password", "token", "client-secret", "X.Provider-Token", "定制_api_key",
+])
+@pytest.mark.parametrize("prefix", ["-", "--"])
+@pytest.mark.parametrize("value, redacted", [
+    ("synthetic-cli-credential", "[redacted]"),
+    ('"synthetic cli credential"', '"[redacted]"'),
+])
+def test_cli_credential_assignments_are_masked(
+    key: str, prefix: str, value: str, redacted: str,
+) -> None:
+    text = f"helper {prefix}{key}={value} --attempts=2"
+    expected = f"helper {prefix}{key}={redacted} --attempts=2"
+    assert scrub_text(text) == expected
+    assert scrub_text(expected) == expected
+
+
+@pytest.mark.parametrize("key", [
+    "requires-api-key", "apiKeyConfigured", "api-key-env", "notasecret", "token-count",
+    "X.requiresApiKey", "Vendor.Key.apiKeyConfigured", "厂商.requires_api_key",
+])
+def test_cli_and_namespaced_metadata_stays_readable(key: str) -> None:
+    text = f"helper --{key}=true {key}=false"
+    assert scrub_text(text) == text
+    assert scrub_json({key: True}) == {key: True}
+
+
+def test_query_credential_alias_is_masked() -> None:
+    text = "GET https://example.invalid/cgi-bin/gettoken?corpid=dummy&corpsecret=synthetic-query"
+    expected = "GET https://example.invalid/cgi-bin/gettoken?corpid=dummy&corpsecret=[redacted]"
+    assert scrub_text(text) == expected
+    assert scrub_text(expected) == expected
+
+
+@pytest.mark.parametrize("prefix", [".", "..", "$.provider."])
+def test_dotted_path_assignments_keep_secret_and_metadata_boundaries(prefix: str) -> None:
+    assert scrub_text(f"{prefix}api_key=synthetic-credential") == f"{prefix}api_key=[redacted]"
+    metadata = f"{prefix}requiresApiKey=true {prefix}apiKeyConfigured=false"
+    assert scrub_text(metadata) == metadata
+
 
 # Synthetic bare tokens (no key=value structure around them), as they appear
 # verbatim inside provider/channel error messages.
@@ -195,3 +392,125 @@ def test_bare_token_masking_is_idempotent() -> None:
         text = f"log line with {token} embedded"
         once = scrub_text(text)
         assert scrub_text(once) == once, f"double scrub diverged for {token!r}"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ('message="api_key=synthetic-credential" status=ok',
+     'message="api_key=[redacted]" status=ok'),
+    ('{"message": "upstream password=synthetic-credential"}',
+     '{"message": "upstream password=[redacted]"}'),
+    ('message="prefix apiKey=\'synthetic credential\' suffix"',
+     'message="prefix apiKey=\'[redacted]\' suffix"'),
+    ("message=api_key=synthetic-credential", "message=api_key=[redacted]"),
+    ("context: detail: api_key=synthetic-credential", "context: detail: api_key=[redacted]"),
+    ('message="api_key=synthetic-one auth_token=synthetic-two"',
+     'message="api_key=[redacted] auth_token=[redacted]"'),
+])
+def test_secret_assignments_inside_benign_values(text: str, expected: str) -> None:
+    assert scrub_text(text) == expected
+    assert scrub_text(expected) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    (r'password="synthetic \"quoted\" value" status=ok', 'password="[redacted]" status=ok'),
+    ('password="synthetic \'quoted\' value" status=ok', 'password="[redacted]" status=ok'),
+    (r"password='synthetic \'quoted\' value' status=ok", "password='[redacted]' status=ok"),
+    ('password="synthetic credential\r\nstatus=ok', 'password="[redacted]\r\nstatus=ok'),
+    ("password:\r\nstatus=ok", "password:\r\nstatus=ok"),
+    ('password="[redacted]suffix"', 'password="[redacted]"'),
+])
+def test_secret_value_quoting_and_line_boundaries(text: str, expected: str) -> None:
+    assert scrub_text(text) == expected
+    assert scrub_text(expected) == expected
+
+
+def test_long_assignment_runs_and_nested_labels() -> None:
+    # Large identifier runs and many benign labels must not trigger recursive
+    # processing or retry the suffix match from every character in a run.
+    ordinary = "a" * 100_000
+    labels = "message=" * 2_000
+    assert scrub_text(ordinary) == ordinary
+    assert scrub_text(labels + "api_key=" + ordinary) == labels + "api_key=[redacted]"
+
+
+@pytest.mark.parametrize("segment", ["a_", "a.", "定制_", "a-", "a!", "a'"])
+def test_long_component_runs_keep_complete_assignment_boundaries(segment: str) -> None:
+    prefix = segment * 20_000
+    benign_key = prefix + "apiKeyConfigured"
+    text = f"--{benign_key}=true"
+    assert scrub_text(text) == text
+    assert scrub_json({benign_key: True}) == {benign_key: True}
+
+    secret_key = prefix + "api_key"
+    assert scrub_text(f"--{secret_key}=synthetic-long-credential") == f"--{secret_key}=[redacted]"
+    assert scrub_json({secret_key: "synthetic-long-credential"}) == {secret_key: "[redacted]"}
+
+
+def test_scrub_json_copies_nested_values_and_retains_metadata_types() -> None:
+    original = {
+        "providers": [{
+            "requiresApiKey": True,
+            "apiKeyConfigured": False,
+            "apiKeyEnv": "SYNTHETIC_API_KEY",
+            "apiKeyEnvPool": ["SYNTHETIC_POOL_A", "SYNTHETIC_POOL_B"],
+            "attempts": 2,
+            "fraction": 0.25,
+            "missing": None,
+            "clientAPIKey": "synthetic-secret",
+            "Authorization": {"nested": ["synthetic-credential"]},
+            "password": 12345,
+            "message": 'context="token=synthetic-credential"',
+        }],
+        "tuple": (False, 0, None, {"app-secret": ["synthetic-one", "synthetic-two"]}),
+    }
+    before = deepcopy(original)
+
+    scrubbed = scrub_json(original)
+
+    assert original == before
+    assert scrubbed["providers"][0] == {
+        "requiresApiKey": True,
+        "apiKeyConfigured": False,
+        "apiKeyEnv": "SYNTHETIC_API_KEY",
+        "apiKeyEnvPool": ["SYNTHETIC_POOL_A", "SYNTHETIC_POOL_B"],
+        "attempts": 2,
+        "fraction": 0.25,
+        "missing": None,
+        "clientAPIKey": "[redacted]",
+        "Authorization": "[redacted]",
+        "password": "[redacted]",
+        "message": 'context="token=[redacted]"',
+    }
+    assert scrubbed["tuple"] == [False, 0, None, {"app-secret": "[redacted]"}]
+    assert scrub_json(scrubbed) == scrubbed
+
+
+@pytest.mark.parametrize("value", [True, False, 17, 1.25, None])
+@pytest.mark.parametrize("key", [
+    "requiresApiKey", "requires_api_key", "apiKeyConfigured", "APIKEYConfigured", "ApiKeyEnv",
+])
+def test_scrub_json_keeps_metadata_scalar_types(key: str, value) -> None:
+    result = scrub_json({"nested": [{key: value}]})["nested"][0][key]
+    assert result == value
+    assert type(result) is type(value)
+
+
+@pytest.mark.parametrize("home", [
+    PurePosixPath("/home/synthetic"), PureWindowsPath(r"Q:\synthetic-home"),
+])
+def test_scrub_json_normalizes_paths_before_serialization(home, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    file_path = home / "diagnostics" / "status.json"
+    suffix = str(file_path)[len(str(home)):]
+    assert scrub_json({"path": file_path, "message": f"loaded {file_path}"}) == {
+        "path": "~" + suffix,
+        "message": "loaded ~" + suffix,
+    }
+
+
+def test_scrub_json_scrubs_fallback_string_values() -> None:
+    class DiagnosticValue:
+        def __str__(self) -> str:
+            return "password=synthetic-fallback"
+
+    assert scrub_json({"value": DiagnosticValue()}) == {"value": "password=[redacted]"}
