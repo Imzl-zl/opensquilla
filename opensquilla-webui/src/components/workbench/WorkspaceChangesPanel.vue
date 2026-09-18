@@ -158,12 +158,10 @@
               :data-group="group.key"
               @click="toggleGroup(group.key)"
             >
-              <Icon
-                :name="collapsed.has(group.key) ? 'chevronRight' : 'chevronDown'"
-                :size="12"
-              />
-              <Icon :name="group.icon" :size="12" />
-              <span>{{ group.label }}</span>
+              <!-- One chevron that rotates, the way the app's own collapsible
+                   rows do it, instead of two different glyphs for two states. -->
+              <Icon name="chevronRight" :size="12" class="wb-changes__group-chevron" />
+              <span class="wb-changes__group-label">{{ group.label }}</span>
               <span class="wb-changes__group-count">{{ group.entries.length }}</span>
             </button>
             <!-- The whole-set action belongs to the group it applies to, so there
@@ -1133,15 +1131,15 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   outline-offset: 1px;
 }
 
-/* The group header keeps the heading type but lets a control sit on its line. */
 /* Section actions are quiet until the header is pointed at or focused, the way
    a source-control list keeps its headers readable. */
 .wb-changes__group-actions {
   display: flex;
   flex: none;
-  gap: 0.125rem;
-  margin-left: 0.375rem;
+  gap: var(--sp-1);
+  margin-inline-start: var(--sp-1);
   opacity: 0;
+  transition: opacity var(--dur-fast);
 }
 
 .wb-changes__group-head:hover .wb-changes__group-actions,
@@ -1267,34 +1265,58 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 }
 
 /* Folding a section is how a long unstaged list stops hiding the staged and
-   untracked ones; the toggle owns the whole header so the target is the row. */
+   untracked ones. The header is one disclosure row with a rounded hover fill,
+   matching the sidebar's own collapsible rows rather than inventing a chrome
+   for this panel. */
 .wb-changes__group-toggle {
   display: flex;
   min-width: 0;
   flex: 1;
-  gap: 0.375rem;
+  gap: var(--sp-1);
   align-items: center;
-  padding: 0;
+  padding: var(--sp-1);
   color: inherit;
   font: inherit;
   text-align: left;
-  background: none;
+  background: transparent;
   border: 0;
+  border-radius: var(--radius-sm);
   cursor: pointer;
+}
+
+.wb-changes__group-toggle:hover,
+.wb-changes__group-toggle:focus-visible {
+  color: var(--text);
+  background: var(--bg-elevated);
 }
 
 .wb-changes__group-toggle:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline-offset: -2px;
 }
 
+.wb-changes__group-chevron {
+  flex: none;
+  transition: transform var(--dur-fast);
+}
+
+.wb-changes__group-toggle[aria-expanded='true'] .wb-changes__group-chevron {
+  transform: rotate(90deg);
+}
+
+.wb-changes__group-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A count, not a control: plain secondary text, the way the sidebar states its
+   own totals, so nothing in the header reads as a button it is not. */
 .wb-changes__group-count {
   margin-left: auto;
   flex: none;
-  padding: 0 0.3125rem;
+  color: var(--text-muted);
   font-weight: 500;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
 }
 
 .wb-changes__row {
