@@ -142,7 +142,15 @@ async def test_canonical_reader_observes_atomic_archive_snapshot(tmp_path, proje
 
 
 @pytest.mark.parametrize("projection", ["title", "preview"])
-async def test_directory_projection_work_is_bounded_by_requested_rows(tmp_path, projection):
+@pytest.mark.parametrize("backend", ["native", "sqlite3"])
+async def test_directory_projection_work_is_bounded_by_requested_rows(
+    tmp_path, monkeypatch, projection, backend,
+):
+    connect = (
+        storage_module.aiosqlite._native_aiosqlite.connect
+        if backend == "native" else storage_module.aiosqlite._connect_sqlite3
+    )
+    monkeypatch.setattr(storage_module.aiosqlite, "connect", connect)
     storage = await SessionStorage.open(str(tmp_path / "sessions.db"))
     try:
         node, _ = await seed(storage)
@@ -152,10 +160,10 @@ async def test_directory_projection_work_is_bounded_by_requested_rows(tmp_path, 
 
             def progress():
                 nonlocal steps
-                steps += 100
+                steps += 1
                 return 0
 
-            await storage._transcript_reader.set_progress_handler(progress, 100)
+            await storage._transcript_reader.set_progress_handler(progress, 1)
             try:
                 if projection == "title":
                     result = await storage.list_user_transcript_content_batch(
@@ -174,6 +182,7 @@ async def test_directory_projection_work_is_bounded_by_requested_rows(tmp_path, 
             return steps
 
         small = await measure()
+        assert small > 0
         async with storage._write_transaction("synthetic_history") as conn:
             await conn.executemany(
                 "INSERT INTO transcript_entries "

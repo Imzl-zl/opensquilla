@@ -114,6 +114,10 @@ class Connection(AbstractAsyncContextManager["Connection"], Protocol):
         deterministic: bool = False,
     ) -> None: ...
 
+    async def set_progress_handler(
+        self, handler: Callable[[], int] | None, n: int,
+    ) -> None: ...
+
 
 _native_available = _native_aiosqlite is not None
 _prefer_native: bool | None = None
@@ -349,6 +353,12 @@ class _AsyncConnection:
     ) -> None:
         async with self._locked:
             await _run_sqlite_call(self._conn.set_trace_callback, handler)
+
+    async def set_progress_handler(
+        self, handler: Callable[[], int] | None, n: int,
+    ) -> None:
+        async with self._locked:
+            await _run_sqlite_call(self._conn.set_progress_handler, handler, n)
 
     async def __aenter__(self) -> _AsyncConnection:
         return self
