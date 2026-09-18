@@ -314,6 +314,7 @@ class PromptAssemblerStageInput:
     )
     expected_session_id: str | None = field(default=None, repr=False)
     expected_session_epoch: int | None = field(default=None, repr=False)
+    provider_metadata: dict[str, Any] = field(default_factory=dict)
 
 @dataclass(frozen=True)
 class PromptAssemblerStageOutput:
@@ -594,6 +595,7 @@ class PromptAssemblerStage:
         # 4. Merge prompt + tool metadata
         turn.metadata.update(prompt_metadata)
         turn.metadata.update(inp.tool_metadata)
+        turn.metadata.update(inp.provider_metadata)
 
         # 5. Memory fingerprint merge (defensive — port returns None to skip)
         fingerprint = self._memory_fingerprint.memory_mode_fingerprint()

@@ -3873,6 +3873,7 @@ def build_turn_runner_from_services(
     import asyncio as _asyncio
 
     from opensquilla.engine.runtime import TurnRunner
+    from opensquilla.gateway.compaction_target import resolve_gateway_session_turn_deployment
 
     resolved_config = config if config is not None else svc.config
     # Standalone lock dict for CLI / test paths (no TaskRuntime involved).
@@ -3885,6 +3886,9 @@ def build_turn_runner_from_services(
 
     runner = TurnRunner(
         provider_selector=svc.provider_selector,
+        session_deployment_resolver=partial(
+            resolve_gateway_session_turn_deployment, resolved_config,
+        ),
         tool_registry=svc.tool_registry,
         session_manager=svc.session_manager,
         skill_loader=svc.skill_loader,

@@ -1865,6 +1865,8 @@ async def handle_ws_connection(
                 else None
             ),
             concurrent_history_reads=True,
+            chat_send_initial_model=True,
+            sessions_routing_model_selection=True,
             concurrent_optional_read_methods=sorted(_CONCURRENT_OPTIONAL_READ_METHODS),
             cancellable_request_methods=sorted(_CANCELLABLE_REQUEST_METHODS),
             provider_probe_modes=list(_PROVIDER_PROBE_MODES),

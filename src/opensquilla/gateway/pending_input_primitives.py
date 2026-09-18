@@ -65,6 +65,8 @@ def pending_input_payload(turn: AdmitTurn, confirmed_plain_text: bool) -> dict[s
         ("workspaceId", turn.workspace_id),
         ("collaborationMode", turn.initial_collaboration_mode),
         ("initialRoutingMode", turn.initial_routing_mode),
+        ("initialModel", turn.initial_model),
+        ("initialProvider", turn.initial_provider),
         ("displayText", turn.display_text),
     ):
         if value is not None:
@@ -131,6 +133,9 @@ def pending_input_projection(
     routing = payload.get("initialRoutingMode")
     if isinstance(routing, str):
         result["initialRoutingMode"] = routing
+    for field in ("initialModel", "initialProvider"):
+        if isinstance(payload.get(field), str):
+            result[field] = payload[field]
     return cast(PendingInputProjection, result)
 
 

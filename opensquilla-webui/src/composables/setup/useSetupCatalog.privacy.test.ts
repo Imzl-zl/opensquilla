@@ -97,6 +97,8 @@ async function mountCatalog(gatewayAvailability = ref<GatewayAvailability>('avai
     runModePolicy: null,
     streamIdleTimeoutMs: null,
     concurrentHistoryReads: false,
+    chatSendInitialModel: false,
+    sessionsRoutingModelSelection: false,
     detachedSessionHydration: false,
     turnCommittedEvents: false,
     subscriptionEpoch: 0,

@@ -27,11 +27,12 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
     assert targets[("method", "skills.setEnabled")] == ("result",)
     assert Counter(role for roles in targets.values() for role in roles) == {
         "result": 199,
-        "params": 27,
+        "params": 28,
         "payload": 9,
         "frame": 1,
     }
     assert sum(len(spec.targets) for spec in specs) == 918
+    assert targets[("method", "models.list")] == ("params", "result")
     assert targets[("method", "models.capacity.resolve")] == ("params", "result")
     assert targets[("method", "sessions.executionLog.read")] == ("params", "result")
     assert targets[("method", "sessions.list")] == ("result",)

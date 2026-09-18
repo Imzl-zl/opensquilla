@@ -261,38 +261,6 @@
               <span>{{ t('chat.codingMode.activeLabel') }}</span>
               <Icon name="x" :size="12" aria-hidden="true" />
             </button>
-            <div
-              v-if="sessionRoutingAvailable"
-              ref="modelRoutingAnchorEl"
-              class="chat-settings-anchor"
-            >
-              <button
-                class="btn btn--icon btn--ghost chat-model-routing-btn"
-                :class="[
-                  `chat-model-routing-btn--${sessionRoutingMode}`,
-                  { 'is-active': modelRoutingOpen || sessionRoutingMode !== 'off' },
-                ]"
-                :title="t('chat.composer.sessionModelRouting')"
-                :aria-label="t('chat.composer.sessionModelRouting')"
-                :aria-expanded="modelRoutingOpen ? 'true' : 'false'"
-                :aria-disabled="sessionRoutingControlBlocked ? 'true' : 'false'"
-                @click="toggleModelRouting"
-              >
-                <Icon name="router" :size="17" />
-                <span
-                  v-if="showRouterNewBadge"
-                  class="chat-model-routing-btn__new"
-                  aria-hidden="true"
-                >{{ t('chat.composer.badgeNew') }}</span>
-              </button>
-              <ChatComposerModelRouting
-                v-if="modelRoutingOpen"
-                :model-routing-mode="sessionRoutingMode"
-                :busy="sessionRoutingBusy || sessionRoutingControlBlocked"
-                @close="modelRoutingOpen = false"
-                @set-session-routing-mode="emit('setSessionRoutingMode', $event)"
-              />
-            </div>
             <div ref="runModeAnchorEl" class="chat-settings-anchor chat-run-mode-anchor">
               <button
                 class="btn btn--icon btn--ghost chat-run-mode-btn"
@@ -408,6 +376,61 @@
             @set-mode="emit('setCollaborationMode', $event)"
           />
           <div class="chat-input-actions chat-input-actions--right">
+            <div
+              v-if="modelRoutingVisible"
+              ref="modelRoutingAnchorEl"
+              class="chat-settings-anchor"
+            >
+              <button
+                class="chat-model-routing-btn"
+                :class="[
+                  `chat-model-routing-btn--${sessionRoutingMode}`,
+                  { 'is-open': modelRoutingOpen },
+                ]"
+                :title="`${t('chat.modelRouting.title')}: ${modelRoutingTriggerLabel}${modelRoutingUsesDefault ? ` · ${t('chat.newTaskModel.defaultBadge')}` : ''}`"
+                :aria-label="t('chat.modelRouting.title')"
+                :aria-description="`${modelRoutingTriggerLabel}${modelRoutingUsesDefault ? ` · ${t('chat.newTaskModel.defaultBadge')}` : ''}`"
+                :aria-expanded="modelRoutingOpen ? 'true' : 'false'"
+                :aria-disabled="sessionRoutingControlBlocked ? 'true' : 'false'"
+                @click="toggleModelRouting"
+              >
+                <Icon v-if="sessionRoutingMode === 'squilla_router'" name="router" :size="17" />
+                <Icon v-else-if="sessionRoutingMode === 'llm_ensemble'" name="fork" :size="17" />
+                <span v-else class="chat-model-routing-btn__dot" aria-hidden="true" />
+                <span class="chat-model-routing-btn__label">{{ modelRoutingTriggerLabel }}</span>
+                <span v-if="modelRoutingUsesDefault" class="chat-model-routing-btn__default">{{ t('chat.newTaskModel.defaultBadge') }}</span>
+                <Icon name="chevronDown" :size="12" />
+                <span
+                  v-if="showRouterNewBadge"
+                  class="chat-model-routing-btn__new"
+                  aria-hidden="true"
+                >{{ t('chat.composer.badgeNew') }}</span>
+              </button>
+              <ChatComposerModelRouting
+                v-if="modelRoutingOpen"
+                ref="modelRoutingPanelRef"
+                :anchor="modelRoutingAnchorEl"
+                :model-routing-mode="sessionRoutingMode"
+                :busy="sessionRoutingBusy || sessionRoutingControlBlocked"
+                :routing-available="sessionRoutingAvailable"
+                :is-new-task="isNewTask"
+                :model-selection-available="modelSelectionAvailable"
+                :available-models="availableModels"
+                :model-selection="modelSelection"
+                :default-model="defaultModel"
+                :session-model-name="sessionModelName"
+                :models-loading="modelsLoading"
+                :models-error="modelsError"
+                :model-provider-errors="modelProviderErrors"
+                :model-selection-disabled-reason="modelSelectionDisabledReason"
+                @close="closeModelRouting"
+                @select-model="emit('selectModel', $event)"
+                @refresh-models="emit('refreshModels')"
+                @open-model-settings="openModelSettings"
+                @set-session-routing-mode="emit('setSessionRoutingMode', $event)"
+              />
+            </div>
+
             <button
               v-if="showSkillQueueSend"
               type="button"
@@ -495,6 +518,8 @@ import ChatComposerModelRouting from '@/components/chat/ChatComposerModelRouting
 import ChatComposerPlanMode from '@/components/chat/ChatComposerPlanMode.vue'
 import ChatComposerRunMode from '@/components/chat/ChatComposerRunMode.vue'
 import type { Attachment } from '@/types/chat'
+import type { ModelDescriptor, ProviderListError } from '@/modules/providerConfiguration'
+import { useDialogLayer } from '@/composables/useDialogA11y'
 import type { ModelRoutingMode } from '@/types/modelRouting'
 import type { SandboxRunMode } from '@/types/sandbox'
 import type { CollaborationMode } from '@/types/plans'
@@ -540,6 +565,16 @@ const props = withDefaults(defineProps<{
   sessionRoutingBusy: boolean
   sessionRoutingControlBlocked?: boolean
   sessionRoutingAvailable?: boolean
+  isNewTask?: boolean
+  modelSelectionAvailable?: boolean
+  availableModels?: readonly ModelDescriptor[]
+  modelSelection?: { model: string; provider: string | null } | null
+  defaultModel?: { model: string; provider: string } | null
+  sessionModelName?: string | null
+  modelsLoading?: boolean
+  modelsError?: string | null
+  modelProviderErrors?: readonly ProviderListError[]
+  modelSelectionDisabledReason?: 'routing' | 'busy' | 'unavailable' | null
   codingModeEnabled?: boolean
   codingModeSettingsBusy?: boolean
   addMenuAvoidElement?: HTMLElement | null
@@ -599,6 +634,9 @@ const emit = defineEmits<{
   setBusySendMode: [mode: 'queue' | 'steer']
   setRunMode: [mode: SandboxRunMode]
   setSessionRoutingMode: [mode: ModelRoutingMode]
+  selectModel: [selection: { model: string; provider: string } | null]
+  refreshModels: []
+  openModelSettings: []
   setCodingModeEnabled: [enabled: boolean]
   setCollaborationMode: [mode: CollaborationMode]
   armGoal: []
@@ -668,6 +706,28 @@ async function onAttachFiles() {
 
 const addMenuOpen = ref(false)
 const modelRoutingOpen = ref(false)
+const modelRoutingPanelRef = ref<{ element: () => HTMLElement | null } | null>(null)
+const modelRoutingVisible = computed(() => Boolean(props.sessionRoutingAvailable || props.modelSelectionAvailable || props.modelSelection))
+const modelRoutingTriggerLabel = computed(() => {
+  if (props.sessionRoutingMode === 'squilla_router') return t('chat.modelRouting.router')
+  if (props.sessionRoutingMode === 'llm_ensemble') return t('chat.modelRouting.ensemble')
+  const pin = props.modelSelection
+  if (pin) return props.availableModels?.find(model => model.id === pin.model && model.provider === pin.provider)?.name || pin.model
+  const defaultModel = props.modelSelectionAvailable && props.defaultModel
+  if (defaultModel) return props.availableModels?.find(model => model.id === defaultModel.model && model.provider === defaultModel.provider)?.name || defaultModel.model
+  return props.sessionModelName || t('chat.modelRouting.direct')
+})
+const modelRoutingUsesDefault = computed(() => props.sessionRoutingMode === 'off' && props.modelSelectionAvailable && !props.modelSelection)
+useDialogLayer(modelRoutingOpen)
+watch(modelRoutingVisible, visible => { if (!visible) modelRoutingOpen.value = false })
+function closeModelRouting(restoreFocus = true) {
+  modelRoutingOpen.value = false
+  if (restoreFocus) nextTick(() => modelRoutingAnchorEl.value?.querySelector<HTMLButtonElement>('button')?.focus())
+}
+function openModelSettings() {
+  closeModelRouting(false)
+  emit('openModelSettings')
+}
 const moreActionsOpen = ref(false)
 const editingAnnotationId = ref('')
 const annotationDraftBody = ref('')
@@ -759,7 +819,8 @@ function closeOpenPopoversFromOutside(event: PointerEvent) {
   ) {
     moreActionsOpen.value = false
   }
-  if (modelRoutingOpen.value && !eventInsideRoot(event, modelRoutingAnchorEl.value)) {
+  if (modelRoutingOpen.value && !eventInsideRoot(event, modelRoutingAnchorEl.value)
+    && !eventInsideRoot(event, modelRoutingPanelRef.value?.element() ?? null)) {
     modelRoutingOpen.value = false
   }
   if (runModeOpen.value && !eventInsideRoot(event, runModeAnchorEl.value)) {
@@ -783,6 +844,7 @@ function toggleModelRouting() {
   modelRoutingOpen.value = !modelRoutingOpen.value
   if (modelRoutingOpen.value) {
     dismissRouterNewBadge()
+    emit('refreshModels')
     addMenuOpen.value = false
     runModeOpen.value = false
     moreActionsOpen.value = false
@@ -1613,7 +1675,8 @@ button.attachment-chip__primary:focus-visible {
 
 .chat-input-footer {
   justify-content: space-between;
-  gap: 0.75rem;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
   padding: 0.25rem 0.625rem 0.625rem;
 }
 
@@ -1709,8 +1772,16 @@ button.attachment-chip__primary:focus-visible {
   background: var(--danger);
 }
 
+.chat-input-actions--left {
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
 .chat-input-actions--right {
   flex-shrink: 0;
+  margin-left: auto;
+  max-width: 100%;
 }
 
 .chat-input-wrap {
@@ -1780,10 +1851,64 @@ button.attachment-chip__primary:focus-visible {
 }
 
 .chat-model-routing-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  max-width: min(230px, 40vw);
+  padding: 0 9px;
+  width: auto;
   position: relative;
-  border-color: transparent;
-  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-surface);
   color: var(--text-muted);
+  font-family: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+
+.chat-model-routing-btn > .icon {
+  flex-shrink: 0;
+}
+
+.chat-model-routing-btn > .icon:first-child {
+  color: var(--accent);
+}
+
+.chat-model-routing-btn__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+}
+
+.chat-model-routing-btn__dot {
+  flex: 0 0 17px;
+  width: 17px;
+  height: 17px;
+  display: grid;
+  place-items: center;
+}
+
+.chat-model-routing-btn__dot::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.chat-model-routing-btn__default {
+  flex-shrink: 0;
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  line-height: 1.2;
 }
 
 .chat-model-routing-btn__new {
@@ -1802,63 +1927,20 @@ button.attachment-chip__primary:focus-visible {
   pointer-events: none;
 }
 
-.chat-model-routing-btn.btn--ghost:not(:disabled):hover {
-  border-color: color-mix(in srgb, var(--accent) 18%, transparent);
-  background: color-mix(in srgb, var(--accent) 6%, var(--bg-surface));
-  color: var(--accent);
+.chat-model-routing-btn:hover,
+.chat-model-routing-btn.is-open {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-surface));
+  color: var(--text);
 }
 
-.chat-model-routing-btn--off.btn--ghost:not(:disabled):hover {
-  border-color: color-mix(in srgb, var(--text-dim) 14%, transparent);
-  background: color-mix(in srgb, var(--text-dim) 6%, var(--bg-surface));
-  color: var(--text-muted);
+.chat-model-routing-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
-.chat-model-routing-btn.btn--ghost.is-active {
-  border-color: color-mix(in srgb, var(--accent) 24%, transparent);
-  background: color-mix(in srgb, var(--accent) 9%, var(--bg-surface));
-  color: var(--accent);
-}
-
-.chat-model-routing-btn--off.btn--ghost.is-active {
-  border-color: color-mix(in srgb, var(--text-dim) 18%, transparent);
-  background: color-mix(in srgb, var(--text-dim) 8%, var(--bg-surface));
-  color: var(--text-muted);
-}
-
-.chat-model-routing-btn--squilla_router.btn--ghost.is-active::after {
-  content: "";
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 6px;
-  height: 2px;
-  border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--accent) 62%, transparent);
-}
-
-.chat-model-routing-btn--llm_ensemble.btn--ghost.is-active {
-  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
-  background: color-mix(in srgb, var(--accent) 11%, var(--bg-surface));
-}
-
-.chat-model-routing-btn--llm_ensemble.btn--ghost.is-active::before,
-.chat-model-routing-btn--llm_ensemble.btn--ghost.is-active::after {
-  content: "";
-  position: absolute;
-  bottom: 6px;
-  width: 6px;
-  height: 2px;
-  border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--accent) 62%, transparent);
-}
-
-.chat-model-routing-btn--llm_ensemble.btn--ghost.is-active::before {
-  left: 10px;
-}
-
-.chat-model-routing-btn--llm_ensemble.btn--ghost.is-active::after {
-  right: 10px;
+.chat-model-routing-btn[aria-disabled="true"] {
+  cursor: default;
 }
 
 .chat-run-mode-btn {

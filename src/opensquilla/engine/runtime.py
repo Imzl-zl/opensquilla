@@ -1687,12 +1687,24 @@ def _report_credential_pool_failure(
     if not turn_metadata:
         return
     pool_info = turn_metadata.get("credential_pool")
+    active_provider = str(turn_metadata.get("executed_provider") or "")
+    applied_provider = str(turn_metadata.get("routed_provider_applied") or "")
+    session_realign = (
+        turn_metadata.get("routed_provider_fallback_reason") == "explicit_model_override"
+        and isinstance(turn_metadata.get("session_credential_pool"), dict)
+    )
+    if (
+        session_realign or not isinstance(pool_info, dict)
+        or pool_info.get("provider") != applied_provider
+    ):
+        pool_info = turn_metadata.get("session_credential_pool")
+        applied_provider = str(turn_metadata.get("session_provider_applied") or "")
     if not isinstance(pool_info, dict):
         return
     pool_provider = str(pool_info.get("provider") or "")
-    if not pool_provider:
+    if not pool_provider or pool_provider != applied_provider:
         return
-    if str(turn_metadata.get("routed_provider_applied") or "") != pool_provider:
+    if active_provider and active_provider != pool_provider:
         return
     try:
         kind = classify_provider_error(
@@ -4719,9 +4731,13 @@ class TurnRunner:
         turn_growth_started_sink: GrowthMilestoneSink | None = None,
         turn_growth_succeeded_sink: GrowthMilestoneSink | None = None,
         growth_event_sink: Any | None = None,
+        session_deployment_resolver: (
+            Callable[[object, object | None, dict[str, Any]], Any | None] | None
+        ) = None,
         usage_telemetry: UsageTelemetryPort | None = None,
     ) -> None:
         self._provider_selector = provider_selector
+        self._session_deployment_resolver = session_deployment_resolver
         self._tool_registry = tool_registry
         self._session_manager = session_manager
         self._skill_loader = skill_loader
@@ -4887,6 +4903,12 @@ class TurnRunner:
         # Compatibility for direct callers that still install a complete
         # config object in accepted_turn_config_scope().
         return accepted
+
+    def _session_model_pin_applies(self) -> bool:
+        """A saved single-model choice must not override a routed session turn."""
+        return getattr(_ACCEPTED_TURN_CONFIG.get(), "session_mode", None) not in {
+            "router", "ensemble",
+        }
 
     @property
     def router_control_hold_store(self) -> RouterControlHoldStore:
@@ -5729,6 +5751,8 @@ class TurnRunner:
             raise ValueError(
                 "expected_session_id and expected_session_epoch must form a valid pair"
             )
+        if not self._session_model_pin_applies():
+            model = None
         normalized_input_provenance = self._normalize_input_provenance(input_provenance)
         lock = self.get_session_lock(session_key)
         effective_tool_context = replace(
@@ -6370,6 +6394,7 @@ class TurnRunner:
                         tool_defs=tool_defs,
                         effective_tool_context=tool_context,
                         tool_metadata=tool_metadata,
+                        provider_metadata=pt_out.provider_metadata,
                         session_key=session_key,
                         agent_id=agent_id,
                         turn_id=turn_id,
@@ -8233,7 +8258,9 @@ class TurnRunner:
         )
         return session_id
 
-    def _resolve_provider(self) -> tuple[Any | None, Any | None]:
+    def _resolve_provider(
+        self, *, deployment: Any | None = None,
+    ) -> tuple[Any | None, Any | None]:
         """Clone the selector and resolve provider (no shared state mutation)."""
         if self._provider_selector is None:
             return None, None
@@ -8241,9 +8268,13 @@ class TurnRunner:
         # (no API key configured); treat it like "no provider" so the turn
         # fails with the same clean no_provider error instead of raising.
         # getattr default True keeps duck-typed test selectors working.
-        if not getattr(self._provider_selector, "is_configured", True):
+        if deployment is None and not getattr(self._provider_selector, "is_configured", True):
             return None, None
         cloned = self._provider_selector.clone()
+        if deployment is not None:
+            # An explicit session deployment must never inherit another
+            # provider's fallback credentials or silently use the default.
+            cloned.pin_provider_config(deployment)
         return cloned.resolve(), cloned
 
     def _handle_runtime_warning(self, event: WarningEvent) -> WarningEvent:
@@ -9796,21 +9827,37 @@ class TurnRunner:
         )
         from opensquilla.engine.steps.squilla_router import (
             commit_deferred_router_history,
+            prepare_model_routing_runtime,
         )
 
         router_cfg = getattr(self._turn_config(), "squilla_router", None)
         router_timeout = float(getattr(router_cfg, "routing_timeout_seconds", 5.0) or 5.0)
 
         def _copy_router_turn(turn: TurnContext) -> TurnContext:
-            metadata: dict[str, Any] = {}
-            for key, value in turn.metadata.items():
-                try:
-                    metadata[key] = copy.deepcopy(value)
-                except Exception:
-                    metadata[key] = value
-            pipeline_steps = metadata.get("pipeline_steps")
-            if isinstance(pipeline_steps, list):
-                metadata["pipeline_steps"] = list(pipeline_steps)
+            # Detach mutable per-turn facts, but retain opaque runtime services.
+            # In particular deepcopy(bound_method) clones its owner, traversing
+            # live gateways, locks, SQLite connections and even event loops.
+            # The worker only reads these service capabilities; it must never
+            # construct partial copies or spend its routing budget cloning them.
+            memo: dict[int, Any] = {}
+            visited: set[int] = set()
+
+            def retain_runtime_values(value: Any) -> None:
+                identity = id(value)
+                if identity in visited:
+                    return
+                visited.add(identity)
+                if type(value) is dict:
+                    for child in (*value.keys(), *value.values()):
+                        retain_runtime_values(child)
+                elif type(value) in (list, tuple, set, frozenset):
+                    for child in value:
+                        retain_runtime_values(child)
+                elif type(value) not in (str, bytes, int, float, bool, type(None)):
+                    memo[identity] = value
+
+            retain_runtime_values(turn.metadata)
+            metadata = copy.deepcopy(turn.metadata, memo)
             metadata["_defer_squilla_router_history"] = True
             return replace(
                 turn,
@@ -9820,6 +9867,10 @@ class TurnRunner:
             )
 
         async def _bounded_apply_squilla_router(turn: TurnContext) -> TurnContext:
+            # Cold readiness belongs to the actual routing consumer, before
+            # its classification deadline and using the accepted turn config.
+            await prepare_model_routing_runtime(turn.config, session_key=turn.session_key)
+
             def _run_router_step_sync() -> TurnContext:
                 return asyncio.run(apply_squilla_router(_copy_router_turn(turn)))
 

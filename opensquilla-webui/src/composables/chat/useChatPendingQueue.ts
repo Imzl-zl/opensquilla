@@ -52,6 +52,7 @@ interface PendingReorderSnapshot {
 interface ComposerAttachmentSnapshotEntry {
   readonly identity: Attachment
   readonly content: Readonly<Record<string, unknown>>
+  readonly workspaceFile: string | undefined
 }
 
 type ComposerAttachmentSnapshot = ReadonlyArray<ComposerAttachmentSnapshotEntry>
@@ -62,6 +63,7 @@ function snapshotComposerAttachments(
   return Object.freeze(attachments.map(attachment => Object.freeze({
     identity: attachment,
     content: Object.freeze({ ...attachment }) as Readonly<Record<string, unknown>>,
+    workspaceFile: JSON.stringify(attachment.workspaceFile),
   })))
 }
 
@@ -77,6 +79,7 @@ function composerAttachmentsMatch(
     const currentKeys = Object.keys(current)
     const expectedKeys = Object.keys(expected.content)
     return currentKeys.length === expectedKeys.length
+      && JSON.stringify(attachment.workspaceFile) === expected.workspaceFile
       && expectedKeys.every(key => (
         Object.prototype.hasOwnProperty.call(current, key)
         && Object.is(current[key], expected.content[key])
@@ -978,7 +981,8 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
       ...(payload.selectedSkills?.length ? { selectedSkills: copySelectedSkills(payload.selectedSkills) } : {}),
       ...(draftIds.length ? { draftIds } : {}),
       attachments: (payload.attachments || []).map(snapshotAttachment),
-      intent: payload.intent ?? null,
+      // Creation belongs to the in-flight first turn, never to its follow-ups.
+      intent: payload.intent === 'new_chat' ? null : payload.intent ?? null,
       ...(payload.confirmedPlainText ? { confirmedPlainText: true } : {}),
       ...(payload.deliveryIdentity ? { pendingDeliveryIdentity: payload.deliveryIdentity } : {}),
       ownerSessionKey: options.sessionKey.value,
@@ -1062,7 +1066,8 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
       options.inputText.value = ''
       if (options.selectedSkills) options.selectedSkills.value = []
       options.pendingAttachments.value = []
-      options.pendingSessionIntent.value = null
+      // First-turn acceptance consumes new_chat after its durable receipt.
+      if (composerIntent !== 'new_chat') options.pendingSessionIntent.value = null
       options.autoResizeTextarea()
     }
     if (typeof queued === 'boolean') {
