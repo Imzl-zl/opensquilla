@@ -519,21 +519,33 @@ describe('WorkspaceChangesPanel', () => {
     mounted.unmount()
   })
 
-  it('offers one icon size for every icon-only control', async () => {
+  it('uses the app button vocabulary for toolbar and in-list actions', async () => {
     const mounted = mountPanel(reader())
     await settle()
 
-    // The bar, the group header and the row share one square: three sizes for
-    // the same kind of control is what made the glyphs look unrelated.
-    const controls = [
+    // Toolbar controls are the shared .btn--icon; actions inside a list row or
+    // section header are the shared in-list geometry. A third hand-rolled
+    // button is what drifted from the rest of the app.
+    const toolbar = [
       mounted.element.querySelector('[data-testid="changes-wrap-lines"]'),
       mounted.element.querySelector('[data-testid="changes-refresh"]'),
+      mounted.element.querySelector('[data-testid="changes-undo-commit"]'),
+      mounted.element.querySelector('[data-testid="changes-push"]'),
+    ]
+    for (const control of toolbar) {
+      expect(control?.classList.contains('btn')).toBe(true)
+      expect(control?.classList.contains('btn--icon')).toBe(true)
+      expect(control?.classList.contains('wb-changes__list-action')).toBe(false)
+      expect(control?.querySelector('svg')?.getAttribute('width')).toBe('12')
+    }
+
+    const inList = [
       mounted.element.querySelector('[data-testid="changes-group-index-action"]'),
       mounted.element.querySelector('[data-testid="changes-index-action"]'),
     ]
-    for (const control of controls) {
-      expect(control?.classList.contains('wb-changes__icon-button')).toBe(true)
-      expect(control?.querySelector('svg')?.getAttribute('width')).toBe('12')
+    for (const control of inList) {
+      expect(control?.classList.contains('btn--icon')).toBe(true)
+      expect(control?.classList.contains('wb-changes__list-action')).toBe(true)
     }
     mounted.unmount()
   })

@@ -20,7 +20,7 @@
       <div class="wb-changes__bar-actions">
         <button
           type="button"
-          class="wb-changes__icon-button"
+          class="btn btn--icon"
           :aria-pressed="wrapLines"
           :aria-label="t('workbench.changes.wrapLines')"
           :title="t('workbench.changes.wrapLines')"
@@ -33,7 +33,7 @@
              in this row with the branch name and its divergence. -->
         <button
           type="button"
-          class="wb-changes__icon-button"
+          class="btn btn--icon"
           :disabled="indexBusy || !canUndoCommit"
           :aria-busy="indexBusy"
           :aria-label="t('workbench.changes.undoCommit')"
@@ -47,7 +47,7 @@
         </button>
         <button
           type="button"
-          class="wb-changes__icon-button"
+          class="btn btn--icon"
           :disabled="indexBusy || !changes?.upstream"
           :aria-busy="indexBusy"
           :aria-label="t('workbench.changes.push')"
@@ -61,7 +61,7 @@
         </button>
         <button
           type="button"
-          class="wb-changes__icon-button"
+          class="btn btn--icon"
           :disabled="loading"
           :aria-label="t('workbench.changes.refresh')"
           :title="t('workbench.changes.refresh')"
@@ -89,7 +89,7 @@
       >
       <button
         type="button"
-        class="wb-changes__icon-button"
+        class="btn btn--icon"
         :disabled="indexBusy || !canCommit"
         :aria-busy="indexBusy"
         :aria-label="t('workbench.changes.commit')"
@@ -172,7 +172,7 @@
               <button
                 v-if="canDiscardGroup(group)"
                 type="button"
-                class="wb-changes__icon-button"
+                class="btn btn--icon wb-changes__list-action"
                 :disabled="indexBusy"
                 :aria-busy="indexBusy"
                 :aria-label="t('workbench.changes.discardAll')"
@@ -185,7 +185,7 @@
               </button>
               <button
                 type="button"
-                class="wb-changes__icon-button"
+                class="btn btn--icon wb-changes__list-action"
                 :disabled="indexBusy"
                 :aria-busy="indexBusy"
                 :aria-label="t(`workbench.changes.${group.indexAction}All`)"
@@ -247,7 +247,7 @@
             <button
               v-if="entry.changeType !== 'untracked'"
               type="button"
-              class="wb-changes__icon-button wb-changes__row-action"
+              class="btn btn--icon wb-changes__list-action"
               :disabled="indexBusy"
               :aria-busy="indexBusy"
               :aria-label="t('workbench.changes.discard')"
@@ -260,7 +260,7 @@
             </button>
             <button
               type="button"
-              class="wb-changes__icon-button wb-changes__row-action"
+              class="btn btn--icon wb-changes__list-action"
               :disabled="indexBusy"
               :aria-busy="indexBusy"
               :aria-label="t(`workbench.changes.${indexAction(entry)}`)"
@@ -1096,13 +1096,13 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   margin-inline-start: auto;
 }
 
-.wb-changes__action,
-.wb-changes__icon-button {
+.wb-changes__action {
   display: inline-flex;
   flex: none;
   gap: 0.25rem;
   align-items: center;
   justify-content: center;
+  padding: 0.125rem 0.5rem;
   color: var(--text-muted);
   font: inherit;
   background: var(--bg-elevated);
@@ -1111,29 +1111,48 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   cursor: pointer;
 }
 
-.wb-changes__action {
-  padding: 0.125rem 0.5rem;
-}
-
-/* One square for every icon-only control — the bar, a group header and a row —
-   so the glyphs read as one set instead of three sizes. */
-.wb-changes__icon-button {
-  width: 1.375rem;
-  height: 1.375rem;
-  padding: 0;
-}
-
-.wb-changes__action:disabled,
-.wb-changes__icon-button:disabled {
+.wb-changes__action:disabled {
   cursor: default;
   opacity: 0.6;
 }
 
+/* An action inside a list row or a section header, at the size and treatment
+   base.css already gives one (.sidebar-project-action): a transparent 20px
+   square that the row reveals. */
+.wb-changes__list-action {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.wb-changes__list-action:disabled {
+  cursor: not-allowed;
+  opacity: var(--state-disabled-opacity);
+}
+
+.wb-changes__list-action:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
 .wb-changes__action:focus-visible,
-.wb-changes__icon-button:focus-visible,
+.wb-changes__list-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
 .wb-changes__entry:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline-offset: -2px;
 }
 
 /* Section actions are quiet until the header is pointed at or focused, the way
@@ -1155,17 +1174,6 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 .wb-changes__group-head:hover .wb-changes__group-actions,
 .wb-changes__group-actions:focus-within {
   opacity: 1;
-}
-
-.wb-changes__group-actions .wb-changes__icon-button {
-  color: var(--text);
-  background: none;
-  border-color: transparent;
-}
-
-.wb-changes__group-actions .wb-changes__icon-button:hover:not(:disabled) {
-  background: var(--bg-surface);
-  border-color: var(--border);
 }
 
 .wb-changes__note {
@@ -1236,24 +1244,17 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   align-items: center;
 }
 
+/* Layout only. The field's surface, border, radius and focus treatment come from
+   the shared input rules (base.css and the active skin), which is what makes it
+   look like every other field in the app instead of a hand-rolled one. A panel
+   rule here also lost to those rules on specificity, so it was dead weight. */
 .wb-changes__commit-input {
   min-width: 0;
   flex: 1;
-  padding: 0.25rem 0.5rem;
-  color: var(--text);
-  font: inherit;
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
 }
 
 .wb-changes__commit-input:disabled {
   color: var(--text-muted);
-}
-
-.wb-changes__commit-input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
 }
 
 .wb-changes__group-head {
