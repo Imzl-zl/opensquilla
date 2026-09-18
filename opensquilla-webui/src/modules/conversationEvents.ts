@@ -7,6 +7,7 @@ import type { ConversationArtifact, ConversationCommittedTurn, ConversationEvent
 
 /** Protocol-neutral meanings emitted by the Conversation event Adapter. */
 export type ConversationSemanticEventKind =
+  | 'skill-load'
   | 'answer-generation-reset'
   | 'approval-requested'
   | 'approval-resolved'
@@ -16,6 +17,7 @@ export type ConversationSemanticEventKind =
   | 'compaction-progress'
   | 'cron-result'
   | 'ensemble-progress'
+  | 'execution-progress'
   | 'goal-changed'
   | 'goal-run-changed'
   | 'input-disposition'
@@ -76,6 +78,8 @@ type ProjectedEvent<K extends ConversationSemanticEventKind, P> = ConversationEv
 }
 
 export type ConversationEventProjection =
+  | ProjectedEvent<'skill-load', ConversationEventData>
+  | ProjectedEvent<'execution-progress', ConversationEventData>
   | ProjectedEvent<'cron-result', ConversationCronResult>
   | ProjectedEvent<'provider-activity', ConversationProviderActivity>
   | ProjectedEvent<'ensemble-progress', ConversationEnsembleProgress>

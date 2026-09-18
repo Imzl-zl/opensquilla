@@ -57,6 +57,8 @@ def pending_input_payload(turn: AdmitTurn, confirmed_plain_text: bool) -> dict[s
         "clientMessageId": turn.client_message_id,
         "_source": source,
     }
+    if turn.workspace_files:
+        payload["workspaceFiles"] = list(turn.workspace_files)
     if turn.intent_was_provided:
         payload["intent"] = turn.intent
     for name, value in (
@@ -71,6 +73,8 @@ def pending_input_payload(turn: AdmitTurn, confirmed_plain_text: bool) -> dict[s
         payload["confirmedPlainText"] = True
     if turn.page_context is not None:
         payload["pageContext"] = turn.page_context
+    if turn.selected_skills:
+        payload["selectedSkills"] = list(turn.selected_skills)
     return payload
 
 
@@ -113,6 +117,8 @@ def pending_input_projection(
         "replayed": replayed,
         "schemaVersion": row.schema_version,
     }
+    if payload.get("workspaceFiles"):
+        result["workspaceFiles"] = payload["workspaceFiles"]
     display = payload.get("displayText")
     if isinstance(display, str):
         result["displayText"] = display
@@ -120,6 +126,8 @@ def pending_input_projection(
         result["confirmedPlainText"] = True
     if isinstance(payload.get("pageContext"), dict):
         result["pageContext"] = payload["pageContext"]
+    if payload.get("selectedSkills"):
+        result["selectedSkills"] = payload["selectedSkills"]
     routing = payload.get("initialRoutingMode")
     if isinstance(routing, str):
         result["initialRoutingMode"] = routing
@@ -154,10 +162,11 @@ def stored_pending_input(row: PendingChatInput) -> StoredPendingInput:
         turn=turn,
         projection=pending_input_projection(row),
         material_scopes=scopes,
-        has_non_text_semantics=any(
+        has_non_text_semantics=bool(turn.selected_skills) or any(
             row.payload.get(name) is not None
             for name in (
                 "pageContext",
+                "workspaceFiles",
                 "intent",
                 "model",
                 "model_id",

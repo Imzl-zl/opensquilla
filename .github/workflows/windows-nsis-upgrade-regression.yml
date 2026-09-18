@@ -204,7 +204,8 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      max-parallel: 6
+      # Each acceptance case owns a hosted VM and only reads the built installer.
+      # Let all cases start once that immutable candidate is available.
       matrix:
         baseline: ['0.5.3', '0.5.4']
         install-path: [default, custom]

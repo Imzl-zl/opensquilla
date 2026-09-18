@@ -907,6 +907,11 @@
     },
     {
       "kind": "method",
+      "wireName": "plans.setPresentation",
+      "roles": ["result"]
+    },
+    {
+      "kind": "method",
       "wireName": "plans.cancelRun",
       "roles": [
         "result"
@@ -1466,6 +1471,20 @@
     {
       "kind": "method",
       "wireName": "workspaces.update",
+      "roles": [
+        "result"
+      ]
+    },
+    {
+      "kind": "method",
+      "wireName": "skills.candidates",
+      "roles": [
+        "result"
+      ]
+    },
+    {
+      "kind": "method",
+      "wireName": "skills.setEnabled",
       "roles": [
         "result"
       ]

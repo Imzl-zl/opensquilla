@@ -16,6 +16,25 @@ OpenSquilla reads configuration in this order:
 Use `--config ./opensquilla.toml` when you want to write or inspect a
 project-local config file.
 
+## Release Profiles and Older Databases
+
+Stable Desktop releases keep their existing profile. Preview and nightly
+binaries use separate profiles selected from the running binary's version.
+Changing the update feed does not move the current profile or its database.
+
+An unsupported development Goal database is preserved, including its SQLite
+WAL, and is rejected consistently by Gateway startup, home import and recovery.
+Open it with the build that created it. The current release does not convert
+that Goal lineage or mark its migrations as already applied.
+
+To start separately in the CLI, select a new named profile, for example
+`opensquilla --profile clean onboard`, then use the same `--profile clean`
+option for subsequent commands. Use a directory without a project-local
+configuration, and remove explicit config/state path overrides that point to
+the old profile. Keep the original profile intact; do not copy its database
+into the new profile. See [independent CLI state](cli.md) for explicit state
+directory configuration.
+
 ## Task Runtime Concurrency
 
 Fresh installations allow up to eight cross-session turns to run at once:
@@ -241,11 +260,12 @@ See [`channels.md`](channels.md) for details.
 
 ## Attachments
 
-Attachment ingestion accepts **any file type**. Rendered families (images,
-PDF, text, Office documents, email) are extracted or inlined for the model;
-everything else is an *opaque* attachment: the bytes are staged into the agent
-workspace for tool access and are never parsed, decompressed, or inlined into
-a provider prompt.
+Attachment ingestion accepts **any file type**. Images use the selected model's
+image capability. Other files are preserved in the session's attachment workspace;
+the model receives their names, types, sizes and tool-access paths. Text, PDF,
+Office and email content is read through bounded file tools rather than inserted
+in full into every prompt. Archives, binaries and unknown formats remain opaque
+until an appropriate tool inspects or converts them.
 
 ```toml
 [attachments]
@@ -255,7 +275,7 @@ a provider prompt.
 accept_opaque = true
 # Per-file ceiling for opaque attachments (bytes).
 opaque_max_bytes = 31457280            # 30 MiB
-# Aggregate RAM ceiling for the in-memory staged-upload store. When reached,
+# Aggregate byte ceiling for the disk-backed staged-upload store. When reached,
 # new uploads get HTTP 507 UPLOAD_STORE_FULL (retryable; staged entries
 # expire within the 10-minute TTL); a payload larger than the cap itself is a
 # permanent 413. Non-positive or invalid values fall back to the default —
@@ -278,21 +298,42 @@ Env overrides use the `OPENSQUILLA_ATTACHMENTS_` prefix
 (`OPENSQUILLA_ATTACHMENTS_ACCEPT_OPAQUE`, `OPENSQUILLA_ATTACHMENTS_OPAQUE_MAX_BYTES`, …).
 
 Size policy at a glance: inline attachments up to 2 MB ride the RPC message;
-larger files stage through `POST /api/v1/files/upload` (10-minute TTL) up to
-30 MiB per file for text (whole-payload UTF-8 proven), PDF, Office, and opaque
-types. Email is always capped at the 2 MB text limit and never stages. Per
-turn: at most 10 attachments and 60 MiB total.
+larger files stage through `POST /api/v1/files/upload`. Staged text (validated as
+whole-payload UTF-8), PDF, Office and opaque files allow up to 30 MiB each; images
+allow 5 MiB and email retains its 2 MB limit. Each turn accepts at most 10 uploaded
+attachments and 60 MiB total. Staged uploads are stored on disk with their hashes
+and survive a Gateway restart within their original 10-minute lifetime.
 
 Behavior notes:
 
-- With `accept_opaque = true` (the default), the upload endpoint no longer
-  returns HTTP 415 `UNSUPPORTED_MEDIA_TYPE` for unrendered types, and
-  `sessions.send` no longer rejects them; strict deployments that disable the
-  flag keep the legacy errors and codes unchanged.
-- Opaque files reach the model only as an escaped metadata envelope plus a
-  workspace path marker; the agent inspects or converts them with filesystem,
-  shell, or code tools under the active safety tier and approval policy. On
-  platforms without a sandbox backend those tool actions rely on approvals.
+- With `accept_opaque = true` (the default), unknown file types can be uploaded
+  and sent. Disabling it rejects those types at admission.
+- File reads, conversions and edits use the active workspace and sandbox policy.
+  Document readers expose bounded pages, slides, paragraphs or sheet ranges;
+  large files may require several reads. Scanned PDF pages require rendering and
+  image-capable processing; a text extraction does not imply OCR was performed.
+- Uploaded originals are immutable. The first supported edit creates a separate
+  session-owned working file, which subsequent reads and edits reuse after
+  compaction or restart. A fork copies the current edited bytes when policy allows
+  both the source read and destination write. Missing, changed or denied working
+  files remain explicitly unavailable; the original is not silently substituted.
+- Desktop project-file references point to the current project file rather than
+  an uploaded snapshot. Every use, including queued execution, checks the current
+  workspace binding and file permissions. Selecting a file grants no extra access.
+- When known context capacity is exhausted by older history, attachment admission
+  can compact that history once and retry with a fresh budget, including images.
+  Unknown capacity, a failed compaction, or new material that cannot fit still
+  produces an explicit admission failure.
+
+The WebUI and Desktop composer can recover unsent attachments from local browser
+storage when IndexedDB is available. Drafts are scoped to the authenticated
+Gateway/account or verified Desktop profile and conversation. They expire 24 hours
+after their latest save and allow at most 10 items and 60 MiB per draft, with a
+120 MiB aggregate limit across at most 20 drafts. Storage or quota failures are
+reported in the composer. An expired staged upload can be re-uploaded only when
+the draft retained its file bytes; otherwise the user must select it again.
+Native file-selection capabilities are never saved in drafts. Removing a draft
+only removes the unsent selection, not accepted or queued attachment material.
 
 ## Memory Configuration
 
@@ -517,15 +558,31 @@ turn, active-time, and token totals. Goal mode does not replay a failed or timed
 out whole turn: tools may already have produced side effects. Provider/core
 request retries remain governed by their existing policies.
 
-An execution lease belongs to the subscribed Web UI or CLI connection that
-started or resumed the Goal. Losing that client connection detaches the lease:
-the Goal stays active, its current accepted turn may finish, and no new
-automatic continuation starts until an authorized client reattaches. A Web UI
-refresh reattaches with a tab-local continuity token; an explicit takeover is
-available when that token was lost. Disabling execution or restarting the
-Gateway still pauses unattended work. Read the complete workflow, state model,
-Plan-mode interaction, upgrade notes, and recovery guidance in
-[`goal-mode.md`](goal-mode.md).
+Goal token budgets are disabled by default and are configured per Goal with
+optional `tokenBudget`, not through a global TOML ceiling. Budget usage is
+`max(0, input_tokens - cache_read_tokens) + output_tokens`, counted once per
+physical root/descendant request at finalization, including late receipts.
+Upgraded Goals can set a budget for usage recorded after the accounting boundary;
+earlier incomplete history is not included. Missing receipts within the current
+accounting period prevent setting a budget or resuming a budgeted Goal.
+Snapshots expose `usageAccountingStartedAtMs`: the creation time for new Goals,
+or the first newly attributed request time for upgraded Goals (`null` until then).
+This boundary does not make an upgraded Goal's earlier history complete.
+Reaching a budget pauses continuation and steers the current task to wrap up;
+already-started requests and safe finalization can exceed it.
+
+The default per-Goal `executionPolicy` is `foreground`: losing the owning Web UI
+or CLI subscription defers continuation until authorized reattachment. Explicit
+`background` execution keeps its process-local authorization across transport
+disconnects and uses the same ordinary task scheduler, sandbox and approval
+checks. Both policies pause on Gateway restart and require explicit resume.
+Questions and approvals keep their existing task while releasing its compute
+slot; they never authorize another automatic Goal turn. Natural create, edit
+and resume controls reuse the current task. Progress uses ordinary `update_plan`.
+Three proven empty automatic turns pause rather than loop indefinitely.
+
+Read the complete workflow, coverage semantics, state model, Plan interaction
+and recovery guidance in [`goal-mode.md`](goal-mode.md).
 
 ## Raw Config Editing
 

@@ -146,3 +146,75 @@ describe('ChatComposer image-send guard', () => {
     app.unmount()
   })
 })
+
+describe('ChatComposer selected skill queue controls', () => {
+  const selectedSkills = [{ name: 'synthetic-table', instanceId: 'instance-a', digest: 'digest-a' }]
+
+  async function mountBusyComposer(overrides: Record<string, unknown> = {}) {
+    const onSend = vi.fn()
+    const onStop = vi.fn()
+    const el = document.createElement('div')
+    document.body.appendChild(el)
+    const app = createApp(ChatComposer, {
+      ...BASE_PROPS,
+      selectedSkills,
+      isStreaming: true,
+      canStop: true,
+      busySendMode: 'steer',
+      sendButtonTitle: 'Steer the current response',
+      onSend,
+      onStop,
+      ...overrides,
+    })
+    app.use(i18n)
+    app.mount(el)
+    await nextTick()
+    return { app, el, onSend, onStop }
+  }
+
+  it('allows a busy skill draft to send to the queue and keeps Stop available', async () => {
+    const { app, el, onSend, onStop } = await mountBusyComposer()
+    const send = el.querySelector<HTMLButtonElement>('.chat-send-btn.btn--primary')
+    const stop = el.querySelector<HTMLButtonElement>('.chat-send-btn.btn--danger')
+    expect(send?.disabled).toBe(false)
+    expect(send?.title).toBe(i18n.global.t('chat.sendQueues'))
+    expect(stop?.disabled).toBe(false)
+    send?.click()
+    expect(onSend).toHaveBeenCalledOnce()
+    expect(onStop).not.toHaveBeenCalled()
+    stop?.click()
+    expect(onStop).toHaveBeenCalledOnce()
+    app.unmount()
+  })
+
+  it.each([
+    { sendPending: true },
+    { sessionRoutingBusy: true },
+    { inputDisabled: true },
+    { sendBlockedMessage: 'Synthetic send restriction' },
+  ])('preserves Stop while the skill queue send is blocked: %j', async overrides => {
+    const { app, el, onSend, onStop } = await mountBusyComposer(overrides)
+    const send = el.querySelector<HTMLButtonElement>('.chat-send-btn.btn--primary')
+    const stop = el.querySelector<HTMLButtonElement>('.chat-send-btn.btn--danger')
+    expect(send?.disabled).toBe(true)
+    send?.click()
+    expect(onSend).not.toHaveBeenCalled()
+    expect(stop?.disabled).toBe(false)
+    stop?.click()
+    expect(onStop).toHaveBeenCalledOnce()
+    app.unmount()
+  })
+
+  it.each([
+    { selectedSkills: [] },
+    { modelValue: '', hasSendContent: false },
+    { stopTargetsPlanRun: true },
+    { replanActive: true },
+  ])('retains the existing stop-only controls outside skill queue input: %j', async overrides => {
+    const { app, el, onStop } = await mountBusyComposer(overrides)
+    expect(el.querySelector('.chat-send-btn.btn--primary')).toBeNull()
+    el.querySelector<HTMLButtonElement>('.chat-send-btn.btn--danger')?.click()
+    expect(onStop).toHaveBeenCalledOnce()
+    app.unmount()
+  })
+})

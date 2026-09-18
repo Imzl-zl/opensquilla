@@ -97,6 +97,9 @@ def test_document_probe_rejects_invalid_pdf(tmp_path: Path) -> None:
     assert "document extraction or image rendering failed" in result.stderr
 
 
+# Fresh-profile migrations and a real stdio server share the runner's process
+# and disk budget. Keep the startup deadline independent of parallel test load.
+@pytest.mark.ci_serial
 def test_mcp_probe_uses_real_stdio_server_and_gateway(tmp_path: Path) -> None:
     pytest.importorskip("mcp")
     environment = isolated_environment(tmp_path)

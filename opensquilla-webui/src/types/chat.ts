@@ -56,6 +56,15 @@ export interface ApprovalStatusPayload {
 export type AssistantDelivery = 'visible' | 'suppressed'
 export type AssistantSuppressionReason = 'no_reply' | 'heartbeat_ack'
 
+/** A live project file, revalidated against its bound workspace on every use. */
+export interface WorkspaceFileReference {
+  workspaceId: string
+  relativePath: string
+  name: string
+  mime: string
+  size?: number
+}
+
 export interface ChatSendAttachmentPayload {
   type: string
   mime: string
@@ -84,7 +93,7 @@ export interface SessionSteerV2Params {
 }
 
 export interface Attachment {
-  kind: 'inline' | 'staged' | 'inline_pending' | 'uploading' | 'failed'
+  kind: 'inline' | 'staged' | 'workspace' | 'inline_pending' | 'uploading' | 'failed'
   local_id: number
   name: string
   mime: string
@@ -96,11 +105,13 @@ export interface Attachment {
   ttl_seconds?: number
   error?: string
   file?: File
+  workspaceFile?: WorkspaceFileReference
   /** Server-owned bytes restored from the durable pending-input queue. */
   durable_material?: true
 }
 
 export interface DisplayAttachment {
+  workspaceFile?: WorkspaceFileReference
   kind: 'inline' | 'staged' | 'file'
   displayId: string
   renderKey: string
@@ -148,6 +159,7 @@ export interface ChatPendingItem {
   draftIds?: string[]
   /** Upgrade recovery requires the user to select the page again before sending. */
   retiredAnnotationInput?: boolean
+  selectedSkills?: import('./selectedSkills').SelectedSkillRef[]
   pageContext?: import('./pageContext').ChatPageContext
   attachments: Attachment[]
   intent: string | null
@@ -722,6 +734,7 @@ export interface ChatMessage {
   planRevisions?: import('./plans').PlanRevisionSnapshot[]
   timeline?: ChatTimelineSegment[]
   attachments?: DisplayAttachment[]
+  selectedSkills?: import('./selectedSkills').SelectedSkillRef[]
   promptAnnotations?: PromptAnnotationSnapshot[]
   provenanceKind?: string
   provenanceSourceSessionKey?: string
@@ -809,6 +822,7 @@ export interface ChatRenderedMessage {
   id?: string
   clientId?: string
   sourceIndex?: number
+  skillLoads?: import('./skillLoads').SkillLoadReceipt[]
   role: string
   displayRole: string
   roleLabel: string
@@ -835,6 +849,7 @@ export interface ChatRenderedMessage {
   turnOutcome?: ChatTurnOutcome
   hasAttachments?: boolean
   attachments?: DisplayAttachment[]
+  selectedSkills?: import('./selectedSkills').SelectedSkillRef[]
   promptAnnotations?: PromptAnnotationSnapshot[]
   /** Explicit placement for successful sessions_spawn cards. An empty array
    *  suppresses the source card after it is rehomed below the parent reply. */

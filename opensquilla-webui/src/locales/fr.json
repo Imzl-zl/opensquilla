@@ -3236,6 +3236,15 @@
       "add": "Ajouter"
     },
     "skillDetail": {
+      "allowUse": "Allow use",
+      "allowUseHelp": "Applies to every skill with this name. Dependencies are installed separately.",
+      "enable": "Allow use",
+      "disable": "Disable use",
+      "saving": "Saving…",
+      "enabledSaved": "Skill use allowed.",
+      "disabledSaved": "Skill use disabled.",
+      "refreshPending": "Saved, but live refresh failed. Restart the Gateway before using this skill.",
+      "disabledContent": "Use is disabled. Allow use to read the skill instructions.",
       "dialogLabel": "Détails de la compétence : {name}",
       "triggers": "Déclencheurs",
       "composition": "Composition ({kind}, {count} sous-compétences)",
@@ -3633,6 +3642,94 @@
     }
   },
   "chat": {
+    "skillPalette": {
+      "title": "Commands and skills",
+      "command": "Commands",
+      "skill": "Skills",
+      "meta": "Workflows",
+      "empty": "No matching commands or skills",
+      "loading": "Loading skills…",
+      "autoHint": "Défiler ou rechercher par nom · Sélection automatique des compétences",
+      "upgrade": "Update the Gateway to select skills for a message.",
+      "loadFailed": "Skills could not be loaded. Close and reopen the menu to retry.",
+      "disabled": "Disabled · Manage",
+      "needsSetup": "Needs setup · Manage",
+      "manualOnly": "Manual use only",
+      "thisMessage": "This message",
+      "remove": "Remove {name} from this message",
+      "queuedHint": "This message will run after the current task.",
+      "limit": "Select up to 16 skills per message.",
+      "metaTextOnly": "This workflow accepts text. Keep attachments and selected skills in a separate message.",
+      "commandAtStart": "Use this command at the start of a message.",
+      "usage": "Usage: {tokens} tokens",
+      "usageFailed": "Unable to load usage. Try again.",
+      "workflowTitle": "Start {name}",
+      "workflowRequest": "What would you like this workflow to do?",
+      "loaded": "Loaded",
+      "failed": "Load failed",
+      "loadingSkill": "Loading",
+      "user": "User selected",
+      "auto": "Automatic",
+      "selected": "Selected",
+      "unsupported": "Update the Gateway before sending a message with selected skills.",
+      "continue": "Continue",
+      "commandWithSkills": "Selected skills apply to a chat message. Remove the skill labels before running a command.",
+      "commandDescriptions": {
+        "new": "Démarrer une discussion",
+        "compact": "Réduire le contexte actuel",
+        "goal": "Définir un objectif durable",
+        "meta": "Choisir un workflow",
+        "plan": "Planifier la tâche en cours",
+        "reset": "Réinitialiser la discussion",
+        "usage": "Voir les tokens utilisés"
+      },
+      "items": {
+        "xlsx": {
+          "name": "Excel spreadsheets",
+          "description": "Create, edit, and analyze spreadsheets"
+        },
+        "docx": {
+          "name": "Word documents",
+          "description": "Create and edit documents"
+        },
+        "pptx": {
+          "name": "PowerPoint slides",
+          "description": "Create and edit presentations"
+        },
+        "pdf": {
+          "name": "PDF tools",
+          "description": "Read, merge, and edit PDFs"
+        },
+        "github": {
+          "name": "GitHub",
+          "description": "Work with issues and pull requests"
+        },
+        "html": {
+          "name": "Web pages",
+          "description": "Build and edit HTML pages"
+        },
+        "webpage": {
+          "name": "Website builder",
+          "description": "Build a complete website"
+        },
+        "kidsProject": {
+          "name": "Kids’ projects",
+          "description": "Plan a creative project for children"
+        },
+        "shortDrama": {
+          "name": "Short drama",
+          "description": "Turn an idea into a video"
+        },
+        "skillCreator": {
+          "name": "Workflow builder",
+          "description": "Combine skills into a workflow"
+        },
+        "paperWriting": {
+          "name": "Academic writing",
+          "description": "Research and draft a paper"
+        }
+      }
+    },
     "sessionCreated": {
       "title": "Discussion créée",
       "open": "Ouvrir la discussion",
@@ -3693,6 +3790,10 @@
     "aiGeneratedLabel": "Contenu généré par l’IA, fourni à titre indicatif.",
     "removeAttachment": "Supprimer la pièce jointe",
     "remove": "Supprimer",
+    "projectFileTarget": "Fichier du projet : {path}",
+    "importedFileTarget": "Copie importée",
+    "projectFileLiveTarget": "Fichier actuel du projet : {path}",
+    "importedFileWorkingTarget": "Fichier importé ; modifications dans une copie de travail",
     "fileLabel": "Fichier",
     "add": "Ajouter",
     "attachFiles": "Joindre des fichiers",
@@ -4068,6 +4169,8 @@
       }
     },
     "plan": {
+      "hidePlan": "Masquer le plan",
+      "showPlan": "Afficher le plan",
       "label": "Plan",
       "process": "Processus de planification",
       "revision": "Révision {id}",
@@ -4120,7 +4223,7 @@
     },
     "planMode": {
       "label": "Mode plan",
-      "readOnly": "L’agent effectue des recherches et propose un plan sans modifier les fichiers.",
+      "readOnly": "Étudier et discuter du plan avant sa mise en œuvre. Les tests et compilations restent soumis aux autorisations habituelles.",
       "nextTurn": "S’applique au prochain tour",
       "updating": "Mise à jour…",
       "turnOff": "Désactiver le mode plan",
@@ -4166,6 +4269,26 @@
       }
     },
     "goal": {
+      "settings": "Paramètres de l’objectif",
+      "tokenBudget": "Budget de tokens",
+      "noTokenBudget": "Sans limite de tokens",
+      "invalidTokenBudget": "Saisissez un entier positif.",
+      "partialUsageHistory": "L’utilisation antérieure est incomplète et n’est pas comptabilisée dans le budget de tokens.",
+      "pendingUsageReceipts": "En attente des relevés d’utilisation. Reprenez l’objectif une fois l’utilisation complète.",
+      "usageReceiptsRecovered": "Les relevés d’utilisation sont complets. Reprenez l’objectif lorsque vous êtes prêt.",
+      "usageAccountingSince": "Le budget de tokens comptabilise l’utilisation enregistrée depuis le {time}.",
+      "usageAccountingPending": "La comptabilisation du budget commence avec la prochaine requête au modèle.",
+      "usageCoverageUnavailable": "Le suivi de l’utilisation est indisponible. Aucun budget de tokens ne peut être défini.",
+      "settingsNotConfirmed": "Cette connexion n’a pas confirmé la prise en charge des réglages sélectionnés. Vos modifications n’ont pas été appliquées et sont conservées pour réessayer.",
+      "emptyContinuations": "En pause après plusieurs tours sans résultat ni utilisation d’outil. Vérifiez l’objectif et reprenez lorsque vous êtes prêt.",
+      "removeTokenBudget": "Supprimer le budget de tokens",
+      "executionPolicy": "Poursuivre l’exécution",
+      "foreground": "Pendant la connexion",
+      "background": "En arrière-plan",
+      "backgroundHint": "Continue après déconnexion. Un redémarrage du serveur met l’objectif en pause.",
+      "backgroundActive": "Arrière-plan",
+      "tokenBudgetReached": "Budget de tokens atteint",
+      "tokenBudgetUsage": "{used} / {budget} tokens",
       "placeholder": "Décrivez l'objectif puis envoyez pour commencer à y travailler",
       "modeLabel": "Mode objectif",
       "modeDescription": "Démarrer un objectif de longue durée",

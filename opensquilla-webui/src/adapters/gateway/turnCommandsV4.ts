@@ -1,3 +1,5 @@
+import { copySelectedSkills, isSelectedSkills } from '@/types/selectedSkills'
+import { SKILLS_CANDIDATES_METHOD } from '@/contracts/generated/v4/skillsCandidates'
 import { normalizePageContext } from '@/types/pageContext'
 import type { TransportCallOptions as RpcCallOptions } from './transportTypes'
 import { readTransportFailure } from './transportTypes'
@@ -336,6 +338,7 @@ export function toWireSendParams(request: TurnSendParams): Record<string, unknow
     clientRequestId,
     clientMessageId,
     pageContext,
+    selectedSkills,
     promptAnnotationIds: retiredAnnotationIds,
     documentContext: retiredDocumentContext,
     source,
@@ -346,6 +349,7 @@ export function toWireSendParams(request: TurnSendParams): Record<string, unknow
     forkBeforeMessageId,
     displayText,
     attachments,
+    workspaceFiles,
     queueMode,
     // Legacy aliases can exist in handoff WAL records written by an older
     // client. They are removed when a canonical value is present below, but
@@ -370,11 +374,15 @@ export function toWireSendParams(request: TurnSendParams): Record<string, unknow
     || [retiredAnnotationIds, retiredLegacyAnnotationIds].some(value => Array.isArray(value) && value.length > 0)) {
     throw new TurnCommandError('rejected', 'Reopen the page and send its annotations again.', 'DOCUMENT_EDITING_RETIRED', false)
   }
+  if (selectedSkills !== undefined && !isSelectedSkills(selectedSkills)) {
+    throw new TurnCommandError('rejected', 'Invalid selected skill references.', 'INVALID_REQUEST', false)
+  }
   const context = normalizePageContext(pageContext ?? legacyPageContext)
 
   return {
     ...extensions,
     message,
+    ...(selectedSkills?.length ? { selectedSkills: copySelectedSkills(selectedSkills) } : {}),
     ...(sessionKey !== undefined
       ? { sessionKey }
       : legacySessionKey !== undefined
@@ -425,6 +433,7 @@ export function toWireSendParams(request: TurnSendParams): Record<string, unknow
         ? { display_text: legacyDisplayText }
         : {}),
     ...(attachments !== undefined ? { attachments } : {}),
+    ...(workspaceFiles !== undefined ? { workspaceFiles } : {}),
     ...(queueMode !== undefined ? { queueMode } : {}),
   }
 }
@@ -525,6 +534,10 @@ export function createV4TurnCommands(transport: TurnCommandsTransport): TurnComm
       request: TurnSendRequest,
       options?: TurnCommandRequestOptions,
     ): Promise<TurnSendResponse> => {
+      if (request.kind === 'new-turn' && request.params.selectedSkills?.length
+        && !hasRpcMethod(SKILLS_CANDIDATES_METHOD)) {
+        throw new TurnCommandError('unavailable', 'Update the Gateway to use selected skills.', 'EXPLICIT_SKILLS_UNSUPPORTED', false)
+      }
       if (request.kind === 'pending-input') {
         const params = request.params as unknown as SessionsPendingInputsDispatchParams
         return forwardContract<SessionsPendingInputsDispatchResult>(
@@ -584,6 +597,7 @@ export function createV4TurnCommands(transport: TurnCommandsTransport): TurnComm
     },
 
     supports: (capability: TurnCommandCapability): boolean => {
+      if (capability === 'explicit-skills') return hasRpcMethod(SKILLS_CANDIDATES_METHOD)
       if (capability === 'same-turn-steer') return hasRpcMethod(SESSIONS_STEER_V2_METHOD)
       return hasRpcMethod(SESSIONS_PENDING_INPUTS_STEER_METHOD)
     },

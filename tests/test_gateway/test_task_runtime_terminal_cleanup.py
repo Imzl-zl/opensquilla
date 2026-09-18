@@ -15,6 +15,7 @@ import gc
 import inspect
 import json
 import tracemalloc
+import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
@@ -372,7 +373,10 @@ async def _make_durable_plan_run(
 
 
 @pytest.mark.asyncio
-async def test_plan_run_is_running_only_during_its_execution_turn() -> None:
+@pytest.mark.parametrize("storage_busy", [False, True])
+async def test_plan_run_is_running_only_during_its_execution_turn(
+    storage_busy: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     session_key = "agent-1::plan-runtime"
     task_id = "task-plan-runtime"
     storage, run = await _make_durable_plan_run(
@@ -383,7 +387,9 @@ async def test_plan_run_is_running_only_during_its_execution_turn() -> None:
     entered = asyncio.Event()
     release = asyncio.Event()
     observed_statuses: list[str] = []
+    terminal_plan_statuses: list[str] = []
     events: list[tuple[str, str, dict[str, Any]]] = []
+    gate_held = False
 
     async def _handler(_run: Any) -> None:
         current = await storage.get_plan_run(run.run_id)
@@ -393,7 +399,15 @@ async def test_plan_run_is_running_only_during_its_execution_turn() -> None:
         await release.wait()
 
     async def _emit(session: str, name: str, payload: dict[str, Any]) -> None:
+        nonlocal gate_held
         events.append((session, name, payload))
+        if name == "task.succeeded":
+            if gate_held:
+                storage._operation_lock.release()
+                gate_held = False
+            current = await storage.get_plan_run(run.run_id)
+            assert current is not None
+            terminal_plan_statuses.append(current.status)
 
     rt = TaskRuntime(storage=storage, turn_handler=_handler, event_emitter=_emit)
     envelope = replace(
@@ -406,21 +420,42 @@ async def test_plan_run_is_running_only_during_its_execution_turn() -> None:
     running = await storage.get_plan_run(run.run_id)
     assert running is not None
     assert running.status == "running"
-    assert running.current_step_id == "inspect"
-    assert running.step_states[0]["status"] == "in_progress"
+    assert running.current_step_id is None
+    assert all(step["status"] == "pending" for step in running.step_states)
     assert observed_statuses == ["running"]
 
+    if storage_busy:
+        storage._busy_budget_seconds = 0.02
+        original_settle = storage.settle_agent_task
+        blocked_once = False
+
+        async def settle_with_busy_writer(task_id: str, **fields: Any) -> Any:
+            nonlocal gate_held, blocked_once
+            if not blocked_once:
+                await storage._operation_lock.acquire()
+                gate_held = blocked_once = True
+            return await original_settle(task_id, **fields)
+
+        monkeypatch.setattr(storage, "settle_agent_task", settle_with_busy_writer)
     release.set()
-    await rt.wait(handle.task_id, timeout=2.0)
-    paused = await storage.get_plan_run(run.run_id)
-    assert paused is not None
-    assert paused.status == "paused"
-    assert paused.active_task_id is None
+    try:
+        await rt.wait(handle.task_id, timeout=2.0)
+    finally:
+        if gate_held:
+            storage._operation_lock.release()
+            gate_held = False
+        await rt.shutdown(timeout=2)
+    completed = await storage.get_plan_run(run.run_id)
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.active_task_id is None
+    assert all(step["status"] == "pending" for step in completed.step_states)
+    assert terminal_plan_statuses == (["running"] if storage_busy else ["completed"])
     assert [
         payload["plan_run"]["status"]
         for _session, name, payload in events
         if name == "session.event.plan_run"
-    ] == ["running", "paused"]
+    ] == ["running", "completed"]
     await storage.close()
 
 
@@ -438,20 +473,11 @@ async def test_plan_run_completes_only_after_owning_task_succeeds() -> None:
     async def _handler(_run: Any) -> None:
         current = await storage.get_plan_run(run.run_id)
         assert current is not None
-        advanced = await storage.checkpoint_plan_run(
-            run.run_id,
-            expected_state_revision=current.state_revision,
-            expected_active_task_id=task_id,
-            step_id="inspect",
-            step_status="completed",
-        )
-        final_checkpoint = await storage.checkpoint_plan_run(
-            run.run_id,
-            expected_state_revision=advanced.state_revision,
-            expected_active_task_id=task_id,
-            step_id="implement",
-            step_status="completed",
-        )
+        await _run.envelope.runtime_services["update_progress"]([
+            {"step": "Inspect", "status": "completed"},
+            {"step": "Implement", "status": "completed"},
+        ])
+        final_checkpoint = await storage.get_plan_run(run.run_id)
         observed_after_final_checkpoint.append(
             (
                 final_checkpoint.status,
@@ -483,7 +509,7 @@ async def test_plan_run_completes_only_after_owning_task_succeeds() -> None:
 
 
 @pytest.mark.asyncio
-async def test_failed_delivery_after_final_checkpoint_remains_resumable() -> None:
+async def test_failed_delivery_after_completed_progress_remains_resumable() -> None:
     session_key = "agent-1::plan-runtime-delivery-failure"
     task_id = "task-plan-runtime-delivery-failure"
     storage, run = await _make_durable_plan_run(
@@ -495,20 +521,11 @@ async def test_failed_delivery_after_final_checkpoint_remains_resumable() -> Non
     async def _handler(_run: Any) -> None:
         current = await storage.get_plan_run(run.run_id)
         assert current is not None
-        advanced = await storage.checkpoint_plan_run(
-            run.run_id,
-            expected_state_revision=current.state_revision,
-            expected_active_task_id=task_id,
-            step_id="inspect",
-            step_status="completed",
-        )
-        final_checkpoint = await storage.checkpoint_plan_run(
-            run.run_id,
-            expected_state_revision=advanced.state_revision,
-            expected_active_task_id=task_id,
-            step_id="implement",
-            step_status="completed",
-        )
+        await _run.envelope.runtime_services["update_progress"]([
+            {"step": "Inspect", "status": "completed"},
+            {"step": "Implement", "status": "completed"},
+        ])
+        final_checkpoint = await storage.get_plan_run(run.run_id)
         assert final_checkpoint.status == "running"
         assert final_checkpoint.current_step_id is None
         raise RuntimeError("artifact delivery failed")
@@ -539,7 +556,7 @@ async def test_failed_delivery_after_final_checkpoint_remains_resumable() -> Non
 
 
 @pytest.mark.asyncio
-async def test_goal_owned_plan_run_yields_for_later_driver_attempt() -> None:
+async def test_goal_owned_plan_run_projects_success_without_checkpoint() -> None:
     session_key = "agent-1::goal-plan-runtime"
     task_id = "task-goal-plan-runtime"
     storage, run = await _make_durable_plan_run(
@@ -569,15 +586,15 @@ async def test_goal_owned_plan_run_yields_for_later_driver_attempt() -> None:
     )
 
     task = await runtime.wait(handle.task_id, timeout=2.0)
-    paused = await storage.get_plan_run(run.run_id)
+    completed = await storage.get_plan_run(run.run_id)
 
     assert str(task.status) == "succeeded"
-    assert paused is not None
-    assert paused.status == "paused"
-    assert paused.driver_kind == "goal"
-    assert paused.driver_id == "goal-1"
-    assert paused.pause_reason == "goal_turn_finished"
-    assert paused.active_task_id is None
+    assert completed is not None
+    assert completed.status == "completed"
+    assert completed.driver_kind == "goal"
+    assert completed.driver_id == "goal-1"
+    assert completed.pause_reason is None
+    assert completed.active_task_id is None
     await storage.close()
 
 
@@ -591,18 +608,26 @@ async def test_resumed_plan_run_progress_is_injected_into_provider_prompt() -> N
         run_id="run-plan-resume",
         task_id=first_task_id,
     )
+    await storage.create_agent_task(AgentTaskRecord(
+        task_id=first_task_id,
+        session_key=session_key,
+        status=AgentTaskStatus.RUNNING,
+        details={"metadata": {"plan_run_id": run.run_id}},
+    ))
     running = await storage.mark_plan_run_running(
         run.run_id,
         expected_state_revision=run.state_revision,
         active_task_id=first_task_id,
     )
-    advanced = await storage.checkpoint_plan_run(
-        run.run_id,
-        expected_state_revision=running.state_revision,
-        expected_active_task_id=first_task_id,
-        step_id="inspect",
-        step_status="completed",
+    await storage.update_task_progress(
+        first_task_id, session_key=running.session_key, session_id=running.session_id,
+        session_epoch=running.session_epoch,
+        steps=[
+            {"step": "Inspect", "status": "completed"},
+            {"step": "Implement", "status": "pending"},
+        ],
     )
+    advanced = await storage.get_plan_run(run.run_id)
     paused = await storage.pause_plan_run(
         run.run_id,
         expected_state_revision=advanced.state_revision,
@@ -636,14 +661,14 @@ async def test_resumed_plan_run_progress_is_injected_into_provider_prompt() -> N
     )
     await runtime.wait(handle.task_id, timeout=2.0)
 
-    progress = captured_context["PlanRun Progress"]
-    payload = json.loads(progress[progress.index("{") :])
+    progress = captured_context["Previous Plan Progress"]
+    reference = ET.fromstring(progress)
+    assert reference.tag == "untrusted"
+    assert reference.attrib == {"source": "plan_progress"}
+    payload = json.loads(reference.text or "")
     assert payload["runId"] == run.run_id
-    assert payload["currentStepId"] == "implement"
-    assert payload["steps"] == [
-        {"stepId": "inspect", "status": "completed"},
-        {"stepId": "implement", "status": "in_progress"},
-    ]
+    assert payload["currentStepId"] is None
+    assert [step["status"] for step in payload["steps"]] == ["completed", "pending"]
     await storage.close()
 
 

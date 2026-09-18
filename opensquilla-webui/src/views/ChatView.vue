@@ -203,6 +203,9 @@
           :fork-busy="forkInFlight"
           :plan-action-pending="planCardPendingAction"
           :plan-actions-disabled="planActionsDisabled"
+          :plan-presentations="planPresentations"
+          :plan-presentation-available="planPresentationAvailable"
+          :plan-presentation-pending="planPresentationPending"
           :is-streaming="isStreaming"
           :follow-live-edge="autoScroll"
           :scroll-epoch="scrollEpoch"
@@ -234,6 +237,7 @@
           @plan-implement-current="implementCurrentPlan"
           @plan-implement-new="implementPlanInNewTask"
           @plan-replan="beginPlanRevision"
+          @plan-presentation-change="chatPlans.setPresentation"
           @goal-clear="clearGoal"
         >
           <template #router-strip="{ message: msg }">
@@ -285,9 +289,13 @@
           :plan="currentPlan"
           :disabled="planActionsDisabled"
           :pending-action="planCardPendingAction"
+          :dismissed="planPresentations[currentPlan.revisionId]?.dismissed"
+          :presentation-available="planPresentationAvailable"
+          :presentation-busy="Boolean(planPresentationPending)"
           @implement-current="implementCurrentPlan"
           @implement-new="implementPlanInNewTask"
           @replan="beginPlanRevision"
+          @presentation-change="chatPlans.setPresentation"
         />
 
         <!-- MetaSkill run cards: preflight checkpoint + progress ribbon,
@@ -307,6 +315,8 @@
             @chip-select="metaRuns.onChipSelect"
           />
         </template>
+
+        <SkillLoadStatus v-if="isStreaming" standalone :receipts="liveSkillLoads[activeStreamTaskId] || []" />
 
         <!-- Streaming AI message: activity stays open while the turn is live.
              Gateway-marked intermediate text remains in the transcript, while
@@ -523,6 +533,22 @@
     </Transition>
     <!-- Long-running goal progress lives in the same dock as plan execution so
          the active objective stays visible above the composer across turns. -->
+    <div
+      v-if="ordinaryTaskProgress && !executionDockRun && !activeGoalRun"
+      class="task-progress-dock"
+      :data-task-progress-id="taskProgress.taskId.value"
+    >
+      <ExecutionProgress :progress="ordinaryTaskProgress" />
+    </div>
+    <details v-if="goalDraftArmed && !shareMode && (goalTokenBudgetSupported || goalBackgroundExecutionSupported)" class="goal-draft-settings">
+      <summary>{{ t('chat.goal.settings') }}</summary>
+      <GoalExecutionSettings
+        v-model="goalDraftSettings"
+        :disabled="goalBusy"
+        :token-budget-supported="goalTokenBudgetSupported"
+        :background-execution-supported="goalBackgroundExecutionSupported"
+      />
+    </details>
     <Transition name="goal-run-dock">
       <div v-if="activeGoalRun" ref="goalRunDockRef" class="goal-run-dock">
         <GoalRibbon
@@ -532,6 +558,9 @@
           :plan-mode-active="initialCollaborationMode === 'plan'"
           :connection-takeover-available="goalConnectionTakeoverAvailable"
           :reattaching="goalReattaching"
+          :token-budget-supported="goalTokenBudgetSupported"
+          :background-execution-supported="goalBackgroundExecutionSupported"
+          @edit-open="prepareGoalExecutionSettings"
           @edit="editGoalFromRibbon"
           @pause="pauseGoal"
           @resume="resumeGoal"
@@ -556,23 +585,12 @@
         <span>{{ t('chat.latest') }}</span>
       </button>
     </Transition>
-    <!-- Slash command menu -->
-    <div v-if="slashOpen" ref="slashMenuRef" class="chat-slash">
-      <div
-        v-for="(cmd, i) in filteredSlashCmds"
-        :key="cmd.cmd"
-        class="chat-slash-item"
-        :class="{ 'chat-slash-item--active': i === slashIdx }"
-        @click="completeSlashCmd(cmd)"
-      >
-        <span class="chat-slash-cmd">{{ cmd.cmd }}</span>
-        <span
-          v-if="cmd.metaStatus === 'needs_setup'"
-          class="chat-slash-status"
-        >{{ t('chat.metaRuns.needsSetup') }}</span>
-        <span class="chat-slash-desc" :title="cmd.desc">{{ cmd.desc }}</span>
-      </div>
+    <div v-if="slashOpen" ref="slashMenuRef">
+      <ChatSlashPalette :items="filteredSlashCmds" :active-index="slashIdx"
+        :loading="skillsLoading" :error="skillsError" @choose="completeSlashCmd" />
     </div>
+    <SkillWorkflowRequestDialog v-if="metaDraft" v-model="metaDraft.text" :name="metaDraft.label || metaDraft.name"
+      @cancel="metaDraft = null" @launch="void launchMetaDraft()" />
 
     <PendingQueue
       :items="pendingQueue"
@@ -654,6 +672,7 @@
       :project-binding-busy="projectBindingBusy || sessionHasActiveWork || goalBusy || planModeBusy || modelRoutingSettingsBusy"
       :project-status-message="activeProjectStatusMessage"
       :prompt-annotations="activePromptAnnotations"
+      :selected-skills="selectedSkills"
       :can-close-project="isDraftRoute() && pendingWorkspaceId !== null"
       :can-choose-project="gatewayAccess.canChooseProject"
       :plan-mode-available="planUiAvailable"
@@ -668,12 +687,14 @@
       :collapsed="composerCollapsed && composerFxEnabled && !isNewChatLanding"
       :floating="composerFxEnabled && !isNewChatLanding"
       @expand="expandComposer"
-      @composition-change="composing = $event"
+      @composition-change="composing = $event; !$event && handleSlashInput()"
       @beforeinput="onTextareaBeforeInput"
+      :choose-attachments="chooseAttachments"
       @file-change="onFileInputChange"
       @input="onTextareaInput"
       @keydown="onTextareaKeydown"
       @remove-attachment="removeAttachment"
+      @remove-skill="selectedSkills = selectedSkills.filter(skill => skill.instanceId !== $event)"
       @retry-attachment="retryAttachment"
       @preview-image="previewPendingImage"
       @set-busy-send-mode="busySendMode = $event"
@@ -817,6 +838,10 @@ import MetaPreflightCard from '@/components/chat/MetaPreflightCard.vue'
 import MetaRibbon from '@/components/chat/MetaRibbon.vue'
 import MetaSkillSetupCard from '@/components/chat/MetaSkillSetupCard.vue'
 import GoalRibbon from '@/components/chat/GoalRibbon.vue'
+import GoalExecutionSettings from '@/components/chat/GoalExecutionSettings.vue'
+import ExecutionProgress from '@/components/chat/ExecutionProgress.vue'
+import { useChatTaskProgress } from '@/composables/chat/useChatTaskProgress'
+import type { GoalExecutionOptions } from '@/modules/goalCenter'
 import GoalOutcomeNotice from '@/components/chat/GoalOutcomeNotice.vue'
 import PendingQueue from '@/components/chat/PendingQueue.vue'
 import PlanCard from '@/components/chat/PlanCard.vue'
@@ -847,6 +872,12 @@ import { useChatFeatureToggles } from '@/composables/chat/useChatFeatureToggles'
 import { useChatSessionRouting } from '@/composables/chat/useChatSessionRouting'
 import { SESSION_ROUTING_KEY, type SessionRouting } from '@/modules/sessionRouting'
 import { USAGE_REPORTING_KEY, type UsageReporting } from '@/modules/usageReporting'
+import SkillLoadStatus from '@/components/chat/SkillLoadStatus.vue'
+import { mergeSkillLoad, type SkillLoadReceipt } from '@/types/skillLoads'
+import ChatSlashPalette from '@/components/chat/ChatSlashPalette.vue'
+import SkillWorkflowRequestDialog from '@/components/chat/SkillWorkflowRequestDialog.vue'
+import { SKILL_CATALOG_KEY } from '@/modules/skillCatalog'
+import type { SelectedSkillRef } from '@/types/selectedSkills'
 import { COMMAND_CATALOG_KEY, type CommandCatalog } from '@/modules/commandCatalog'
 import { PROMPT_CACHE_LEASE_KEY, type PromptCacheLease } from '@/modules/promptCacheLease'
 import {
@@ -1196,6 +1227,7 @@ const usageReporting: UsageReporting = injectedUsageReporting
 const injectedCommandCatalog = inject(COMMAND_CATALOG_KEY)
 if (!injectedCommandCatalog) throw new Error('CommandCatalog was not provided')
 const commandCatalog: CommandCatalog = injectedCommandCatalog
+const skillCatalog = inject(SKILL_CATALOG_KEY, undefined)
 const injectedPromptCacheLease = inject(PROMPT_CACHE_LEASE_KEY)
 if (!injectedPromptCacheLease) throw new Error('PromptCacheLease was not provided')
 const promptCacheLease: PromptCacheLease = injectedPromptCacheLease
@@ -1462,6 +1494,7 @@ const promptAnnotationDesktopAvailable = computed(() => (
   && platform.capabilities.hasNativeWorkbenchSurfaces === true
 ))
 const inputText = ref('')
+const selectedSkills = ref<SelectedSkillRef[]>([])
 const composerRevision = ref(0)
 const aborted = ref(false)
 const autoScroll = ref(true)
@@ -1578,7 +1611,7 @@ const chatElevatedMode = useChatElevatedMode({
 })
 // Persist the composer draft per session so a refresh / session switch / crash
 // before the backend accepts a send cannot silently lose typed text (issue 248).
-const draftPersistence = useChatDraftPersistence({ sessionKey, inputText })
+const draftPersistence = useChatDraftPersistence({ sessionKey, inputText, selectedSkills })
 const {
   elevatedMode,
   loadElevatedMode,
@@ -1683,6 +1716,10 @@ const activeStreamSessionKey = ref<string>('')
 const acceptanceStopPending = ref(false)
 const acceptanceRecoveryPending = ref(false)
 const taskOwnership = useChatTaskOwnership()
+const taskProgress = useChatTaskProgress({
+  sessionKey, currentEpoch, activeTaskId: taskOwnership.stopTargetTaskId,
+})
+const ordinaryTaskProgress = taskProgress.progress
 const isStopPending = computed(() => (
   Boolean(taskOwnership.stopRequestedTaskId.value)
   || acceptanceStopPending.value
@@ -1827,11 +1864,58 @@ watch(
   available => setStreamConnectionAvailable(available),
   { immediate: true },
 )
-const chatAttachments = useChatAttachments(artifactWorkbench.content)
+const nativeAttachmentSession = ref<{ key: string; epoch: number } | null>(null)
+watch(sessionKey, () => { nativeAttachmentSession.value = null }, { flush: 'sync' })
+const attachmentDraftIdentity = ref<string | null>(null)
+const attachmentDraftIdentityPending = ref(false)
+watch(() => gatewayAccess.deliveryIdentity, async (identity, _previous, onCleanup) => {
+  let current = true
+  onCleanup(() => { current = false })
+  attachmentDraftIdentity.value = null
+  attachmentDraftIdentityPending.value = false
+  if (!identity) return
+  if (platform.id !== 'desktop') { attachmentDraftIdentity.value = identity; return }
+  attachmentDraftIdentityPending.value = true
+  try {
+    const connection = await platform.gateway.getAttachmentBinding?.()
+    if (!current || !gatewayAccess.isLocalOwner || !connection?.profileFingerprint) return
+    // A verified owned profile remains the same draft owner across desktop
+    // restarts; the per-launch native selection secret never enters IndexedDB.
+    attachmentDraftIdentity.value = JSON.stringify(['desktop-profile-v1', connection.profileFingerprint, 'owner'])
+  } catch { /* Identity remains unproven until the next connection update. */ }
+  finally { if (current) attachmentDraftIdentityPending.value = false }
+}, { immediate: true })
+const chatAttachments = useChatAttachments(artifactWorkbench.content, {
+  draftOwnerState: () => [inputText.value, selectedSkills.value],
+  draftScopePending: () => attachmentDraftIdentityPending.value,
+  draftScope: () => attachmentDraftIdentity.value && sessionKey.value
+    ? { identity: attachmentDraftIdentity.value, sessionKey: sessionKey.value } : null,
+  native: platform.files,
+  nativeIsCurrent: context => context.sessionKey === sessionKey.value
+    && nativeAttachmentSession.value?.epoch === context.sessionEpoch,
+  nativeContext: async () => {
+    const targetSession = sessionKey.value
+    const binding = nativeAttachmentSession.value
+    const identity = gatewayAccess.deliveryIdentity
+    // A new task has no durable session identity yet. Its ordinary file input
+    // and byte upload path remain available without minting native authority.
+    if (!targetSession || !binding || binding.key !== targetSession || !platform.gateway.getAttachmentBinding) return null
+    const connection = await platform.gateway.getAttachmentBinding()
+    if (!connection) return null
+    const resolved = await sessionDirectory.resolve({ key: targetSession })
+    if (sessionKey.value !== targetSession || nativeAttachmentSession.value?.epoch !== binding.epoch
+      || gatewayAccess.deliveryIdentity !== identity || resolved.key !== targetSession) {
+      throw new Error('Session changed; select the file again')
+    }
+    return { gatewayInstanceId: connection.instanceId, sessionKey: targetSession,
+      sessionId: resolved.id, sessionEpoch: binding.epoch }
+  },
+})
 const {
   pendingAttachments,
   attachmentWorkBusy,
   onFileInputChange,
+  chooseAttachments,
   addAttachments,
   removeAttachment,
   retireAttachments,
@@ -1840,7 +1924,7 @@ const {
   prepareAttachmentsForSend,
 } = chatAttachments
 watch(
-  [inputText, pendingAttachments],
+  [inputText, pendingAttachments, selectedSkills],
   () => {
     composerRevision.value += 1
   },
@@ -1892,6 +1976,7 @@ let forgetHiddenControlOutbox: (sessionKey: string, clientRequestId: string) => 
 let disarmGoalDraftForMetaRestore: () => void = () => {}
 const pendingInputWal = createPendingInputWal()
 const chatPendingQueue = useChatPendingQueue({
+  selectedSkills,
   sessionKey,
   ownerContext: pendingQueueOwnerContext,
   inputText,
@@ -2282,6 +2367,8 @@ const {
   initialCollaborationMode,
   currentPlan,
   currentPlanRevisionId,
+  planPresentations,
+  presentationPending: planPresentationPending,
   activePlanRun,
   modeBusy: planModeBusy,
   modeAppliesNextTurn: planModeAppliesNextTurn,
@@ -2537,6 +2624,7 @@ const voiceCapability = useSetupStatus<{ audioConfigured?: boolean }>(injectedSe
 const voiceReady = computed(() => voiceCapability.data.value?.audioConfigured === true)
 
 const chatMessageActions = useChatMessageActions({
+  selectedSkills,
   messages,
   inputText,
   isStreaming,
@@ -2649,8 +2737,13 @@ const chatSessionSubscription = useChatSessionSubscription({
   },
   onSessionMissing: markSessionMissing,
   onSnapshot: snapshot => {
+    if (snapshot.sessionKey === sessionKey.value) {
+      nativeAttachmentSession.value = typeof snapshot.epoch === 'number' && Number.isSafeInteger(snapshot.epoch)
+        && snapshot.epoch >= 0 ? { key: snapshot.sessionKey, epoch: snapshot.epoch } : null
+    }
     chatSessionRouting.applyBootstrap(snapshot)
     chatPlans.applyBootstrap(snapshot)
+    taskProgress.applySnapshot(snapshot)
     applyGoalSnapshot(snapshot)
     applyPendingUserInputSnapshot(snapshot)
   },
@@ -2676,6 +2769,7 @@ const chatSessionBootstrap = useChatSessionBootstrap({
   subscribeSession,
   reconcileSession,
   connectionState: gatewayConnectionState,
+  metadataRecoveryError: chatSessionSubscription.metadataRecoveryError,
   cancelHistory: cancelActiveHistory,
   cancelSubscription: cancelActiveSubscription,
 })
@@ -3218,6 +3312,10 @@ const chatGoals = useChatGoals({
 applyGoalSnapshot = snapshot => { chatGoals.applyHydration(snapshot) }
 const {
   draftArmed: goalDraftArmed,
+  draftSettings: goalDraftSettings,
+  tokenBudgetSupported: goalTokenBudgetSupported,
+  backgroundExecutionSupported: goalBackgroundExecutionSupported,
+  prepareExecutionSettings: prepareGoalExecutionSettings,
   goal: currentGoalRun,
   activeGoal: activeGoalRun,
   lastGoal: lastGoalRun,
@@ -3241,10 +3339,11 @@ disarmGoalDraftForMetaRestore = disarmGoalMode
 async function editGoalFromRibbon(
   objective: string,
   settle?: (accepted: boolean) => void,
+  executionOptions?: GoalExecutionOptions,
 ) {
   let accepted = false
   try {
-    accepted = await editGoal(objective)
+    accepted = await editGoal(objective, executionOptions)
     if (accepted) {
       pushToast(t('chat.goal.editNextTurn'), { tone: 'info', duration: 6000 })
     }
@@ -3301,6 +3400,15 @@ const goalOutcomeHasMessageAnchor = computed(() => (
 ))
 
 const chatSlashCommands = useChatSlashCommands({
+  skillCatalog,
+  selectedSkills,
+  getCaret: () => composerRef.value?.composerElement()?.querySelector('textarea')?.selectionStart ?? inputText.value.length,
+  setCaret: (position) => { void nextTick(() => {
+    composerRef.value?.focusTextarea()
+    composerRef.value?.composerElement()?.querySelector('textarea')?.setSelectionRange(position, position)
+  }) },
+  manageSkill: (name) => { void router.push({ path: '/skills', query: { skill: name } }) },
+  hasNonTextInput: () => pendingAttachments.value.length > 0 || activePromptAnnotations.value.length > 0,
   commandCatalog,
   usageReporting,
   sessionMaintenance,
@@ -3354,6 +3462,11 @@ const chatSlashCommands = useChatSlashCommands({
 const {
   slashOpen,
   slashIdx,
+  skillsLoading,
+  skillsError,
+  metaDraft,
+  launchMetaDraft,
+  invalidateSkillCandidates,
   filteredSlashCmds,
   loadSlashCommands,
   handleSlashInput,
@@ -3364,6 +3477,7 @@ const {
   executeSlashCommand,
   restoreDurableMetaDrafts: restoreServerMetaDrafts,
 } = chatSlashCommands
+watch([sessionKey, codingModeEnabled, gatewayConnectionState, () => activeWorkspace.value?.id], invalidateSkillCandidates)
 
 watch([slashIdx, filteredSlashCmds], () => {
   slashMenuRef.value
@@ -3409,6 +3523,9 @@ const {
 resetComposerInputHistory = chatComposerShortcuts.resetInputHistory
 
 const chatSend = useChatSend({
+  selectedSkills,
+  consumeAcceptedDraft: draftPersistence.consumeAcceptedDraft,
+  captureAttachmentDraftConsumption: chatAttachments.captureDraftConsumption,
   metaRunCenter,
   turnCommands: {
     send(request, options) {
@@ -3945,9 +4062,19 @@ function onPlanQuestionnaireTouchEnd() {
   questionnaireTouch = null
 }
 
+const liveSkillLoads = ref<Record<string, SkillLoadReceipt[]>>({})
+watch(sessionKey, () => { liveSkillLoads.value = {} })
 const rpcEventHandlers = useChatRpcEventHandlers({
+  onSkillLoad: (receipt, turnId) => {
+    liveSkillLoads.value[turnId] = mergeSkillLoad(liveSkillLoads.value[turnId] || [], receipt)
+    if (receipt.status === 'failed') invalidateSkillCandidates()
+  },
   onRecoveryRequired: () => { void recoverCurrentSession() },
-  onTaskSettled: (taskId, epoch) => chatPlans.noteTaskSettled(taskId, epoch),
+  onTaskProgress: taskProgress.applyEvent,
+  onTaskSettled: (taskId, epoch) => {
+    chatPlans.noteTaskSettled(taskId, epoch)
+    taskProgress.noteTaskSettled(taskId, epoch)
+  },
   conversationRuntime,
   sessionKey,
   currentEpoch,
@@ -4360,6 +4487,7 @@ let unsubs: (() => void)[] = []
 let chatViewDisposed = false
 let composerDockResizeObserver: ResizeObserver | null = null
 let composerDockPinFrame: number | null = null
+let composerDockSettleFrame: number | null = null
 let lastComposerDockHeight = -1
 let tailResizeObserver: ResizeObserver | null = null
 let tailMutationObserver: MutationObserver | null = null
@@ -4542,6 +4670,9 @@ const composerHasSendContent = computed(() =>
 // contract. Hide Plan rather than claim a read-only turn that would run Default.
 const planUiAvailable = computed(() =>
   planCenter.available('mode'),
+)
+const planPresentationAvailable = computed(() =>
+  !shareMode.value && !forkTransition.value && planCenter.available('presentation'),
 )
 const goalUiAvailable = computed(() => goalCenter.available('goal-mode'))
 const goalComposerExisting = computed(() => (
@@ -5977,6 +6108,9 @@ function onThreadScroll() {
       }
     }
     sessionScrollBaseline = metrics
+    // Landing samples still establish the floating composer's position. The
+    // first reader gesture may arrive before another programmatic event.
+    composerRetraction.syncBaseline(currentScrollTop)
     recordChatScrollDiagnostic(
       scrollMutation?.matched ? 'programmatic' : 'session-switch',
       scrollMutation?.matched ? 'applyProgrammaticScroll' : 'browser-or-user',
@@ -5987,6 +6121,9 @@ function onThreadScroll() {
   }
   const previousScrollTop = scrollMutation?.expectedScrollTop
     ?? lastObservedThreadScrollTop
+  // Chromium may coalesce the application's pin and the first reader scroll.
+  // Use the recorded application position before measuring that gesture.
+  if (scrollMutation) composerRetraction.syncBaseline(scrollMutation.expectedScrollTop)
   lastObservedThreadScrollTop = currentScrollTop
   const gap = el.scrollHeight - el.scrollTop - el.clientHeight
   // Native scrollbar drags and middle-button auto-scroll can produce only a
@@ -6535,6 +6672,7 @@ function scopedDraftFromHistoryState(
     sessionKey: state.draftSessionKey,
     agentId: state.draftAgentId,
     projectId: state.draftProjectId,
+    hasAttachments: state.draftHasAttachments === true,
   }
 }
 
@@ -6544,16 +6682,19 @@ function persistDraftHistoryState() {
     const state = window.history.state as Record<string, unknown> | null
     const agentId = draftAgentId()
     const projectId = readProjectFromUrl()
+    const hasAttachments = pendingAttachments.value.length > 0
     if (
       state?.draftSessionKey === sessionKey.value
       && state.draftAgentId === agentId
       && state.draftProjectId === projectId
+      && state.draftHasAttachments === hasAttachments
     ) return
     window.history.replaceState({
       ...state,
       draftSessionKey: sessionKey.value,
       draftAgentId: agentId,
       draftProjectId: projectId,
+      draftHasAttachments: hasAttachments,
     }, '')
   } catch { /* ignore */ }
 }
@@ -6952,9 +7093,10 @@ onMounted(async () => {
   // exactly enough clearance for the floating surface.
   const composerDock = composerRef.value?.composerElement()?.parentElement ?? null
   if (composerDock && typeof ResizeObserver !== 'undefined') {
+    let reservedHeight = -1
     const publishComposerDockHeight = () => {
       const height = Math.ceil(composerDock.getBoundingClientRect().height)
-      if (height === lastComposerDockHeight) return
+      if (height === lastComposerDockHeight && height === reservedHeight) return
       // Chromium applies a ResizeObserver-driven custom property on the next
       // layout cycle. During expansion, reserve one measured growth step ahead
       // so the dock cannot outgrow the viewport clearance before that cycle.
@@ -6963,7 +7105,17 @@ onMounted(async () => {
         ? 0
         : Math.max(0, height - lastComposerDockHeight)
       lastComposerDockHeight = height
-      chatRootRef.value?.style.setProperty('--composer-dock-h', `${height + growth}px`)
+      reservedHeight = height + growth
+      chatRootRef.value?.style.setProperty('--composer-dock-h', `${reservedHeight}px`)
+      // A batch of attachments can grow the dock in a single layout. Recheck
+      // next frame even if ResizeObserver has no further size change to report,
+      // so the temporary expansion guard does not become a permanent gap.
+      if (growth > 0 && composerDockSettleFrame === null) {
+        composerDockSettleFrame = requestAnimationFrame(() => {
+          composerDockSettleFrame = null
+          publishComposerDockHeight()
+        })
+      }
       if (autoScroll.value && composerDockPinFrame === null) {
         const epoch = scrollEpoch.value
         const key = sessionKey.value
@@ -7101,6 +7253,10 @@ onUnmounted(() => {
     cancelAnimationFrame(composerDockPinFrame)
     composerDockPinFrame = null
   }
+  if (composerDockSettleFrame !== null) {
+    cancelAnimationFrame(composerDockSettleFrame)
+    composerDockSettleFrame = null
+  }
   cancelInitialSessionPin()
   cancelTailLayoutPin()
   tailResizeObserver?.disconnect()
@@ -7228,6 +7384,7 @@ watch(inputText, (value) => {
 
 watch(() => pendingAttachments.value.length, (count) => {
   if (count > 0) markProvisionalDraftUsed()
+  persistDraftHistoryState()
 }, { flush: 'sync' })
 
 watch(() => pendingQueue.value.length, (count) => {
@@ -7435,6 +7592,26 @@ watch(
 <style scoped src="../styles/chat-view.css"></style>
 
 <style scoped>
+.task-progress-dock {
+  width: var(--chat-col, min(calc(100% - 48px), 980px));
+  margin: var(--sp-2) auto;
+  font-size: var(--fs-xs);
+}
+
+.goal-draft-settings {
+  width: var(--chat-col, min(calc(100% - 48px), 980px));
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: var(--sp-2) auto;
+  padding: var(--sp-2);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+.goal-draft-settings summary {
+  min-height: 44px;
+  cursor: pointer;
+}
+
 /* No shared sr-only utility exists in this repo (each component scopes its
    own), so the completion announcer's clip-out lives here: zero visual
    footprint, still exposed to assistive tech. */

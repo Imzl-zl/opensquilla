@@ -3236,6 +3236,15 @@
       "add": "追加"
     },
     "skillDetail": {
+      "allowUse": "Allow use",
+      "allowUseHelp": "Applies to every skill with this name. Dependencies are installed separately.",
+      "enable": "Allow use",
+      "disable": "Disable use",
+      "saving": "Saving…",
+      "enabledSaved": "Skill use allowed.",
+      "disabledSaved": "Skill use disabled.",
+      "refreshPending": "Saved, but live refresh failed. Restart the Gateway before using this skill.",
+      "disabledContent": "Use is disabled. Allow use to read the skill instructions.",
       "dialogLabel": "スキルの詳細: {name}",
       "triggers": "トリガー",
       "composition": "構成（{kind}、{count} 個のサブスキル）",
@@ -3633,6 +3642,94 @@
     }
   },
   "chat": {
+    "skillPalette": {
+      "title": "Commands and skills",
+      "command": "Commands",
+      "skill": "Skills",
+      "meta": "Workflows",
+      "empty": "No matching commands or skills",
+      "loading": "Loading skills…",
+      "autoHint": "スクロールまたは名前で検索 · スキルは自動で選択",
+      "upgrade": "Update the Gateway to select skills for a message.",
+      "loadFailed": "Skills could not be loaded. Close and reopen the menu to retry.",
+      "disabled": "Disabled · Manage",
+      "needsSetup": "Needs setup · Manage",
+      "manualOnly": "Manual use only",
+      "thisMessage": "This message",
+      "remove": "Remove {name} from this message",
+      "queuedHint": "This message will run after the current task.",
+      "limit": "Select up to 16 skills per message.",
+      "metaTextOnly": "This workflow accepts text. Keep attachments and selected skills in a separate message.",
+      "commandAtStart": "Use this command at the start of a message.",
+      "usage": "Usage: {tokens} tokens",
+      "usageFailed": "Unable to load usage. Try again.",
+      "workflowTitle": "Start {name}",
+      "workflowRequest": "What would you like this workflow to do?",
+      "loaded": "Loaded",
+      "failed": "Load failed",
+      "loadingSkill": "Loading",
+      "user": "User selected",
+      "auto": "Automatic",
+      "selected": "Selected",
+      "unsupported": "Update the Gateway before sending a message with selected skills.",
+      "continue": "Continue",
+      "commandWithSkills": "Selected skills apply to a chat message. Remove the skill labels before running a command.",
+      "commandDescriptions": {
+        "new": "新しいチャットを開始",
+        "compact": "現在の文脈を圧縮",
+        "goal": "継続的な目標を設定",
+        "meta": "ワークフローを選択",
+        "plan": "現在のタスクを計画",
+        "reset": "会話をリセット",
+        "usage": "使用量を表示"
+      },
+      "items": {
+        "xlsx": {
+          "name": "Excel spreadsheets",
+          "description": "Create, edit, and analyze spreadsheets"
+        },
+        "docx": {
+          "name": "Word documents",
+          "description": "Create and edit documents"
+        },
+        "pptx": {
+          "name": "PowerPoint slides",
+          "description": "Create and edit presentations"
+        },
+        "pdf": {
+          "name": "PDF tools",
+          "description": "Read, merge, and edit PDFs"
+        },
+        "github": {
+          "name": "GitHub",
+          "description": "Work with issues and pull requests"
+        },
+        "html": {
+          "name": "Web pages",
+          "description": "Build and edit HTML pages"
+        },
+        "webpage": {
+          "name": "Website builder",
+          "description": "Build a complete website"
+        },
+        "kidsProject": {
+          "name": "Kids’ projects",
+          "description": "Plan a creative project for children"
+        },
+        "shortDrama": {
+          "name": "Short drama",
+          "description": "Turn an idea into a video"
+        },
+        "skillCreator": {
+          "name": "Workflow builder",
+          "description": "Combine skills into a workflow"
+        },
+        "paperWriting": {
+          "name": "Academic writing",
+          "description": "Research and draft a paper"
+        }
+      }
+    },
     "sessionCreated": {
       "title": "チャットを作成しました",
       "open": "チャットを開く",
@@ -3693,6 +3790,10 @@
     "aiGeneratedLabel": "AI により生成された内容です。参考情報としてご利用ください。",
     "removeAttachment": "添付を削除",
     "remove": "削除",
+    "projectFileTarget": "プロジェクトファイル: {path}",
+    "importedFileTarget": "読み込みコピー",
+    "projectFileLiveTarget": "現在のプロジェクトファイル: {path}",
+    "importedFileWorkingTarget": "読み込みファイル。編集には作業用コピーを使用",
     "fileLabel": "ファイル",
     "add": "追加",
     "attachFiles": "ファイルを添付",
@@ -4068,6 +4169,8 @@
       }
     },
     "plan": {
+      "hidePlan": "計画を非表示",
+      "showPlan": "計画を表示",
       "label": "プラン",
       "process": "計画プロセス",
       "revision": "リビジョン {id}",
@@ -4120,7 +4223,7 @@
     },
     "planMode": {
       "label": "プランモード",
-      "readOnly": "エージェントはファイルを変更せず、調査してプランを提案します。",
+      "readOnly": "まず調査してプランを話し合い、実装はまだ行いません。必要なテストやビルドには通常の権限が適用されます。",
       "nextTurn": "次のターンから適用",
       "updating": "更新中…",
       "turnOff": "プランモードをオフ",
@@ -4166,6 +4269,26 @@
       }
     },
     "goal": {
+      "settings": "目標の設定",
+      "tokenBudget": "トークン予算",
+      "noTokenBudget": "トークン制限なし",
+      "invalidTokenBudget": "正の整数を入力してください。",
+      "partialUsageHistory": "過去の使用量は不完全なため、トークン予算には含まれません。",
+      "pendingUsageReceipts": "使用量の記録を待っています。記録が揃ったら Goal を再開してください。",
+      "usageReceiptsRecovered": "使用量の記録が揃いました。準備ができたら Goal を再開してください。",
+      "usageAccountingSince": "トークン予算は {time} 以降に記録された使用量を集計します。",
+      "usageAccountingPending": "次のモデルリクエストから予算の集計を開始します。",
+      "usageCoverageUnavailable": "使用量の集計状況を確認できないため、トークン予算を設定できません。",
+      "settingsNotConfirmed": "現在の接続では選択した目標設定への対応を確認できません。変更は適用されず、再試行できるよう保持されています。",
+      "emptyContinuations": "出力やツール操作のないターンが続いたため一時停止しました。目標を確認してから再開してください。",
+      "removeTokenBudget": "トークン予算を解除",
+      "executionPolicy": "実行の継続",
+      "foreground": "接続中のみ",
+      "background": "バックグラウンド",
+      "backgroundHint": "切断後も続行します。サーバー再起動時には目標を一時停止します。",
+      "backgroundActive": "バックグラウンド",
+      "tokenBudgetReached": "トークン予算に到達",
+      "tokenBudgetUsage": "{used} / {budget} トークン",
       "placeholder": "目標を説明して送信すると、取り組みを開始します",
       "modeLabel": "Goal モード",
       "modeDescription": "長期的な目標を開始",

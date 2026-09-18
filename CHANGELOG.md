@@ -8,6 +8,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- The WebUI and Desktop composer can recover unsent attachment drafts across
+  reloads, with conversation and account/profile scoping, local storage limits,
+  expiry, and explicit recovery errors for unavailable file bytes.
+- Desktop file selection can reference files in the active project without
+  uploading a snapshot; queued use rechecks the current workspace and permissions.
+- Plan proposals can be hidden and restored without losing history or stopping
+  work. Queued and running implementations expose the normal task cancellation
+  control. Retried implementation requests preserve their original identity.
+- Ordinary tasks, Plan implementation and Goals share adjustable `update_plan`
+  progress. Planning can investigate with normal tools and permissions;
+  implementation no longer requires ordered checkpoints or a delivery-only phase.
+- Goals support natural control within the current task, optional token budgets
+  and explicitly enabled background continuation. Physical usage is attributed
+  to the root Goal across children and late results. Unknown usage pauses
+  budget-driven continuation; Gateway restart always requires explicit resume.
+  Upgraded Goals can budget newly recorded usage. Clients check Gateway support
+  before offering budget and background settings.
+- Human input and approval waits release compute capacity while preserving task
+  identity and session exclusion. Cancelled questionnaires are closed in the
+  history used by subsequent turns, while their original questions are preserved.
+  Unsupported legacy database lineages are
+  preserved and rejected consistently, and preview/nightly Desktop profiles
+  are isolated from stable data.
+- Shell calls with an authorized but invalid working directory now report a
+  correctable argument error without executing the command or requesting broader
+  sandbox permissions.
+
 - Browser extensions can now reach state-changing HTTP and WebSocket endpoints
   through a loopback request authority when their exact custom-scheme origin
   (for example `chrome-extension://<id>`) is listed in `cors.allowed_origins`.
@@ -15,6 +42,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   never accepted, and existing CORS response-header behavior is unchanged.
 
 ### Changed
+
+- Documents are consumed through bounded file tools with page, slide, paragraph
+  and sheet-range access. Uploaded originals stay immutable; supported edits use
+  persistent session working copies, and forks copy edited bytes under the current
+  file policy. Scanned PDF pages remain explicitly distinguishable from extracted
+  text.
+- Staged attachment uploads survive Gateway restarts within their original
+  10-minute lifetime. Context admission can compact older history once and retry
+  with a fresh text-and-image budget when the selected model's capacity is known.
 
 - Retired four experiment-only diagnostic outputs: runtime-recovery events,
   final-diff observations, salvage events and focused-verification classification.

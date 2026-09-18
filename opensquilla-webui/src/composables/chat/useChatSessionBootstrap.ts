@@ -57,6 +57,8 @@ export interface UseChatSessionBootstrapOptions {
   /** Production recovery uses the existing lease, preserving subscription authority. */
   reconcileSession?: (context: SessionBootstrapPhaseContext) => Promise<SessionSubscriptionOutcome>
   connectionState?: Readonly<Ref<string>>
+  /** Deferred task metadata can fail independently of a healthy live ACK. */
+  metadataRecoveryError?: Readonly<Ref<unknown>>
   cancelHistory: () => void
   cancelSubscription: () => void
 }
@@ -475,16 +477,19 @@ export function useChatSessionBootstrap(options: UseChatSessionBootstrapOptions)
   // Recovery is request-local. The shared socket and the current page remain
   // owned by their existing lifecycles; a missing session is never retried.
   const stopRecoveryWatch = options.connectionState ? watch(
-    [options.sessionKey, options.connectionState, historyPhase, livePhase],
+    [options.sessionKey, options.connectionState, historyPhase, livePhase,
+      () => options.metadataRecoveryError?.value],
     () => {
       clearRecoveryTimer()
       const run = active
       if (!run || !isCurrent(run) || options.connectionState?.value !== 'connected') return
       const historyFailed = historyPhase.value === 'error'
         && shouldRetrySessionPhase(run.history.result?.error)
-      const liveFailed = livePhase.value === 'degraded'
+      const metadataFailed = livePhase.value === 'ready'
+        && shouldRetrySessionPhase(options.metadataRecoveryError?.value)
+      const liveFailed = metadataFailed || (livePhase.value === 'degraded'
         && !run.live.result?.sessionMissing
-        && shouldRetrySessionPhase(run.live.result?.error)
+        && shouldRetrySessionPhase(run.live.result?.error))
       if (!historyFailed && !liveFailed) {
         if (historyPhase.value === 'ready' && livePhase.value === 'ready') recoveryAttempt = 0
         return

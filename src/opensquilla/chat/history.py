@@ -278,9 +278,11 @@ def transcript_entries_to_chat_messages(
         legacy_segments = legacy_projection[1] if legacy_projection else []
         projected_role = "assistant" if legacy_projection else role
         attachments = None
+        workspace_files = []
         artifacts = None
         prompt_annotations = None
         page_context = None
+        selected_skills = None
         if content and content.startswith("{"):
             try:
                 parsed = json.loads(content)
@@ -288,6 +290,21 @@ def transcript_entries_to_chat_messages(
                     display_text = parsed.get("display_text")
                     content = display_text if isinstance(display_text, str) else parsed["text"]
                     attachments = _public_attachment_projection(parsed.get("attachments"))
+                    from opensquilla.workspace_files import normalize_workspace_files
+
+                    workspace_files = normalize_workspace_files(parsed.get("workspace_files"))
+                    if workspace_files:
+                        attachments = [*(attachments or []), *[
+                            {"kind": "file", "name": ref["name"], "mime": ref["mime"],
+                             "size": ref.get("size"), "workspaceFile": ref}
+                            for ref in workspace_files
+                        ]]
+                    from opensquilla.contracts.selected_skills import normalize_selected_skills
+
+                    try:
+                        selected_skills = normalize_selected_skills(parsed.get("selected_skills"))
+                    except ValueError:
+                        selected_skills = None
                     raw_page_context = parsed.get("page_context")
                     if isinstance(raw_page_context, dict):
                         page_context = raw_page_context
@@ -378,6 +395,8 @@ def transcript_entries_to_chat_messages(
         if isinstance(turn_context, dict):
             if public_context := public_turn_context(turn_context):
                 msg["turn_context"] = public_context
+        if workspace_files:
+            msg["workspaceFiles"] = workspace_files
         if attachments:
             msg["attachments"] = attachments
         if artifacts:
@@ -386,6 +405,8 @@ def transcript_entries_to_chat_messages(
             msg["promptAnnotations"] = prompt_annotations
         if page_context:
             msg["pageContext"] = page_context
+        if selected_skills:
+            msg["selectedSkills"] = list(selected_skills)
         usage = getattr(projected_entry, "turn_usage", None)
         if isinstance(usage, dict):
             msg["usage"] = usage

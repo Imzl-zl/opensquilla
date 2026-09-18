@@ -62,10 +62,13 @@
       "session.event.meta_step_state",
       "session.event.plan_revision",
       "session.event.plan_run",
+      "session.event.progress",
+      "session.event.plan_presentation",
       "session.event.provider_activity",
       "session.event.router_control_replay",
       "session.event.router_decision",
       "session.event.run_heartbeat",
+      "session.event.skill_load",
       "session.event.state_change",
       "session.event.steer",
       "session.event.subagent_completion",
@@ -103,7 +106,9 @@
       "description": "The decoder accepts known and future session/task event names. Unknown additive event names remain observable as an unknown event instead of being delivered to a typed handler.",
       "type": "object",
       "additionalProperties": true,
-      "required": ["event"],
+      "required": [
+        "event"
+      ],
       "properties": {
         "type": {
           "const": "event"
@@ -128,15 +133,24 @@
           ]
         },
         "meta": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": true
         },
         "seq": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "state_version": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "additionalProperties": true
         }
       }
@@ -185,59 +199,104 @@
           }
         },
         "key": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1
         },
         "session_key": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1
         },
         "sessionKey": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1
         },
         "stream_generation": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1
         },
         "streamGeneration": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1
         },
         "stream_seq": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "streamSeq": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "generation_epoch": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "generationEpoch": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "task_id": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "taskId": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "turn_id": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "turnId": {
-          "type": ["string", "null"]
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "emitted_at": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "emittedAt": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         }
       }
@@ -254,7 +313,10 @@
           "additionalProperties": true,
           "properties": {
             "schema_version": {
-              "type": ["integer", "null"],
+              "type": [
+                "integer",
+                "null"
+              ],
               "minimum": 1
             }
           }
@@ -270,7 +332,9 @@
         },
         {
           "type": "object",
-          "required": ["schema_version"],
+          "required": [
+            "schema_version"
+          ],
           "properties": {
             "schema_version": {
               "const": 1

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import tomllib
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -94,6 +96,54 @@ async def test_reads_full_scalar_and_null_settings_shapes(runtime) -> None:
     assert await settings.read(" naming.enabled ") is False
     assert await settings.read("naming.missing") is None
     assert "fields" in await settings.read_effective()
+
+
+async def test_skill_allow_use_keeps_concurrent_names_and_other_settings(runtime) -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_scope = runtime.mutation_scope
+
+    @asynccontextmanager
+    async def delayed_commit(candidate):
+        if candidate.skills.disabled == ["alpha"]:
+            entered.set()
+            await release.wait()
+        async with original_scope(candidate):
+            yield
+
+    runtime.mutation_scope = delayed_commit
+    first = asyncio.create_task(AppSettings(runtime).set_skill_enabled("alpha", False))
+    await entered.wait()
+    # A separate settings owner must not read a stale snapshot while the first
+    # owner's candidate is waiting for its commit boundary.
+    second = asyncio.create_task(AppSettings(runtime).set_skill_enabled("beta", False))
+    normal = asyncio.create_task(AppSettings(runtime).set("naming.enabled", True))
+    await asyncio.sleep(0)
+    release.set()
+    results = await asyncio.gather(first, second, normal)
+    assert all(result["persisted"] for result in results[:2])
+    assert set(runtime.config.skills.disabled) == {"alpha", "beta"}
+    assert runtime.config.naming.enabled is True
+    saved = tomllib.loads(Path(runtime.config.config_path).read_text())
+    assert set(saved["skills"]["disabled"]) == {"alpha", "beta"}
+    assert saved["naming"]["enabled"] is True
+
+
+async def test_skill_allow_use_reports_post_commit_refresh_failure(runtime) -> None:
+    runtime.fail_selector = True
+    result = await AppSettings(runtime).set_skill_enabled("alpha", False)
+    assert result["persisted"] is True
+    assert result["refreshed"] is False
+    assert "alpha" in runtime.config.skills.disabled
+    saved = tomllib.loads(Path(runtime.config.config_path).read_text())
+    assert "alpha" in saved["skills"]["disabled"]
+
+
+async def test_skill_allow_use_does_not_claim_failed_persistence(runtime) -> None:
+    runtime.fail_persist = True
+    with pytest.raises(OSError, match="persist failure"):
+        await AppSettings(runtime).set_skill_enabled("alpha", False)
+    assert "alpha" not in runtime.config.skills.disabled
 
 
 @pytest.mark.parametrize("operation", ["set", "patch", "safe", "merge", "combined", "apply"])

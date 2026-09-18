@@ -37,6 +37,7 @@ export interface SessionReadMetadata {
   readonly pendingUserInputs: readonly SessionReadJsonObject[]
   readonly collaboration: SessionReadJsonObject | null
   readonly routing: SessionReadJsonObject | null
+  readonly planPresentations?: readonly SessionReadJsonObject[]
   readonly currentPlan: SessionReadJsonObject | null
   readonly activePlanRun: SessionReadJsonObject | null
   readonly goal: SessionReadJsonObject | null
@@ -110,6 +111,7 @@ export interface SessionReadMessage {
   readonly timeline: readonly unknown[]
   readonly attachments: readonly SessionReadJsonObject[]
   readonly promptAnnotations: readonly unknown[]
+  readonly selectedSkills?: import('@/types/selectedSkills').SelectedSkillRef[]
   readonly pageContext?: ChatPageContext
   readonly provenance: SessionReadMessageProvenance
   readonly turnContext: SessionReadTurnContext | null

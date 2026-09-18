@@ -86,3 +86,21 @@ def test_bundle_include_content_flag(tmp_path, monkeypatch) -> None:
     with zipfile.ZipFile(output) as archive:
         manifest = json.loads(archive.read("manifest.json"))
     assert manifest["content_tier"] is True
+
+
+def test_bundle_reports_invalid_json_artifact(tmp_path, monkeypatch) -> None:
+    from opensquilla.cli import bundle_cmd
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("OPENSQUILLA_STATE_DIR", str(home))
+    monkeypatch.setattr(bundle_cmd, "_live_enrichment", lambda: {"doctor": float("nan")})
+    output = tmp_path / "out.zip"
+    result = runner.invoke(app, ["bundle", "--output", str(output)])
+    assert result.exit_code == 0, result.output
+    assert "could not be collected" in result.stdout
+    with zipfile.ZipFile(output) as archive:
+        assert "live/doctor.json" not in archive.namelist()
+        manifest = json.loads(archive.read("manifest.json"))
+    assert any(error["artifact"] == "live/doctor.json" and "JSON" in error["error"]
+               for error in manifest["collection_errors"])

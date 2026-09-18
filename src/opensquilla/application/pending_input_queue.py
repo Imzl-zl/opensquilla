@@ -41,6 +41,7 @@ class PendingInputProjection(TypedDict, total=False):
     message: str
     intent: str | None
     attachments: list[PendingInputAttachmentProjection]
+    workspaceFiles: list[dict[str, Any]]
     position: int
     revision: int
     createdAt: int
@@ -50,6 +51,7 @@ class PendingInputProjection(TypedDict, total=False):
     displayText: str
     confirmedPlainText: bool
     pageContext: dict[str, Any]
+    selectedSkills: list[dict[str, str]]
 
 
 class PendingInputEnqueueResult(PendingInputProjection, total=False):

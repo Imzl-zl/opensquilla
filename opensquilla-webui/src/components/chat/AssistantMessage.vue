@@ -238,9 +238,13 @@
         :plan="part.plan"
         :disabled="planActionsDisabled"
         :pending-action="planActionPending"
+        :dismissed="planPresentations?.[part.plan.revisionId]?.dismissed"
+        :presentation-available="planPresentationAvailable"
+        :presentation-busy="Boolean(planPresentationPending)"
         @implement-current="$emit('planImplementCurrent', $event)"
         @implement-new="$emit('planImplementNew', $event)"
         @replan="$emit('planReplan', $event)"
+        @presentation-change="$emit('planPresentationChange', $event)"
       />
 
       <SessionCreatedCard
@@ -269,6 +273,11 @@
 
         <SourcesRow v-if="message.toolCalls?.length" ref="sourcesRowRef" :calls="message.toolCalls" :sources="message.sources ?? []" />
       </div>
+
+      <SkillLoadStatus
+        class="msg-ai-skill-loads"
+        :receipts="message.skillLoads || []"
+      />
 
       <div
         v-if="showFooter"
@@ -468,6 +477,7 @@ import UnifiedAssistantActivityTimeline from '@/components/chat/UnifiedAssistant
 import ChatArtifactList from '@/components/chat/ChatArtifactList.vue'
 import GoalOutcomeNotice from '@/components/chat/GoalOutcomeNotice.vue'
 import SourcesRow from '@/components/chat/SourcesRow.vue'
+import SkillLoadStatus from '@/components/chat/SkillLoadStatus.vue'
 import ToolCallTimeline from '@/components/chat/ToolCallTimeline.vue'
 import InterruptPart from '@/components/chat/parts/InterruptPart.vue'
 import PlanCard from '@/components/chat/PlanCard.vue'
@@ -505,6 +515,8 @@ import type { ArtifactPayload } from '@/types/artifacts'
 import type {
   PlanCardAction,
   PlanCardActionTarget,
+  PlanPresentationSnapshot,
+  PlanPresentationRequest,
 } from '@/types/plans'
 import {
   isBeforeReasoningActivityStatusStep,
@@ -549,6 +561,9 @@ const props = defineProps<{
   forkBusy?: boolean
   planActionPending?: PlanCardAction | null
   planActionsDisabled?: boolean
+  planPresentations?: Record<string, PlanPresentationSnapshot>
+  planPresentationAvailable?: boolean
+  planPresentationPending?: string | null
   showTurnOutcome?: boolean
   goalOutcome?: GoalSnapshot | null
   goalElapsed?: string
@@ -574,6 +589,7 @@ const emit = defineEmits<{
   planImplementCurrent: [target: PlanCardActionTarget]
   planImplementNew: [target: PlanCardActionTarget]
   planReplan: [target: PlanCardActionTarget]
+  planPresentationChange: [request: PlanPresentationRequest]
   openSession: [sessionKey: string]
   goalClear: [goal: GoalSnapshot]
 }>()
@@ -1355,6 +1371,10 @@ function fmtUsd(value: number): string {
   align-items: center;
   gap: 0.625rem;
   margin-top: 0.25rem;
+}
+
+.msg-ai-skill-loads {
+  margin-top: 0.375rem;
 }
 
 .msg-ai-footer--goal {

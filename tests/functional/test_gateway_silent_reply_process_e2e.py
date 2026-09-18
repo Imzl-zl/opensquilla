@@ -7,7 +7,10 @@ history and the raw SQLite transcript after shutdown.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import ctypes
+import datetime
 import json
 import os
 import socket
@@ -17,6 +20,7 @@ import sys
 import time
 import uuid
 from collections.abc import AsyncIterator
+from ctypes import wintypes
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -36,6 +40,21 @@ _SILENT_SENTINEL = "NO_REPLY"
 _THIRD_VISIBLE = "VISIBLE_THIRD"
 _OBJECTIVE = "Exercise automatic Goal continuation."
 _SERVER_MODE_ENV = "OPENSQUILLA_SILENT_REPLY_E2E_SERVER"
+_DEFAULT_SAMPLE_ENV = "OPENSQUILLA_DEFAULT_TURN_TIMING_SAMPLE"
+_SAMPLE_SOURCE_ENV = "OPENSQUILLA_DEFAULT_TURN_TIMING_SOURCE"
+
+
+def _verify_source_imports(source_root: Path) -> None:
+    import opensquilla
+    import opensquilla.gateway.boot as boot_module
+
+    expected_module = source_root / "src/opensquilla/gateway/boot.py"
+    expected_package = source_root / "src/opensquilla/__init__.py"
+    if (
+        Path(boot_module.__file__).resolve() != expected_module.resolve()
+        or Path(opensquilla.__file__).resolve() != expected_package.resolve()
+    ):
+        raise ValueError("Gateway import does not match the requested source root")
 
 
 def _message_text(message: Message) -> str:
@@ -86,7 +105,7 @@ class _ScriptedProvider:
             2: _SILENT_SENTINEL,
             3: _THIRD_VISIBLE,
         }
-        reply = replies[call]
+        reply = _FIRST_VISIBLE if os.environ.get(_DEFAULT_SAMPLE_ENV) == "1" else replies[call]
         yield TextDeltaEvent(text=reply)
         yield DoneEvent(
             stop_reason="end_turn",
@@ -129,6 +148,8 @@ class _ScriptedSelector:
 
 
 async def _serve_gateway() -> None:
+    if os.environ.get(_DEFAULT_SAMPLE_ENV) == "1":
+        _verify_source_imports(Path(os.environ[_SAMPLE_SOURCE_ENV]))
     port = int(os.environ["OPENSQUILLA_SILENT_REPLY_E2E_PORT"])
     state_dir = Path(os.environ["OPENSQUILLA_SILENT_REPLY_E2E_STATE"])
     provider_log = Path(os.environ["OPENSQUILLA_SILENT_REPLY_E2E_PROVIDER_LOG"])
@@ -213,15 +234,76 @@ async def _wait_for_health(
     )
 
 
-def _stop_process(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
-    process.terminate()
+def _open_gateway_process_handle(state_dir: Path) -> tuple[Any, int] | None:
+    """Capture the actual Windows writer before terminating its venv launcher."""
+    if os.name != "nt":
+        return None
     try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=10)
+        identity = json.loads((state_dir / "gateway.pid").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        # Boot publishes this identity before opening any database.
+        return None
+    pid = identity["pid"]
+    started = datetime.datetime.fromisoformat(identity["start_ts"])
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or started.tzinfo is None:
+        raise AssertionError("invalid Gateway process identity")
+    kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE, *[ctypes.POINTER(wintypes.FILETIME)] * 4]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.OpenProcess(0x00100000 | 0x1000, False, pid)
+    if not handle:
+        if int(getattr(ctypes, "get_last_error")()) == 87:  # Process already gone.
+            return None
+        raise getattr(ctypes, "WinError")()
+    try:
+        timestamps = [wintypes.FILETIME() for _ in range(4)]
+        if not kernel32.GetProcessTimes(handle, *(ctypes.byref(value) for value in timestamps)):
+            raise getattr(ctypes, "WinError")()
+        created = (timestamps[0].dwHighDateTime << 32) | timestamps[0].dwLowDateTime
+        recorded = int(started.timestamp() * 10_000_000) + 116_444_736_000_000_000
+        if created > recorded:
+            # The original process exited and its numeric PID was reused.
+            kernel32.CloseHandle(handle)
+            return None
+        return kernel32, int(handle)
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+
+
+def _stop_process(process: subprocess.Popen[bytes], state_dir: Path) -> None:
+    identity = None
+    deadline = time.monotonic() + 10.0
+    try:
+        try:
+            identity = _open_gateway_process_handle(state_dir)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    deadline = time.monotonic() + 10.0
+                    process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        if identity is not None:
+            kernel32, handle = identity
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            result = kernel32.WaitForSingleObject(handle, remaining_ms)
+            if result == 258:
+                raise AssertionError("Gateway writer remained alive after launcher shutdown")
+            if result != 0:
+                raise getattr(ctypes, "WinError")()
+    finally:
+        if identity is not None:
+            kernel32, handle = identity
+            kernel32.CloseHandle(handle)
 
 
 def _isolated_gateway_env(
@@ -230,6 +312,7 @@ def _isolated_gateway_env(
     port: int,
     state_dir: Path,
     provider_log: Path,
+    source_root: Path | None = None,
 ) -> dict[str, str]:
     # Start from a minimal platform allowlist instead of trying to enumerate
     # credential spellings. This keeps non-standard secrets such as
@@ -244,7 +327,7 @@ def _isolated_gateway_env(
         "PATHEXT",
     )
     env = {key: os.environ[key] for key in inherited_keys if key in os.environ}
-    project_root = Path(__file__).resolve().parents[2]
+    project_root = source_root or Path(__file__).resolve().parents[2]
     home_dir = tmp_path / "home"
     app_data_dir = tmp_path / "appdata"
     local_app_data_dir = tmp_path / "local-appdata"
@@ -309,6 +392,8 @@ async def _drain_available_frames(
             return
 
 
+# Fresh-profile migrations can exhaust the health deadline under CI worker load.
+@pytest.mark.ci_serial
 @pytest.mark.asyncio
 async def test_real_gateway_suppresses_goal_sentinel_everywhere(
     tmp_path: Path,
@@ -350,6 +435,22 @@ async def test_real_gateway_suppresses_goal_sentinel_everywhere(
             model=_MODEL,
             display_name="Silent Goal process E2E",
         )
+        changed = await client.call("plans.setMode", {
+            "sessionKey": session_key, "mode": "plan", "expectedRevision": 0,
+        })
+        assert changed["collaboration"]["mode"] == "plan"
+        await client.close()
+        client = GatewayClient()
+        await client.connect(f"ws://127.0.0.1:{port}/ws")
+        snapshot = await client.call("sessions.messages.hydrate", {"key": session_key})
+        assert snapshot["collaboration"]["mode"] == "plan"
+        assert snapshot["collaboration"]["revision"] == changed["collaboration"]["revision"]
+        assert snapshot["pendingUserInputs"] == []
+        assert not provider_log.exists()
+        await client.call("plans.setMode", {
+            "sessionKey": session_key, "mode": "default",
+            "expectedRevision": changed["collaboration"]["revision"],
+        })
         # Goal ownership requires a live session-message subscription. Opening
         # it before goals.set also proves the exact pushed wire events.
         subscription = await client.subscribe_session_events(session_key)
@@ -401,7 +502,7 @@ async def test_real_gateway_suppresses_goal_sentinel_everywhere(
         if subscription is not None:
             await subscription.close()
         await client.close()
-        _stop_process(process)
+        _stop_process(process, state_dir)
         gateway_stream.close()
 
     done_payloads = [
@@ -497,5 +598,83 @@ async def test_real_gateway_suppresses_goal_sentinel_everywhere(
             assert content not in text, f"conversation content leaked through {path.name}"
 
 
-if __name__ == "__main__" and os.environ.get(_SERVER_MODE_ENV) == "1":
-    asyncio.run(_serve_gateway())
+async def _sample_default_turn(*, sample_dir: Path, source_root: Path) -> dict[str, float | int]:
+    """Measure cold Gateway readiness and a complete offline Default turn, not TTFT."""
+    _verify_source_imports(source_root)
+    sample_dir.mkdir(parents=True, exist_ok=False)
+    port = _free_port()
+    state_dir = sample_dir / "state"
+    provider_log = sample_dir / "provider.jsonl"
+    gateway_log = sample_dir / "gateway.log"
+    env = _isolated_gateway_env(
+        tmp_path=sample_dir, port=port, state_dir=state_dir,
+        provider_log=provider_log, source_root=source_root,
+    )
+    env[_DEFAULT_SAMPLE_ENV] = "1"
+    env[_SAMPLE_SOURCE_ENV] = str(source_root)
+    client = GatewayClient()
+    with gateway_log.open("wb") as stream:
+        started = time.monotonic()
+        process = subprocess.Popen(
+            [sys.executable, "-u", str(Path(__file__).resolve())],
+            cwd=sample_dir, env=env, stdout=stream, stderr=subprocess.STDOUT,
+        )
+        try:
+            await _wait_for_health(port, process, gateway_log)
+            startup_ms = (time.monotonic() - started) * 1000
+            await client.connect(f"ws://127.0.0.1:{port}/ws")
+            session_key = await client.create_session(model=_MODEL, display_name="Timing sample")
+            started = time.monotonic()
+            async with asyncio.timeout(45):
+                frames = [frame async for frame in client.send_message(
+                    session_key, "Return the synthetic timing response.",
+                )]
+            first_turn_ms = (time.monotonic() - started) * 1000
+            done = [frame for frame in frames if frame.get("event") == "session.event.done"]
+            assert len(done) == 1
+            assert done[0].get("run_kind") != "goal"
+            assert done[0].get("text_snapshot", done[0].get("text")) == _FIRST_VISIBLE
+            status = await client.call("goals.status", {"sessionKey": session_key})
+            assert status.get("goal") is None
+            calls = [json.loads(line) for line in provider_log.read_text().splitlines()]
+            assert [call["call"] for call in calls] == [1]
+            return {
+                "startup_to_health_ms": round(startup_ms, 3),
+                "default_first_turn_ms": round(first_turn_ms, 3),
+                "provider_calls": len(calls),
+                "terminal_events": len(done),
+                "goals": 0,
+            }
+        finally:
+            await client.close()
+            _stop_process(process, state_dir)
+
+
+@pytest.mark.ci_serial
+async def test_default_timing_sample_has_one_provider_call_and_no_goal(tmp_path: Path) -> None:
+    result = await _sample_default_turn(
+        sample_dir=tmp_path / "sample", source_root=Path(__file__).resolve().parents[2],
+    )
+    assert result["provider_calls"] == result["terminal_events"] == 1
+    assert result["goals"] == 0
+    assert result["startup_to_health_ms"] > 0
+    assert result["default_first_turn_ms"] > 0
+
+
+def test_timing_rejects_imports_from_another_checkout(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requested source root"):
+        _verify_source_imports(tmp_path)
+
+
+if __name__ == "__main__":
+    if os.environ.get(_SERVER_MODE_ENV) == "1":
+        asyncio.run(_serve_gateway())
+    else:
+        parser = argparse.ArgumentParser(description="Opt-in offline Gateway timing sample")
+        parser.add_argument("--sample-dir", type=Path, required=True)
+        parser.add_argument("--source-root", type=Path, required=True)
+        args = parser.parse_args()
+        result = asyncio.run(_sample_default_turn(
+            sample_dir=args.sample_dir, source_root=args.source_root.resolve(),
+        ))
+        print(json.dumps(result, sort_keys=True))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import runpy
+import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -38,13 +39,17 @@ def _write_run(
     attempts: dict[str, int] | None = None,
     image_versions: dict[str, str] | None = None,
     duplicate_core_node_in: str | None = None,
+    partitioned: bool = False,
 ) -> Path:
     run_dir = root / f"run-{run_id}"
-    for shard in SHARD_NAMES:
+    shard_names = DURATION_MODULE["WINDOWS_SHARD_NAMES"] if partitioned else SHARD_NAMES
+    for shard in shard_names:
+        family = shard.rsplit("-", 1)[0] if partitioned else shard
         attempt = (attempts or {}).get(shard, 1)
         shard_dir = run_dir / f"windows-high-risk-{shard}-attempt-{attempt}"
         shard_dir.mkdir(parents=True)
-        path = FILES_BY_SHARD[shard]
+        base_path = FILES_BY_SHARD[family]
+        path = base_path.replace(".py", "_second.py") if shard.endswith("-2") else base_path
         metadata = {
             "schema_version": 1,
             "platform": "windows",
@@ -63,7 +68,13 @@ def _write_run(
                 ),
             },
             "test_files": [path],
+            "execution": {
+                "parallel": {"workers": 3, "dist": "loadfile", "marker": "not ci_serial"},
+                "serial": {"workers": 1, "marker": "ci_serial"},
+            },
         }
+        if partitioned:
+            metadata["partition_sha256"] = "e" * 64
         (shard_dir / "windows-shard-metadata.json").write_text(
             json.dumps(metadata), encoding="utf-8"
         )
@@ -83,11 +94,17 @@ def _write_run(
             "testcase",
             classname=_classname(testcase_path),
             name="test_case",
-            time=str(seconds[path]),
+            time=str(seconds[base_path]),
         )
         ET.ElementTree(suites).write(
             shard_dir / "junit.xml", encoding="utf-8", xml_declaration=True
         )
+        if partitioned:
+            shutil.copyfile(shard_dir / "junit.xml", shard_dir / "junit.parallel.xml")
+            (shard_dir / "junit.serial.xml").write_text(
+                '<testsuites><testsuite tests="0" failures="0" errors="0"/></testsuites>',
+                encoding="utf-8",
+            )
     return run_dir
 
 
@@ -251,3 +268,72 @@ def test_duration_builder_rejects_assignment_hash_drift(tmp_path: Path) -> None:
         build_duration_payload(
             observations, expected_assignment_sha256="2" * 64
         )
+
+
+def _partitioned_observations(tmp_path: Path) -> list[Any]:
+    return [
+        load_run_directory(_write_run(
+            tmp_path, run_id=500 + index, sha="a" * 40,
+            assignment_sha256="b" * 64,
+            seconds={path: float(index + 1) for path in FILES_BY_SHARD.values()},
+            partitioned=True,
+        ))
+        for index in range(3)
+    ]
+
+
+def test_duration_builder_requires_all_eight_execution_shards(tmp_path: Path) -> None:
+    observations = _partitioned_observations(tmp_path)
+    payload = build_duration_payload(
+        observations, expected_assignment_sha256="b" * 64,
+        expected_partition_sha256="e" * 64,
+    )
+    assert len(payload["weights_seconds"]) == 8
+    assert all(value == {"parallel": 2.0, "serial": 0.0}
+               for value in payload["phase_weights_seconds"].values())
+    assert len(payload["source_runs"][0]["execution"]) == 8
+    metadata_path = next((tmp_path / "run-500").rglob("windows-shard-metadata.json"))
+    metadata_path.unlink()
+    with pytest.raises(ValueError, match="expected 8 Windows shard metadata"):
+        load_run_directory(tmp_path / "run-500")
+
+
+def test_duration_builder_rejects_worker_count_drift(tmp_path: Path) -> None:
+    observations = _partitioned_observations(tmp_path)
+    observations[1].execution_by_shard["core-1"]["parallel"]["workers"] = 4
+    with pytest.raises(ValueError, match="execution configuration differs"):
+        build_duration_payload(
+            observations, expected_assignment_sha256="b" * 64,
+            expected_partition_sha256="e" * 64,
+        )
+
+
+def test_duration_builder_rejects_stale_partition_evidence(tmp_path: Path) -> None:
+    observations = _partitioned_observations(tmp_path)
+    with pytest.raises(ValueError, match="partition hash does not match"):
+        build_duration_payload(
+            observations, expected_assignment_sha256="b" * 64,
+            expected_partition_sha256="f" * 64,
+        )
+
+
+@pytest.mark.parametrize("mutation", ["missing", "different", "duplicate", "duration"])
+def test_duration_builder_rejects_incomplete_phase_evidence(
+    tmp_path: Path, mutation: str,
+) -> None:
+    _partitioned_observations(tmp_path)
+    report = next((tmp_path / "run-500").rglob("junit.parallel.xml"))
+    if mutation == "missing":
+        report.unlink()
+        message = "cannot read JUnit report"
+    elif mutation == "different":
+        report.write_text(report.read_text().replace('name="test_case"', 'name="other"'))
+        message = "phase JUnit collection differs"
+    elif mutation == "duration":
+        report.write_text(report.read_text().replace('time="1.0"', 'time="900.0"'))
+        message = "phase JUnit duration differs"
+    else:
+        shutil.copyfile(report, report.with_name("junit.serial.xml"))
+        message = "duplicate JUnit testcase"
+    with pytest.raises(ValueError, match=message):
+        load_run_directory(tmp_path / "run-500")

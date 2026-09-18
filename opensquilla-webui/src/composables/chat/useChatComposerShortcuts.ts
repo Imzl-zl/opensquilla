@@ -75,6 +75,7 @@ export function useChatComposerShortcuts(options: UseChatComposerShortcutsOption
   function onTextareaInput(event?: Event) {
     updateTextareaUndoStateAfterInput(event)
     options.autoResizeTextarea()
+    if (options.composing.value || (event && 'isComposing' in event && event.isComposing)) return
     options.handleSlashInput()
   }
 
@@ -96,7 +97,7 @@ export function useChatComposerShortcuts(options: UseChatComposerShortcutsOption
     if (options.slashOpen.value) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
-        options.slashIdx.value = Math.min(options.slashIdx.value + 1, options.filteredSlashCmds.value.length - 1)
+        options.slashIdx.value = Math.max(0, Math.min(options.slashIdx.value + 1, options.filteredSlashCmds.value.length - 1))
         return
       }
       if (e.key === 'ArrowUp') {
@@ -106,8 +107,8 @@ export function useChatComposerShortcuts(options: UseChatComposerShortcutsOption
       }
       if (e.key === 'Enter' || e.key === 'Tab') {
         const candidate = options.filteredSlashCmds.value[options.slashIdx.value]
-        if (!candidate) return
         e.preventDefault()
+        if (!candidate) return
         clearTextareaUndoState()
         if (e.key === 'Tab') {
           options.completeSlashCmd(candidate)

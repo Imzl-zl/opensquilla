@@ -31,8 +31,10 @@ if TYPE_CHECKING:
     from opensquilla.provider.selector import ModelSelector
     from opensquilla.scheduler import SchedulerEngine
     from opensquilla.session.manager import SessionManager
+    from opensquilla.session.models import SessionNode
     from opensquilla.skills.loader import SkillLoader
     from opensquilla.tools.registry import ToolRegistry
+    from opensquilla.tools.types import ToolContext
 
 import structlog
 import uvicorn
@@ -1404,7 +1406,7 @@ async def dispatch_task_runtime_turn(
     )
     from opensquilla.sandbox.policy_store import pin_sandbox_policy
 
-    pin_sandbox_policy(tool_context, config)
+    await asyncio.to_thread(pin_sandbox_policy, tool_context, config)
     tool_context.task_id = run.task_id
     run_metadata = getattr(run.envelope, "metadata", {})
     parent_session_key = run_metadata.get("parent_session_key")
@@ -2939,6 +2941,44 @@ async def build_services(
             "build_services.session_storage_ready",
             duration_ms=_elapsed_monotonic_ms(session_storage_started_at),
         )
+        async def attachment_fork_context(session: SessionNode) -> ToolContext:
+            from dataclasses import replace
+
+            from opensquilla.gateway.project_workspace_runtime import (
+                authoritative_project_run_context,
+            )
+            from opensquilla.sandbox.policy_store import pin_sandbox_policy
+            from opensquilla.sandbox.run_context import RunContext
+            from opensquilla.tools.types import ToolContext, current_tool_context
+
+            context, _guard = await authoritative_project_run_context(
+                storage=storage, session_manager=session_manager, session=session,
+                config=config, default_workspace=str(config.workspace_dir),
+            )
+            active = current_tool_context.get()
+            if active is None:
+                tool_context = ToolContext(
+                    run_mode=context.run_mode.value, sandbox_run_context=context,
+                    sandbox_mounts=context.to_origin_payload()["mounts"],
+                    workspace_strict=bool(config.workspace_strict),
+                )
+            else:
+                # A tool caller retains its own restrictions; the session owner
+                # must not donate broader authority to a subagent or guest fork.
+                caller_context = active.sandbox_run_context
+                if isinstance(caller_context, RunContext):
+                    caller_context = replace(caller_context, workspace=context.workspace)
+                tool_context = replace(active, sandbox_run_context=caller_context)
+            tool_context = replace(
+                tool_context, workspace_dir=context.workspace, session_key=session.session_key,
+                artifact_session_id=session.session_id, session_epoch=session.epoch,
+                sandbox_session_manager=session_manager,
+            )
+            if active is None or getattr(active, "_sandbox_run_context_fresh", False):
+                setattr(tool_context, "_sandbox_run_context_fresh", True)
+            pin_sandbox_policy(tool_context, config)
+            return tool_context
+
         session_manager = SessionManager(
             storage,
             agent_registry=agent_registry,
@@ -2946,6 +2986,7 @@ async def build_services(
             media_root=media_root_from_config(config),
             model_routing_mode_provider=lambda: model_routing_snapshot(config)["mode"],
             execution_workspace_factory=build_execution_workspace_factory(config),
+            attachment_fork_context_resolver=attachment_fork_context,
         )
 
     # Wire session manager into tool layer (like set_scheduler, set_gateway_config)
@@ -4371,6 +4412,11 @@ async def start_gateway_server(
         config=config,
     )
 
+    if usage_event_sink is not None:
+        usage_event_sink.on_goal_usage = goal_service.on_usage_changed
+    background_completion_manager.set_idle_listener(goal_service.schedule_idle_evaluation)
+    background_completion_manager.set_cancel_listener(goal_service.on_completion_group_cancelled)
+
     async def _ordered_task_lifecycle(event: TaskLifecycleEvent) -> None:
         # Session projection remains first. Goal settlement is independently
         # isolated so one observer cannot suppress the other.
@@ -4398,6 +4444,7 @@ async def start_gateway_server(
     task_runtime.set_idle_listener(goal_service.on_runtime_idle)
     task_runtime.set_goal_service(goal_service)
     subscription_manager.set_message_unsubscribe_listener(goal_service.on_subscription_lost)
+    get_registry().set_unregister_listener(goal_service.on_connection_unregistered)
     # Wire task_runtime's short write-lock provider into turn_runner.
     turn_runner.set_session_lock_provider(task_runtime._get_session_lock_for_turn)
     svc.task_runtime = task_runtime

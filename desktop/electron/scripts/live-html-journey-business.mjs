@@ -66,7 +66,7 @@ async function semanticControl(spec) {
   element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' })
   const nextFrameRect = () => new Promise((resolve, reject) => {
     let frame
-    const unavailable = () => reject(new Error('SEMANTIC_CONTROL_UNAVAILABLE'))
+    const unavailable = () => reject(new Error('SEMANTIC_CONTROL_UNAVAILABLE: frame deadline expired'))
     const remaining = spec.deadline - Date.now()
     if (remaining <= 0) { unavailable(); return }
     const timer = setTimeout(() => { cancelAnimationFrame(frame); unavailable() }, remaining)
@@ -118,7 +118,9 @@ export function createBusinessDriver(app, getPreviewId, capture) {
         try { point = await contents.executeJavaScript(`(${request.resolver})(${JSON.stringify({ ...request.spec, kind: request.kind, deadline: until })})`, true) }
         catch (error) {
           if (!/SEMANTIC_CONTROL_(?:MISSING|UNAVAILABLE|COVERED)\b/.test(String(error))) throw error
-          if (Date.now() >= until) throw lastSemanticError || error
+          // Renderer deadline timers can expire before this process observes
+          // the same wall-clock boundary. Preserve the last confirmed cause.
+          if (Date.now() >= until || String(error).includes('SEMANTIC_CONTROL_UNAVAILABLE: frame deadline expired')) throw lastSemanticError || error
           lastSemanticError = error
           await new Promise(resolve => setTimeout(resolve, 100))
         }
