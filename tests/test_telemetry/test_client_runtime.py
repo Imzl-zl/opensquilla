@@ -524,10 +524,15 @@ async def test_close_cancels_stalled_upload_and_preserves_unacknowledged_event(
     offline_uploads.handler = stalled
     runtime = ScopedTelemetryRuntime(config=_config(tmp_path))
     await runtime.record(_turn_event())
+    # Establish the stalled send before starting the shutdown deadline. Batch
+    # claiming uses SQLite and need not finish within the 50 ms close budget.
+    await runtime.start()
+    await asyncio.wait_for(entered.wait(), timeout=5)
     monkeypatch.setattr(runtime_module, "SHUTDOWN_UPLOAD_TIMEOUT_SECONDS", 0.05)
     closing = asyncio.create_task(runtime.close())
-    await asyncio.wait_for(entered.wait(), timeout=1)
     if cancel_close:
+        # Let close take ownership of the upload task before cancelling it.
+        await asyncio.sleep(0)
         closing.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(closing, timeout=1)
