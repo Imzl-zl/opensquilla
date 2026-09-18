@@ -497,7 +497,10 @@ async def test_windows_job_owns_descendant_after_leader_exit(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.ci_serial
 async def test_exec_command_writes_optional_stdin() -> None:
+    # Keep the real PowerShell/Python EOF contract's five-second deadline
+    # independent of the parallel CI workers' subprocess startup contention.
     command = _python_shell_command(
         "import sys; data = sys.stdin.read(); print('STDIN:' + data)"
     )

@@ -22,6 +22,22 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 NODE_VERIFIER = REPO_ROOT / "opensquilla-webui" / "scripts" / "verify-dist.mjs"
 
 
+@pytest.fixture
+def isolated_node_verifier(tmp_path: Path) -> Path:
+    """Run the unchanged CLI against a small source tree beside its script."""
+    webui = tmp_path / "opensquilla-webui"
+    verifier = webui / "scripts" / NODE_VERIFIER.name
+    verifier.parent.mkdir(parents=True)
+    shutil.copyfile(NODE_VERIFIER, verifier)
+    (webui / ".node-version").write_text("22.12.0\n", encoding="utf-8")
+    (webui / "package.json").write_text(
+        '{"scripts":{"build":"vite build"}}\n', encoding="utf-8"
+    )
+    (webui / "src").mkdir()
+    (webui / "src/App.vue").write_text("<template>Hello</template>\n", encoding="utf-8")
+    return verifier
+
+
 def _utf8_key(value: str) -> bytes:
     return value.encode("utf-8")
 
@@ -333,7 +349,9 @@ def test_node_verifier_runs_when_invoked_through_symlink(tmp_path: Path) -> None
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_node_verifier_rejects_sensitive_artifact_files(tmp_path: Path) -> None:
+def test_node_verifier_rejects_sensitive_artifact_files(
+    tmp_path: Path, isolated_node_verifier: Path
+) -> None:
     dist = tmp_path / "dist"
     (dist / "assets").mkdir(parents=True)
     (dist / "assets/app.js").write_text("console.log('hello')\n", encoding="utf-8")
@@ -354,8 +372,8 @@ def test_node_verifier_rejects_sensitive_artifact_files(tmp_path: Path) -> None:
     )
 
     result = subprocess.run(
-        ["node", str(NODE_VERIFIER), "--write", str(dist)],
-        cwd=REPO_ROOT / "opensquilla-webui",
+        ["node", str(isolated_node_verifier), "--write", str(dist)],
+        cwd=isolated_node_verifier.parent.parent,
         check=False,
         capture_output=True,
         text=True,
@@ -368,7 +386,9 @@ def test_node_verifier_rejects_sensitive_artifact_files(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_node_verifier_rejects_multiple_control_entry_scripts(tmp_path: Path) -> None:
+def test_node_verifier_rejects_multiple_control_entry_scripts(
+    tmp_path: Path, isolated_node_verifier: Path
+) -> None:
     dist = tmp_path / "dist"
     (dist / "assets").mkdir(parents=True)
     (dist / "assets/app.js").write_text("console.log('app')\n", encoding="utf-8")
@@ -390,8 +410,8 @@ def test_node_verifier_rejects_multiple_control_entry_scripts(tmp_path: Path) ->
     )
 
     result = subprocess.run(
-        ["node", str(NODE_VERIFIER), "--write", str(dist)],
-        cwd=REPO_ROOT / "opensquilla-webui",
+        ["node", str(isolated_node_verifier), "--write", str(dist)],
+        cwd=isolated_node_verifier.parent.parent,
         check=False,
         capture_output=True,
         text=True,
@@ -403,7 +423,9 @@ def test_node_verifier_rejects_multiple_control_entry_scripts(tmp_path: Path) ->
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
-def test_python_accepts_node_manifest_with_unicode_artifact_names(tmp_path: Path) -> None:
+def test_python_accepts_node_manifest_with_unicode_artifact_names(
+    tmp_path: Path, isolated_node_verifier: Path
+) -> None:
     dist = tmp_path / "dist"
     assets = dist / "assets"
     assets.mkdir(parents=True)
@@ -421,22 +443,22 @@ def test_python_accepts_node_manifest_with_unicode_artifact_names(tmp_path: Path
     )
 
     subprocess.run(
-        ["node", str(NODE_VERIFIER), "--write", str(dist)],
-        cwd=REPO_ROOT / "opensquilla-webui",
+        ["node", str(isolated_node_verifier), "--write", str(dist)],
+        cwd=isolated_node_verifier.parent.parent,
         check=True,
         capture_output=True,
         text=True,
         timeout=30,
     )
 
-    files = verify_dist(dist, webui_root=REPO_ROOT / "opensquilla-webui")
+    files = verify_dist(dist, webui_root=isolated_node_verifier.parent.parent)
     assert "assets/😀.js" in files
     assert "assets/Ａ.css" in files
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
 def test_node_official_guard_rejects_tracks_in_the_tracked_playlist(
-    tmp_path: Path,
+    tmp_path: Path, isolated_node_verifier: Path
 ) -> None:
     dist = tmp_path / "dist"
     (dist / "assets").mkdir(parents=True)
@@ -458,8 +480,8 @@ def test_node_official_guard_rejects_tracks_in_the_tracked_playlist(
         encoding="utf-8",
     )
     subprocess.run(
-        ["node", str(NODE_VERIFIER), "--write", str(dist)],
-        cwd=REPO_ROOT / "opensquilla-webui",
+        ["node", str(isolated_node_verifier), "--write", str(dist)],
+        cwd=isolated_node_verifier.parent.parent,
         check=True,
         capture_output=True,
         text=True,
@@ -467,8 +489,8 @@ def test_node_official_guard_rejects_tracks_in_the_tracked_playlist(
     )
 
     result = subprocess.run(
-        ["node", str(NODE_VERIFIER), "--forbid-personal-bgm", str(dist)],
-        cwd=REPO_ROOT / "opensquilla-webui",
+        ["node", str(isolated_node_verifier), "--forbid-personal-bgm", str(dist)],
+        cwd=isolated_node_verifier.parent.parent,
         check=False,
         capture_output=True,
         text=True,

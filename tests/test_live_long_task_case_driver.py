@@ -294,6 +294,141 @@ def test_gateway_config_contains_env_names_but_not_credential_values(
     assert "enabled = true" in rendered
 
 
+@pytest.fixture
+def startup_gateway():
+    case = driver.LiveCase(
+        case_id="deepseek-startup-synthetic-1", provider="deepseek",
+        model="deepseek-v4-flash", scenario="direct", repeat_index=1,
+        fallback_provider=None,
+        remaining_budget=driver.CaseBudget(60_000, 1, 1, 1_000),
+    )
+    gateway = driver.GatewayProcess(case, secret_values=())
+    yield gateway
+    # The failure-path tests use a synthetic process, never an OS PID.
+    gateway.proc = None
+    gateway.cleanup()
+    assert not gateway.root.exists()
+
+
+@pytest.mark.parametrize("exit_code", [17, None])
+@pytest.mark.parametrize("prefix", [
+    "", "2026-09-18T13:00:00+00:00 [INFO] opensquilla.gateway.boot: ",
+])
+def test_gateway_startup_failure_keeps_safe_phase_evidence(
+    startup_gateway, monkeypatch: pytest.MonkeyPatch, exit_code: int | None, prefix: str,
+) -> None:
+    gateway = startup_gateway
+    secret = "synthetic-secret-must-never-appear"
+    phase = {
+        "event": "gateway.startup_phase", "phase": "services", "status": "ready",
+        "duration_ms": 12, "startup_elapsed_ms": 34,
+        "message": secret, "path": str(gateway.root),
+    }
+
+    def launch(*_args, **_kwargs):
+        (gateway.root / "gateway.stdout.log").write_text(prefix + json.dumps(phase) + "\n")
+        return SimpleNamespace(poll=lambda: exit_code)
+
+    now = [0.0]
+
+    def advance(seconds):
+        now[0] += seconds
+
+    def unavailable(*_args, **_kwargs):
+        raise driver.urllib.error.HTTPError(secret, 503, secret, {}, None)
+
+    monkeypatch.setattr(driver.subprocess, "Popen", launch)
+    monkeypatch.setattr(driver, "time", SimpleNamespace(monotonic=lambda: now[0], sleep=advance))
+    monkeypatch.setattr(driver.urllib.request, "urlopen", unavailable)
+    with pytest.raises(driver.DriverConfigurationError) as caught:
+        gateway.start()
+    message = str(caught.value)
+    assert secret not in message
+    assert str(gateway.root) not in message
+    evidence = json.loads(message.split("; startup=", 1)[1])
+    assert evidence == {
+        "elapsed_ms": 0 if exit_code is not None else 45_000,
+        "exit_code": exit_code,
+        "last_health_status": None if exit_code is not None else 503,
+        "phases": {"services": {
+            "status": "ready", "duration_ms": 12, "startup_elapsed_ms": 34,
+        }},
+    }
+
+
+@pytest.mark.parametrize("log_name", ["gateway.stdout.log", "gateway.stderr.log"])
+def test_gateway_startup_failure_excludes_previous_attempt_phases(
+    startup_gateway, monkeypatch: pytest.MonkeyPatch, log_name: str,
+) -> None:
+    gateway = startup_gateway
+    previous = {
+        "event": "gateway.startup_phase", "phase": "gateway_ready", "status": "ready",
+        "duration_ms": 12, "startup_elapsed_ms": 34_000,
+    }
+    current = {
+        **previous, "phase": "config", "duration_ms": 3, "startup_elapsed_ms": 4,
+    }
+    log = gateway.root / log_name
+    log.write_text(json.dumps(previous) + "\n", encoding="utf-8")
+
+    def launch(*_args, **_kwargs):
+        with log.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(current) + "\n")
+        return SimpleNamespace(poll=lambda: 17)
+
+    monkeypatch.setattr(driver.subprocess, "Popen", launch)
+    with pytest.raises(driver.DriverConfigurationError) as caught:
+        gateway.start()
+
+    evidence = json.loads(str(caught.value).split("; startup=", 1)[1])
+    assert evidence["exit_code"] == 17
+    assert evidence["phases"] == {
+        "config": {"status": "ready", "duration_ms": 3, "startup_elapsed_ms": 4},
+    }
+    # Both attempts remain available for the mandatory secret scan in cleanup.
+    assert [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] == [
+        previous, current,
+    ]
+
+
+def test_gateway_startup_diagnostics_bound_and_filter_raw_logs(startup_gateway) -> None:
+    gateway = startup_gateway
+    valid = {
+        "event": "gateway.startup_phase", "phase": "services", "status": "ready",
+        "duration_ms": 12, "startup_elapsed_ms": 34,
+    }
+    hostile = [
+        {**valid, "phase": "arbitrary-secret-phase"},
+        {**valid, "status": "arbitrary-secret-status"},
+        {**valid, "phase": ["services"]},
+        {**valid, "duration_ms": "secret-duration"},
+        {**valid, "duration_ms": True},
+        {**valid, "duration_ms": -1},
+        {**valid, "startup_elapsed_ms": 3_600_001},
+        {**valid, "event": "arbitrary-secret-event"},
+    ]
+    log = gateway.root / "gateway.stdout.log"
+    log.write_text(
+        json.dumps({**valid, "phase": "config"}) + "\n"
+        + "padding" * driver._STARTUP_LOG_TAIL_BYTES + "\n"
+        + "not-json\n[1,2,3]\n"
+        + "\n".join(json.dumps(record) for record in [valid, *hostile]),
+    )
+    error = gateway._startup_failure("Gateway did not become healthy", driver.time.monotonic(),
+                                     None, None)
+    evidence = json.loads(str(error).split("; startup=", 1)[1])
+    assert evidence["phases"] == {"services": {
+        "status": "ready", "duration_ms": 12, "startup_elapsed_ms": 34,
+    }}
+    assert "secret" not in str(error)
+    assert len(str(error)) < 400
+    log.unlink()
+    # Missing logs must preserve the original startup failure, not replace it.
+    error = gateway._startup_failure("Gateway exited during startup", driver.time.monotonic(),
+                                     1, None)
+    assert json.loads(str(error).split("; startup=", 1)[1])["phases"] == {}
+
+
 def test_gateway_cleanup_retries_transient_windows_file_handle_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

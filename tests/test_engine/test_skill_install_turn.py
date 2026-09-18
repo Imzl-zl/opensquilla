@@ -291,6 +291,7 @@ def test_final_receipt_never_claims_unusable_skill_is_ready(axis, state, hint) -
 
 
 @pytest.mark.asyncio
+@pytest.mark.ci_serial
 async def test_explicit_turn_deadline_cancels_install_and_preserves_receipt(setup, monkeypatch):
     import asyncio
 
@@ -344,7 +345,19 @@ async def test_explicit_turn_deadline_cancels_install_and_preserves_receipt(setu
                 install_tasks.update(futures)
                 deadline_budgets.append(timeout)
                 assert timeout == pytest.approx(agent.config.timeout)
-                await fetch_started.wait()
+                fetch_waiter = asyncio.create_task(fetch_started.wait())
+                try:
+                    done, _ = await asyncio.wait(
+                        {*futures, fetch_waiter}, return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if not fetch_started.is_set():
+                        pytest.fail(
+                            "install ended before fetch started: "
+                            f"{[task.result() for task in done]!r}",
+                        )
+                finally:
+                    fetch_waiter.cancel()
+                    await asyncio.gather(fetch_waiter, return_exceptions=True)
                 clock.now += timeout
                 return await asyncio.wait(futures, timeout=0, return_when=return_when)
             # Other waits do not advance this test's controlled deadline.
@@ -361,6 +374,8 @@ async def test_explicit_turn_deadline_cancels_install_and_preserves_receipt(setu
     async def collect_turn():
         return [event async for event in agent.run_turn("install demo")]
 
+    # Real filesystem setup/settlement shares this watchdog with cancellation.
+    # Keep the integration case out of the saturated parallel Windows phase.
     # The watchdog uses the real loop; production cancellation and receipts do too.
     turn = asyncio.create_task(collect_turn())
     try:
