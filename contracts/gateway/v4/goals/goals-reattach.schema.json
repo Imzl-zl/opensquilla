@@ -15,9 +15,9 @@
     "compatibility": "exact-json-tree"
   },
   "x-opensquilla-codegen": {
-    "python": {"tool": "datamodel-code-generator", "version": "0.75.1", "target": "pydantic_v2.BaseModel"},
-    "typescript": {"tool": "json-schema-to-typescript", "version": "15.0.4"},
-    "runtimeValidation": {"tool": "ajv", "version": "8.17.1", "mode": "standalone-adapter-only"}
+    "python": {"tool": "datamodel-code-generator", "version": "0.81.0", "target": "pydantic_v2.BaseModel"},
+    "typescript": {"tool": "json-schema-to-typescript", "version": "16.0.0"},
+    "runtimeValidation": {"tool": "ajv", "version": "8.20.0", "mode": "standalone-adapter-only"}
   },
   "x-opensquilla-method": {
     "name": "goals.reattach",
@@ -194,7 +194,12 @@
         "updatedAt": {"type": "integer", "minimum": 0},
         "updated_at": {"type": "integer", "minimum": 0},
         "finishedAt": {"type": ["integer", "null"], "minimum": 0},
-        "finished_at": {"type": ["integer", "null"], "minimum": 0}
+        "finished_at": {"type": ["integer", "null"], "minimum": 0},
+        "tokenBudget": {"type": ["integer", "null"], "minimum": 1},
+        "executionPolicy": {"enum": ["foreground", "background"]},
+        "budgetTokensUsed": {"type": "integer", "minimum": 0},
+        "usageCoverage": {"enum": ["complete", "partial_history", "partial_usage"]},
+        "usageAccountingStartedAtMs": {"type": ["integer", "null"], "minimum": 0}
       },
       "allOf": [
         {

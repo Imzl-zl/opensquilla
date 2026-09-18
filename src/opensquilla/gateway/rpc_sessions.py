@@ -70,6 +70,7 @@ from opensquilla.application.turn_acceptance_ports import (
 from opensquilla.application.turn_admission import (
     AdmitTurn,
     AdmitTurnResult,
+    CancelTurn,
     TurnAdmission,
 )
 from opensquilla.application.turn_cancellation import (
@@ -107,6 +108,7 @@ from opensquilla.gateway.adapters.plans_contract import (
     register_plans_implement_contract,
     register_plans_revise_contract,
     register_plans_set_mode_contract,
+    register_plans_set_presentation_contract,
 )
 from opensquilla.gateway.adapters.session_control_contract import (
     register_session_control_contract,
@@ -1704,6 +1706,22 @@ def _task_summary(row: Any) -> dict[str, Any]:
             value = details.get(field)
             if isinstance(value, str) and value:
                 summary[field] = value
+        metadata = details.get("metadata")
+        if isinstance(metadata, dict) and isinstance(metadata.get("progress"), dict):
+            summary["progress"] = dict(metadata["progress"])
+        plan_result = metadata.get("plan_result") if isinstance(metadata, dict) else None
+        if isinstance(plan_result, dict) and plan_result.get("status") in {
+            "submitted", "discussion",
+        }:
+            summary["plan_result"] = {
+                "status": plan_result["status"],
+                **{
+                    key: plan_result[key]
+                    for key in ("previousRevisionId", "revisionId")
+                    if key in plan_result
+                    if plan_result[key] is None or isinstance(plan_result[key], str)
+                },
+            }
         turn_outcome = details.get("turn_outcome")
         if isinstance(turn_outcome, dict):
             summary["turn_outcome"] = dict(turn_outcome)
@@ -2407,6 +2425,14 @@ async def _handle_sessions_list(params: dict | None, ctx: RpcContext) -> dict:
 
     is_guest = GuestRpcPolicy.is_guest(ctx)
     owner_id = getattr(ctx.principal, "guest_owner_id", None) if is_guest else None
+    if not is_guest:
+        try:
+            numeric_limit = int(limit)
+        except (TypeError, ValueError):
+            pass
+        else:
+            if numeric_limit < 1:
+                raise ValueError("params.limit must be >= 1")
     if count_only:
         count_sessions = getattr(storage, "count_sessions", None)
         if callable(count_sessions):
@@ -4074,6 +4100,7 @@ def _build_session_read_application(
         collaboration: Mapping[str, Any] | None = None
         current_plan_payload: Mapping[str, Any] | None = None
         active_plan_run_payload: Mapping[str, Any] | None = None
+        plan_presentations: list[dict[str, Any]] = []
         goal_payload: Mapping[str, Any] | None = None
         session_epoch: int | None = None
         if storage is not None and session is not None:
@@ -4084,6 +4111,9 @@ def _build_session_read_application(
                 session_key,
             )
             collaboration = _plan_collaboration_snapshot(session)
+            get_presentations = getattr(storage, "get_plan_presentations", None)
+            if callable(get_presentations):
+                plan_presentations = await get_presentations(session_key)
             get_current_plan = getattr(storage, "get_current_plan_revision", None)
             get_active_run = getattr(storage, "get_active_plan_run", None)
             current_plan = (
@@ -4124,6 +4154,7 @@ def _build_session_read_application(
             collaboration=collaboration,
             current_plan=current_plan_payload,
             active_plan_run=active_plan_run_payload,
+            plan_presentations=tuple(plan_presentations),
             goal=goal_payload,
             epoch=session_epoch,
         )
@@ -4913,7 +4944,7 @@ async def _handle_plans_implement(
     explicit_message = _optional_string_param(params, "message")
     message = explicit_message or (
         f"Implement the approved plan “{revision_title}”. "
-        "Work through its ordered steps and record truthful checkpoints."
+        "Verify existing work, adapt the approach as needed, and report actual progress."
     )
     send_params = {
         "key": key,
@@ -5134,6 +5165,64 @@ async def _handle_plans_revise(
     return {**result, "sessionKey": key, "collaboration": collaboration}
 
 
+async def _handle_plans_set_presentation(params: dict | None, ctx: RpcContext) -> dict:
+    """Hide/restore a proposal without altering mode, plan content, or task ownership."""
+    from opensquilla.persistence.plan_presentation import (
+        PlanPresentationConflictError,
+        PlanPresentationRequestConflictError,
+    )
+    from opensquilla.session.storage import StaleEpochError
+
+    key = _require_plan_session_key(params)
+    values = params or {}
+    revision_id = _optional_string_param(params, "revisionId")
+    request_id = _optional_string_param(params, "clientRequestId")
+    if revision_id is None or request_id is None:
+        raise ValueError("params.revisionId and params.clientRequestId are required")
+    dismissed = values.get("dismissed")
+    if not isinstance(dismissed, bool):
+        raise ValueError("params.dismissed must be a boolean")
+    for field in ("expectedEpoch", "expectedPresentationRevision"):
+        value = values.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"params.{field} must be a non-negative integer")
+    if ctx.session_manager is None:
+        raise RpcUnavailableError("Session manager is not configured")
+    storage = get_session_storage(ctx.session_manager)
+    if storage is None:
+        raise RpcUnavailableError("Session storage is not configured")
+    try:
+        snapshot, replayed = await storage.set_plan_presentation(
+            key, revision_id, dismissed=dismissed,
+            expected_epoch=values["expectedEpoch"],
+            expected_presentation_revision=values["expectedPresentationRevision"],
+            client_request_id=request_id,
+        )
+    except StaleEpochError as exc:
+        raise RpcHandlerError(
+            "SESSION_CHANGED", str(exc), retryable=True, accepted=False,
+        ) from exc
+    except PlanPresentationRequestConflictError as exc:
+        raise RpcHandlerError(
+            "PLAN_PRESENTATION_REQUEST_CONFLICT", str(exc), retryable=False, accepted=False,
+        ) from exc
+    except PlanPresentationConflictError as exc:
+        raise RpcHandlerError(
+            "PLAN_PRESENTATION_CHANGED", str(exc), retryable=True, accepted=False,
+            details={"sessionKey": key, "epoch": values["expectedEpoch"],
+                     "planPresentations": await storage.get_plan_presentations(key)},
+        ) from exc
+    response = {
+        "sessionKey": key, "epoch": values["expectedEpoch"],
+        "accepted": True, "replayed": replayed, "clientRequestId": request_id,
+        "planPresentations": [snapshot],
+    }
+    # Replays return their original receipt but do not rebroadcast old state.
+    if not replayed:
+        await _emit_to_subscribers(ctx, key, "session.event.plan_presentation", response)
+    return response
+
+
 async def _handle_plans_cancel_run(params: dict | None, ctx: RpcContext) -> dict:
     key = _require_plan_session_key(params)
     run_id = _optional_string_param(params, "runId", "run_id")
@@ -5209,12 +5298,17 @@ async def _handle_plans_cancel_run(params: dict | None, ctx: RpcContext) -> dict
                 raise RpcUnavailableError(
                     "Task runtime is unavailable; the implementation was not cancelled"
                 )
-            cancelled_count = await _cancel_task_runtime(
-                task_runtime,
-                session_key=key,
-                task_id=active_task_id,
-                source="plans.cancelRun",
-                reason="cancelled_by_user",
+            # Ordinary tools may delegate or start task-owned processes. Use
+            # the public exact-task cleanup so Stop also fences late child
+            # completion delivery and cancels this task's descendants.
+            cancellation = await build_turn_admission_application(ctx).cancel(
+                CancelTurn(
+                    session_key=key,
+                    surface="webchat",
+                    task_id=active_task_id,
+                    task_scoped=True,
+                    source="plans.cancelRun",
+                )
             )
             try:
                 terminal_task = await runtime_wait(active_task_id, timeout=10.0)
@@ -5238,7 +5332,7 @@ async def _handle_plans_cancel_run(params: dict | None, ctx: RpcContext) -> dict
                     "The implementation task did not acknowledge cancellation.",
                     details={
                         "taskId": active_task_id,
-                        "cancelledCount": cancelled_count,
+                        "cancelledCount": int(bool(cancellation.get("aborted"))),
                     },
                     retryable=True,
                     accepted=False,
@@ -5275,6 +5369,12 @@ async def _handle_plans_cancel_run(params: dict | None, ctx: RpcContext) -> dict
     return {"sessionKey": key, "planRun": snapshot}
 
 
+_handle_plans_set_presentation_contract = register_plans_set_presentation_contract(
+    _d,
+    _handle_plans_set_presentation,
+    internal_error=RpcHandlerError,
+    guest_allowed_checker=is_guest_rpc_method_allowed,
+)
 _handle_plans_set_mode_contract = register_plans_set_mode_contract(
     _d,
     _handle_plans_set_mode,
@@ -5430,6 +5530,8 @@ async def _handle_sessions_bootstrap(params: dict | None, ctx: RpcContext) -> di
                 "projectWorkspace": project_snapshot,
             }
         )
+    get_presentations = getattr(storage, "get_plan_presentations", None)
+    plan_presentations = await get_presentations(session_key) if callable(get_presentations) else []
     get_current_plan = getattr(storage, "get_current_plan_revision", None)
     get_active_run = getattr(storage, "get_active_plan_run", None)
     current_plan = await get_current_plan(session_key) if callable(get_current_plan) else None
@@ -5457,6 +5559,7 @@ async def _handle_sessions_bootstrap(params: dict | None, ctx: RpcContext) -> di
         "activePlanRun": (
             plan_run_snapshot(active_plan_run) if active_plan_run is not None else None
         ),
+        "planPresentations": plan_presentations,
         "planCapabilities": {
             "planMode": True,
             "implementation": ctx.task_runtime is not None,

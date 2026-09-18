@@ -36,6 +36,10 @@ import {
   persistPendingMetaDiscard,
 } from '@/utils/chat/metaDiscardOutbox'
 import { RpcTransportError } from '@/lib/rpc'
+import {
+  readSessionNavigationDiag,
+  setSessionNavigationDiagStorageForTest,
+} from '@/utils/chat/sessionNavigationDiag'
 import type {
   PendingInputWal,
   ResponseHandoffWalRecord,
@@ -2642,6 +2646,78 @@ describe('useChatSend attachment payloads', () => {
       expect.objectContaining({ message: 'hello' }),
     )
   })
+
+  it.each((['preflight', 'attachments'] as const).flatMap(stage => (
+    (['project', 'identity', 'both'] as const).map(changed => ({ stage, changed }))
+  )))(
+    'keeps a new-task draft when $changed changes during $stage preparation',
+    async ({ stage, changed }) => {
+      const pendingWorkspaceId = ref<string | null>('project-a')
+      const deliveryIdentity = ref<string | null>('synthetic-owner')
+      let finish!: () => void
+      let isCurrent: (() => boolean) | undefined
+      const preparation = vi.fn((state?: { isCurrent?: () => boolean }) => new Promise<any>(resolve => {
+        isCurrent = state?.isCurrent
+        finish = () => resolve(stage === 'preflight' ? null : true)
+      }))
+      const attachment: Attachment = {
+        kind: 'staged', local_id: 1, name: 'report.pdf', mime: 'application/pdf', file_uuid: 'file-report',
+      }
+      const { api, options, rpc } = makeOptions({
+        pendingSessionIntent: ref('new_chat'),
+        pendingWorkspaceId,
+        deliveryIdentity,
+        pendingAttachments: ref([attachment]),
+        ...(stage === 'preflight'
+          ? { validateActiveProjectBeforeSend: preparation }
+          : { prepareAttachmentsForSend: preparation }),
+      })
+      const sending = api.onSend()
+      await vi.waitFor(() => expect(preparation).toHaveBeenCalledOnce())
+      if (stage === 'attachments') expect(isCurrent?.()).toBe(true)
+      if (changed !== 'identity') pendingWorkspaceId.value = 'project-b'
+      if (changed !== 'project') deliveryIdentity.value = 'synthetic-other-owner'
+      if (stage === 'attachments') expect(isCurrent?.()).toBe(false)
+      finish()
+      await sending
+
+      expect(rpc.call).not.toHaveBeenCalled()
+      expect(options.inputText.value).toBe('hello')
+      expect(options.pendingAttachments.value).toEqual([attachment])
+      expect(options.pendingSessionIntent.value).toBe('new_chat')
+      expect(options.messages.value).toEqual([])
+    },
+  )
+
+  it.each([false, true])(
+    'retains the original project for receipt replay only under the same delivery identity (changed=%s)',
+    async identityChanged => {
+      const pendingWorkspaceId = ref<string | null>('project-a')
+      const deliveryIdentity = ref<string | null>('synthetic-owner')
+      const { api, rpc } = makeOptions({
+        pendingSessionIntent: ref('new_chat'),
+        pendingWorkspaceId,
+        deliveryIdentity,
+        rpc: {
+          call: vi.fn()
+            .mockRejectedValueOnce(new RpcTransportError('Connection closed', null))
+            .mockResolvedValueOnce({ sessionKey: 'agent:main:webchat:test', task_id: 'project-task' }),
+        },
+      })
+
+      await api.onSend()
+      const firstParams = rpc.call.mock.calls[0]?.[1]
+      expect(firstParams).toEqual(expect.objectContaining({
+        intent: 'new_chat', workspaceId: 'project-a',
+      }))
+      pendingWorkspaceId.value = 'project-b'
+      if (identityChanged) deliveryIdentity.value = 'synthetic-other-owner'
+      await api.onSend()
+
+      expect(rpc.call).toHaveBeenCalledTimes(identityChanged ? 1 : 2)
+      if (!identityChanged) expect(rpc.call.mock.calls[1]?.[1]).toEqual(firstParams)
+    },
+  )
 
   it('binds a new project task to its workspace and preserves that binding on retry', async () => {
     const pendingSessionIntent = ref<string | null>('new_chat')
@@ -7318,6 +7394,40 @@ describe('useChatSend image admission', () => {
 
     expect(sessionKey.value).toBe(secondKey)
     expect(pendingSessionIntent.value).toBe('new_chat')
+  })
+
+  it('records a redacted late acceptance after a session switch without navigating or aborting', async () => {
+    setSessionNavigationDiagStorageForTest(memoryStorage())
+    try {
+      let resolveSend!: (value: { sessionKey: string; task_id: string }) => void
+      const firstKey = 'agent:main:webchat:private-first'
+      const secondKey = 'agent:main:webchat:private-second'
+      const sessionKey = ref(firstKey)
+      const rpc = {
+        call: vi.fn(() => new Promise<{ sessionKey: string; task_id: string }>(resolve => {
+          resolveSend = resolve
+        })),
+      }
+      const { api } = makeOptions({ rpc: rpc as UseChatSendOptions['rpc'], sessionKey })
+      const send = api.onSend()
+      await vi.waitFor(() => expect(rpc.call).toHaveBeenCalledOnce())
+      sessionKey.value = secondKey
+      resolveSend({ sessionKey: firstKey, task_id: 'task-first' })
+      await send
+
+      expect(sessionKey.value).toBe(secondKey)
+      expect(rpc.call).toHaveBeenCalledOnce()
+      const stale = readSessionNavigationDiag().filter(entry => entry.source === 'send.response.stale')
+      expect(stale).toHaveLength(1)
+      expect(stale[0]).toMatchObject({ reason: 'current_session_changed' })
+      expect(stale[0]?.requestSession).toMatch(/^target-[0-9a-f]{8}$/)
+      expect(stale[0]?.responseSession).toBe(stale[0]?.requestSession)
+      expect(stale[0]?.current).not.toBe(stale[0]?.requestSession)
+      expect(JSON.stringify(stale)).not.toContain(firstKey)
+      expect(JSON.stringify(stale)).not.toContain(secondKey)
+    } finally {
+      setSessionNavigationDiagStorageForTest(null)
+    }
   })
 
   it('does not attach an initial collaboration mode to an existing-session send', async () => {

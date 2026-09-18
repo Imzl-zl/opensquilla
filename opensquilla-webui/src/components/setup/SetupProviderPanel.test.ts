@@ -353,6 +353,66 @@ describe('SetupProviderPanel — verify configuration', () => {
 })
 
 describe('SetupProviderPanel — visible verification dialog', () => {
+  it('keeps refresh and discovery feedback visible in the provider editor', async () => {
+    const onRefreshModels = vi.fn()
+    const { app, el, panelState } = await mountPanel({
+      connection: connection({ discovering: true }),
+    }, { onRefreshModels })
+    try {
+      const dialog = await openConfiguredEditor(el)
+      const refresh = dialog.querySelector<HTMLButtonElement>('[data-testid="setup-refresh-models"]')!
+      const status = () => dialog.querySelector('[data-testid="setup-model-catalog-sync"]')
+      expect(status()?.textContent).toBe('Discovering models…')
+      expect(status()?.getAttribute('role')).toBe('status')
+      expect(refresh.disabled).toBe(true)
+      expect(dialog.querySelector<HTMLInputElement>('input[name="setup_provider_model"]')?.disabled)
+        .toBe(false)
+
+      panelState.connection = connection({ discoverError: 'HTTP 401' })
+      await nextTick()
+      expect(status()?.textContent).toContain('Couldn\'t list models — type a model id.')
+      expect(status()?.textContent).toContain('HTTP 401')
+      expect(refresh.disabled).toBe(false)
+      refresh.click()
+      expect(onRefreshModels).toHaveBeenCalledOnce()
+
+      panelState.connection = connection({ modelSource: 'live' })
+      await nextTick()
+      expect(status()?.textContent).toBe('Available · 0')
+    } finally { app.unmount() }
+  })
+
+  it('lets a DeepSeek editor choose and save a discovered model without replacing its ID', async () => {
+    const onUpdateProviderField = vi.fn((_name: string, value: unknown) => {
+      panelState.providerFieldValue = () => String(value)
+    })
+    const onSaveProvider = vi.fn()
+    const { app, el, panelState } = await mountPanel({
+      providerSelected: 'deepseek',
+      runtimeProviders: [{ providerId: 'deepseek', label: 'DeepSeek' }],
+      providerFieldValue: () => 'deepseek-v4-flash',
+      connection: connection({
+        modelSource: 'live',
+        models: [{ ...DISCOVERED[0], id: 'deepseek-flash', name: 'DeepSeek Flash' }],
+      }),
+    }, { dirty: true, onUpdateProviderField, onSaveProvider })
+    try {
+      const dialog = await openConfiguredEditor(el, 'deepseek')
+      dialog.querySelector<HTMLButtonElement>('[data-testid="setup-model-options-toggle"]')!.click()
+      await nextTick()
+      const option = Array.from(document.body.querySelectorAll<HTMLButtonElement>('[role="option"]'))
+        .find(row => row.textContent?.includes('deepseek-flash'))!
+      expect(option).toBeTruthy()
+      option.click()
+      await nextTick()
+      expect(onUpdateProviderField).toHaveBeenCalledWith('model', 'deepseek-flash')
+      expect(dialog.querySelector<HTMLInputElement>('input[name="setup_provider_model"]')?.value)
+        .toBe('deepseek-flash')
+      dialog.querySelector<HTMLButtonElement>('.setup-provider-modal__footer .btn--primary')!.click()
+      expect(onSaveProvider).toHaveBeenCalledOnce()
+    } finally { app.unmount() }
+  })
+
   it('uses separate probe modes and shows successful model timings in the teleported editor', async () => {
     const onProbeConnection = vi.fn()
     const { app, el } = await mountPanel({
@@ -1533,15 +1593,18 @@ describe('SetupProviderPanel — configured provider management', () => {
     app.unmount()
   })
 
-  it('marks the newly active row while the primary transition settles', async () => {
+  it('marks the newly active row while it moves to the top and settles', async () => {
     vi.useFakeTimers()
     const { app, el, panelState } = await mountPanel({ configuredProviders: configured })
     try {
       const rows = panelState.configuredProviders as Array<Record<string, unknown>>
       rows[0]!.active = false
       rows[1]!.active = true
+      rows.reverse()
       await nextTick()
 
+      expect(el.querySelector('[data-provider-id]')?.getAttribute('data-provider-id'))
+        .toBe('deepseek')
       expect(el.querySelector('[data-provider-id="deepseek"]')?.classList.contains('is-settling'))
         .toBe(true)
       vi.advanceTimersByTime(700)
@@ -1551,6 +1614,142 @@ describe('SetupProviderPanel — configured provider management', () => {
     } finally {
       app.unmount()
       vi.useRealTimers()
+    }
+  })
+
+  it('lets only the latest primary settle for its complete transition window', async () => {
+    vi.useFakeTimers()
+    const { app, el, panelState } = await mountPanel({ configuredProviders: configured })
+    try {
+      const rows = panelState.configuredProviders as Array<Record<string, unknown>>
+      rows[0]!.active = false
+      rows[1]!.active = true
+      rows.reverse()
+      await nextTick()
+      vi.advanceTimersByTime(300)
+
+      rows[0]!.active = false
+      rows[1]!.active = true
+      rows.reverse()
+      await nextTick()
+
+      expect(Array.from(el.querySelectorAll<HTMLElement>('.is-settling'))
+        .map(row => row.dataset.providerId)).toEqual(['openai'])
+      vi.advanceTimersByTime(400)
+      await nextTick()
+      expect(el.querySelector('[data-provider-id="openai"]')?.classList.contains('is-settling'))
+        .toBe(true)
+      vi.advanceTimersByTime(300)
+      await nextTick()
+      expect(el.querySelector('.is-settling')).toBeNull()
+    } finally {
+      app.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('restores activation focus to the same provider edit action without scrolling', async () => {
+    const ready = configured.map(row => ({
+      ...row,
+      ready: true,
+      primaryEligible: !row.active,
+      primaryBlockReason: row.active ? 'already_active' : '',
+    }))
+    const onActivateProvider = vi.fn()
+    const { app, el, panelState } = await mountPanel({ configuredProviders: ready, busy: false }, {
+      onActivateProvider,
+    })
+    let restoreFocusSpy: (() => void) | undefined
+    try {
+      const activate = el.querySelector<HTMLButtonElement>(
+        '[data-provider-id="deepseek"] .setup-provider-card__activate',
+      )!
+      activate.focus()
+      activate.click()
+      expect(onActivateProvider).toHaveBeenCalledWith('deepseek')
+
+      const mutablePanel = panelState as unknown as {
+        busy: boolean
+        activation: { providerId: string; phase: string }
+        configuredProviders: Array<Record<string, unknown>>
+      }
+      mutablePanel.busy = true
+      mutablePanel.activation.providerId = 'deepseek'
+      mutablePanel.activation.phase = 'activating'
+      await nextTick()
+      mutablePanel.configuredProviders = [...ready].reverse().map(row => ({
+        ...row,
+        active: row.providerId === 'deepseek',
+        primaryEligible: row.providerId !== 'deepseek',
+        primaryBlockReason: row.providerId === 'deepseek' ? 'already_active' : '',
+      }))
+      await nextTick()
+
+      const edit = el.querySelector<HTMLButtonElement>(
+        '[data-provider-id="deepseek"] .setup-provider-card__action',
+      )!
+      const focusSpy = vi.spyOn(edit, 'focus')
+      restoreFocusSpy = () => focusSpy.mockRestore()
+      expect(edit.disabled).toBe(true)
+      mutablePanel.activation.phase = 'idle'
+      mutablePanel.busy = false
+      await nextTick()
+      await nextTick()
+
+      expect(document.activeElement).toBe(edit)
+      expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true })
+      expect(el.querySelector('[data-provider-id]')?.getAttribute('data-provider-id'))
+        .toBe('deepseek')
+    } finally {
+      restoreFocusSpy?.()
+      app.unmount()
+    }
+  })
+
+  it('does not steal focus moved outside the provider list during activation', async () => {
+    const ready = configured.map(row => ({
+      ...row,
+      ready: true,
+      primaryEligible: !row.active,
+      primaryBlockReason: row.active ? 'already_active' : '',
+    }))
+    const { app, el, panelState } = await mountPanel({ configuredProviders: ready, busy: false })
+    const outside = document.createElement('button')
+    outside.textContent = 'Outside provider settings'
+    document.body.appendChild(outside)
+    try {
+      const activate = el.querySelector<HTMLButtonElement>(
+        '[data-provider-id="deepseek"] .setup-provider-card__activate',
+      )!
+      activate.focus()
+      activate.click()
+
+      const mutablePanel = panelState as unknown as {
+        busy: boolean
+        activation: { providerId: string; phase: string }
+        configuredProviders: Array<Record<string, unknown>>
+      }
+      mutablePanel.busy = true
+      mutablePanel.activation.providerId = 'deepseek'
+      mutablePanel.activation.phase = 'activating'
+      await nextTick()
+      outside.focus()
+      mutablePanel.configuredProviders = [...ready].reverse().map(row => ({
+        ...row,
+        active: row.providerId === 'deepseek',
+        primaryEligible: row.providerId !== 'deepseek',
+        primaryBlockReason: row.providerId === 'deepseek' ? 'already_active' : '',
+      }))
+      await nextTick()
+      mutablePanel.activation.phase = 'idle'
+      mutablePanel.busy = false
+      await nextTick()
+      await nextTick()
+
+      expect(document.activeElement).toBe(outside)
+    } finally {
+      outside.remove()
+      app.unmount()
     }
   })
 

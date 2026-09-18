@@ -17,8 +17,8 @@
       class="chat-share-picker"
       :class="{ 'is-selected': shareSelected }"
       :aria-pressed="shareSelected"
-      :title="shareSelected ? 'Remove from share image' : 'Add to share image'"
-      :aria-label="shareSelected ? 'Remove from share image' : 'Add to share image'"
+      :title="shareSelected ? t('chat.removeFromShare') : t('chat.addToShare')"
+      :aria-label="shareSelected ? t('chat.removeFromShare') : t('chat.addToShare')"
       @click.stop="emit('toggleShare', shareMessageId)"
     >
       <Icon v-if="shareSelected" name="check" :size="13" />
@@ -238,9 +238,13 @@
         :plan="part.plan"
         :disabled="planActionsDisabled"
         :pending-action="planActionPending"
+        :dismissed="planPresentations?.[part.plan.revisionId]?.dismissed"
+        :presentation-available="planPresentationAvailable"
+        :presentation-busy="Boolean(planPresentationPending)"
         @implement-current="$emit('planImplementCurrent', $event)"
         @implement-new="$emit('planImplementNew', $event)"
         @replan="$emit('planReplan', $event)"
+        @presentation-change="$emit('planPresentationChange', $event)"
       />
 
       <SessionCreatedCard
@@ -505,6 +509,8 @@ import type { ArtifactPayload } from '@/types/artifacts'
 import type {
   PlanCardAction,
   PlanCardActionTarget,
+  PlanPresentationSnapshot,
+  PlanPresentationRequest,
 } from '@/types/plans'
 import {
   isBeforeReasoningActivityStatusStep,
@@ -549,6 +555,9 @@ const props = defineProps<{
   forkBusy?: boolean
   planActionPending?: PlanCardAction | null
   planActionsDisabled?: boolean
+  planPresentations?: Record<string, PlanPresentationSnapshot>
+  planPresentationAvailable?: boolean
+  planPresentationPending?: string | null
   showTurnOutcome?: boolean
   goalOutcome?: GoalSnapshot | null
   goalElapsed?: string
@@ -574,6 +583,7 @@ const emit = defineEmits<{
   planImplementCurrent: [target: PlanCardActionTarget]
   planImplementNew: [target: PlanCardActionTarget]
   planReplan: [target: PlanCardActionTarget]
+  planPresentationChange: [request: PlanPresentationRequest]
   openSession: [sessionKey: string]
   goalClear: [goal: GoalSnapshot]
 }>()

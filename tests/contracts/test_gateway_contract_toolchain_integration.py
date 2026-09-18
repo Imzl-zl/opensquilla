@@ -100,12 +100,8 @@ def test_generic_contract_toolchain_is_real_and_deterministic(tmp_path: Path) ->
     subprocess.run(
         runner._resolved_command(
             [
-                "npm",
-                "--prefix",
-                "opensquilla-webui",
-                "exec",
-                "--",
-                "tsc",
+                "node",
+                str(ROOT / "opensquilla-webui/node_modules/typescript/bin/tsc"),
                 "--noEmit",
                 "--strict",
                 "--skipLibCheck",
@@ -208,7 +204,14 @@ def test_required_alternatives_preserve_actual_params_types(tmp_path: Path) -> N
             {**required, key: {} if method == "config.patch" else "synthetic-id"}
             for key in alternatives
         ]
-        invalid_values = [required, {**values[0], alternatives[0]: 42}]
+        invalid_values = [{**values[0], alternatives[0]: 42}]
+        if method == "goals.capabilities":
+            # Process-scoped discovery has no required session; supplied aliases
+            # still retain their property types in the generated Params.
+            values.append({})
+            invalid_values.extend({key: 42} for key in alternatives[1:])
+        else:
+            invalid_values.insert(0, required)
         if spec.document["$defs"][spec.target("params")].get("additionalProperties") is False:
             invalid_values.append({**values[0], "futureField": True})
         else:
@@ -232,7 +235,7 @@ def test_required_alternatives_preserve_actual_params_types(tmp_path: Path) -> N
     usage_path.write_text("\n".join(usage) + "\n", encoding="utf-8")
     subprocess.run(
         runner._resolved_command([
-            "npm", "--prefix", "opensquilla-webui", "exec", "--", "tsc",
+            "node", str(ROOT / "opensquilla-webui/node_modules/typescript/bin/tsc"),
             "--noEmit", "--strict", "--skipLibCheck", "--target", "ES2022",
             "--module", "ESNext", "--moduleResolution", "Bundler", str(usage_path),
         ]),

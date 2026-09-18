@@ -37,6 +37,8 @@ pytest_file_selection_arg = SHARD_MODULE["_pytest_file_selection_arg"]
 
 OFFLINE_MARKER_EXCLUSIONS = SHARD_MODULE["OFFLINE_MARKER_EXCLUSIONS"]
 RECENTLY_ADDED_ACTIVE_TESTS = {
+    # Generator provenance checks use the provisional floor pending Windows samples.
+    "tests/contracts/test_codegen_versions.py",
     # Security inventory, rendering, and functional probes use measured Windows
     # testcase totals until the next comparable three-run duration refresh.
     "tests/test_desktop/test_gateway_functional_probes.py",
@@ -170,6 +172,9 @@ RECENTLY_ADDED_ACTIVE_TESTS = {
     "tests/test_channels/test_channel_mock_certification.py",
     "tests/test_channels/test_channel_pairing.py",
     "tests/test_channels/test_discord_gateway_lifecycle.py",
+    # Real Feishu SDK coverage uses the provisional floor until a comparable
+    # three-run Windows refresh supplies measured timings.
+    "tests/test_channels/test_feishu_sdk_websocket.py",
     "tests/test_channels/test_length_declaration_conformance.py",
     "tests/test_channels/test_manager_status_telemetry.py",
     "tests/test_channels/test_matrix_contract_repairs.py",
@@ -464,6 +469,10 @@ def test_task_runtime_leak_smoke_is_marked_ci_serial() -> None:
 
 def test_runner_saturated_subprocess_contracts_are_marked_ci_serial() -> None:
     assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/test_live_provider_profile_gateway_e2e.py"),
+        "test_attachment_capacity_runner_bounds_provider_http_failures_to_one_call",
+    )
+    assert "pytest.mark.ci_serial" in _function_decorators(
         Path("tests/test_ci/test_windows_signed_update_audit.py"),
         "test_real_node_and_frozen_python_complete_only_in_new_temporary_parent",
     )
@@ -644,6 +653,7 @@ def test_prebuilt_core_wheel_environment_is_content_verified(
 def test_windows_shard_responsibilities_cover_high_risk_surfaces() -> None:
     expected = {
         "tests/test_ci/test_router_artifact_manifest.py": "core",
+        "tests/test_channels/test_feishu_sdk_websocket.py": "gateway-sqlite",
         "tests/test_gateway/test_task_runtime_terminal_cleanup.py": "gateway-sqlite",
         "tests/test_persistence/test_migrator.py": "gateway-sqlite",
         "tests/test_session/test_manager.py": "gateway-sqlite",

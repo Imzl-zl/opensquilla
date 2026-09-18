@@ -80,6 +80,7 @@
   ],
   "weights_seconds": {
     "tests/contracts/test_approval_center_contract.py": 0.01,
+    "tests/contracts/test_codegen_versions.py": 0.01,
     "tests/contracts/test_conversation_events_contract.py": 0.01,
     "tests/contracts/test_gateway_contract_parallel.py": 0.01,
     "tests/contracts/test_gateway_contract_runner.py": 0.01,
@@ -173,6 +174,7 @@
     "tests/test_channels/test_feishu_approval_card.py": 0.01,
     "tests/test_channels/test_feishu_auth_validation.py": 11.843,
     "tests/test_channels/test_feishu_reactions.py": 0.01,
+    "tests/test_channels/test_feishu_sdk_websocket.py": 0.01,
     "tests/test_channels/test_feishu_send_file.py": 0.026,
     "tests/test_channels/test_feishu_websocket_transport.py": 0.372,
     "tests/test_channels/test_length_declaration_conformance.py": 0.045,
@@ -1506,6 +1508,7 @@
     "tests/test_tools/test_shell_background_seatbelt.py": 0.01,
     "tests/test_tools/test_shell_managed_toolchains.py": 0.11,
     "tests/test_tools/test_shell_masked_pipeline.py": 0.01,
+    "tests/test_tools/test_shell_native_argv.py": 0.01,
     "tests/test_tools/test_shell_policy_windows.py": 0.024,
     "tests/test_tools/test_shell_process_isolation.py": 2.888,
     "tests/test_tools/test_shell_self_kill_policy.py": 0.065,
