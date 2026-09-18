@@ -37,6 +37,7 @@
     "provider_replay": null,
     "reasoning_content": null,
     "reasoning_tokens": 0,
+    "refusal": false,
     "stop_reason": "stop",
     "thinking_signature": null,
     "type": "DoneEvent",
