@@ -1,3 +1,4 @@
+import type { SelectedSkillRef } from '@/types/selectedSkills'
 import type { ChatPageContext } from '@/types/pageContext'
 import type { InjectionKey } from 'vue'
 import type { GatewayModelRoutingMode } from '@/types/modelRouting'
@@ -70,6 +71,7 @@ export interface TurnSendParams {
   /** Stable client identity for reconciling the optimistic user row. */
   clientMessageId?: string
   /** User-supplied page references and annotations for this turn. */
+  selectedSkills?: SelectedSkillRef[]
   pageContext?: ChatPageContext
   /** Source policy; the v4 Adapter maps this to `_source`. */
   source?: TurnSendSource
@@ -196,7 +198,7 @@ export interface TurnCancelResponse {
   metadata?: Readonly<Record<string, unknown>>
 }
 
-export type TurnCommandCapability = 'same-turn-steer' | 'durable-steer'
+export type TurnCommandCapability = 'same-turn-steer' | 'durable-steer' | 'explicit-skills'
 
 /**
  * Application-facing turn command seam.

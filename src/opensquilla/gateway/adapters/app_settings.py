@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
-from opensquilla.application.app_settings import EffectiveSetting, SettingsObject
+from opensquilla.application.app_settings import AppSettings, EffectiveSetting, SettingsObject
 from opensquilla.application.config_secrets import (
     inherit_runtime_secrets as _inherit_runtime_secrets,
 )
@@ -30,9 +30,24 @@ from opensquilla.telemetry.consent_transition import global_network_observabilit
 
 if TYPE_CHECKING:
     from opensquilla.gateway.config import GatewayConfig
+    from opensquilla.gateway.rpc import RpcContext
     from opensquilla.provider.selector import ProviderConfig
 
 log = structlog.get_logger(__name__)
+
+
+def app_settings_for_rpc(
+    ctx: RpcContext, *, source: str = "config.patch"
+) -> AppSettings[GatewayConfig, ProviderConfig | None]:
+    return AppSettings(
+        GatewayAppSettingsPort(
+            ctx.config,
+            task_runtime=getattr(ctx, "task_runtime", None),
+            provider_selector=getattr(ctx, "provider_selector", None),
+            subscription_manager=getattr(ctx, "subscription_manager", None),
+            source=source,
+        )
+    )
 
 
 def _update_config_in_place(old: Any, new: Any) -> None:

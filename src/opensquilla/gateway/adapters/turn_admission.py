@@ -166,6 +166,7 @@ class GatewayTurnAdmissionAdapter:
             "workspaceId",
             "workspace_id",
             "pageContext",
+            "selectedSkills",
             "documentContext",
             "document_context",
             "promptAnnotationIds",

@@ -1,3 +1,4 @@
+import { skillLoadsFromSegments } from '@/types/skillLoads'
 import { computed, type Ref } from 'vue'
 import type {
   ChatEnsembleMeta,
@@ -601,6 +602,8 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
       const legacySilentOnly = msg.role === 'assistant'
         && isLegacySilentSentinelOnly(assistantRawText)
       const rendered: ChatRenderedMessage = {
+        skillLoads: skillLoadsFromSegments(msg.tool_calls),
+        selectedSkills: msg.selectedSkills,
         id: `${msg.role}-${i}`,
         ...(msg.clientId ? { clientId: msg.clientId } : {}),
         sourceIndex: i,
@@ -1910,6 +1913,7 @@ function normalizeToolCalls(raw: RawToolCallPayload[] | undefined): ChatToolCall
   const byId = new Map<string, ChatToolCall>()
 
   raw.forEach((tc, index) => {
+    if (tc.type === 'skill_load') return
     const name = normalizeToolName(tc)
     if (!name) return
     if (isInternalToolName(name)) return

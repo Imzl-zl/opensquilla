@@ -1,3 +1,4 @@
+import { copySelectedSkills, sameSelectedSkills, type SelectedSkillRef } from '@/types/selectedSkills'
 import { nextTick, type Ref } from 'vue'
 import type {
   ChatMessage,
@@ -17,6 +18,7 @@ import type { AssistantPresentationProvenance } from '@/utils/chat/silentSentine
 export interface UseChatMessageActionsOptions {
   messages: Ref<ChatMessage[]>
   inputText: Ref<string>
+  selectedSkills?: Ref<SelectedSkillRef[]>
   isStreaming: Ref<boolean>
   sanitizeCopyText: (text: string, opts?: {
     assistantBoundary?: boolean
@@ -26,6 +28,7 @@ export interface UseChatMessageActionsOptions {
   autoResizeTextarea: () => void
   sendCurrentInput: () => void
   sendUsageBarrierReplay: (payload: {
+    selectedSkills?: SelectedSkillRef[]
     text: string
     forkBeforeMessageId: string
   }) => Promise<boolean>
@@ -56,6 +59,8 @@ interface EditRestorePoint {
   inputText: string
   /** What edit put in the composer, so cancel can tell it apart from newer text. */
   editedText: string
+  selectedSkills: SelectedSkillRef[]
+  editedSkills: SelectedSkillRef[]
   /** Ties the restore point to the edit that made it; see `cancelEdit`. */
   forkBeforeMessageId: string
 }
@@ -188,6 +193,7 @@ export function useChatMessageActions(options: UseChatMessageActionsOptions) {
     if (usageBarrierRetry) {
       return options.sendUsageBarrierReplay({
         text: userText,
+        ...(userMessage?.selectedSkills?.length ? { selectedSkills: copySelectedSkills(userMessage.selectedSkills) } : {}),
         forkBeforeMessageId,
       })
     }
@@ -200,6 +206,7 @@ export function useChatMessageActions(options: UseChatMessageActionsOptions) {
     discardEditRestorePoint()
     options.pendingForkBeforeMessageId.value = forkBeforeMessageId
     options.messages.value = options.messages.value.slice(0, userMsgIndex)
+    if (options.selectedSkills) options.selectedSkills.value = copySelectedSkills(userMessage?.selectedSkills)
     options.inputText.value = userText
     options.autoResizeTextarea()
     nextTick(() => options.sendCurrentInput())
@@ -237,10 +244,13 @@ export function useChatMessageActions(options: UseChatMessageActionsOptions) {
       messages: continuesEdit ? previous.messages : options.messages.value,
       inputText: continuesEdit ? previous.inputText : options.inputText.value,
       editedText: text,
+      selectedSkills: continuesEdit ? previous.selectedSkills : copySelectedSkills(options.selectedSkills?.value),
+      editedSkills: copySelectedSkills(sourceMessage?.selectedSkills),
       forkBeforeMessageId,
     }
     options.pendingForkBeforeMessageId.value = forkBeforeMessageId
     options.messages.value = options.messages.value.slice(0, msgIndex)
+    if (options.selectedSkills) options.selectedSkills.value = copySelectedSkills(sourceMessage?.selectedSkills)
     options.inputText.value = text
     options.autoResizeTextarea()
     options.focusComposer()
@@ -276,6 +286,9 @@ export function useChatMessageActions(options: UseChatMessageActionsOptions) {
     // to the user, not to the edit being cancelled.
     if (options.inputText.value === restore.editedText) {
       options.inputText.value = restore.inputText
+    }
+    if (options.selectedSkills && sameSelectedSkills(options.selectedSkills.value, restore.editedSkills)) {
+      options.selectedSkills.value = copySelectedSkills(restore.selectedSkills)
     }
     options.autoResizeTextarea()
     return true

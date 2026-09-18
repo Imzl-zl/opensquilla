@@ -1,3 +1,4 @@
+import { copySelectedSkills, sameSelectedSkills, type SelectedSkillRef } from '@/types/selectedSkills'
 import { normalizePageContext, type ChatPageContext } from '@/types/pageContext'
 import { computed, nextTick, ref, watch, type Ref } from 'vue'
 import type {
@@ -111,6 +112,7 @@ export interface PendingQueueOwnerContext {
 export interface PendingQueuePayload {
   text: string
   draftIds?: readonly string[]
+  selectedSkills?: SelectedSkillRef[]
   pageContext?: ChatPageContext
   attachments?: Attachment[]
   intent?: string | null
@@ -128,6 +130,7 @@ export interface UseChatPendingQueueOptions {
   ownerContext?: Readonly<Ref<PendingQueueOwnerContext | null>>
   inputText: Ref<string>
   pendingAttachments: Ref<Attachment[]>
+  selectedSkills?: Ref<SelectedSkillRef[]>
   pendingSessionIntent: Ref<string | null>
   isStreaming: Ref<boolean>
   isBlocked: () => boolean
@@ -286,6 +289,7 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
       text: item.text,
       ...(item.retiredAnnotationInput ? { retiredAnnotationInput: true } : {}),
       ...(item.pageContext ? { pageContext: normalizePageContext(item.pageContext)! } : {}),
+      ...(item.selectedSkills?.length ? { selectedSkills: copySelectedSkills(item.selectedSkills) } : {}),
       ...(item.draftIds?.length
         ? { draftIds: normalizeAnnotationDraftIds(item.draftIds) }
         : {}),
@@ -327,6 +331,7 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
       ...((record.retiredAnnotationInput || record.promptAnnotationIds?.length)
         ? { retiredAnnotationInput: true } : {}),
       ...(record.pageContext ? { pageContext: normalizePageContext(record.pageContext)! } : {}),
+      ...(record.selectedSkills?.length ? { selectedSkills: copySelectedSkills(record.selectedSkills) } : {}),
       ...(normalizeAnnotationDraftIds(record.draftIds).length
         ? { draftIds: normalizeAnnotationDraftIds(record.draftIds) }
         : {}),
@@ -574,6 +579,7 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
                 message: providerMessage || item.pageContext?.annotations?.map(item => item.text).join('\n') || 'Describe these attachments',
                 attachments: sendable.map(serializeSendableAttachment),
                 ...(item.pageContext ? { pageContext: item.pageContext } : {}),
+                ...(item.selectedSkills?.length ? { selectedSkills: copySelectedSkills(item.selectedSkills) } : {}),
                 ...(item.confirmedPlainText ? { confirmedPlainText: true } : {}),
                 ...(sendable.length > 0 || literalSlashEscape || Boolean(item.pageContext?.annotations?.length)
                   ? { displayText: queuedText }
@@ -813,6 +819,7 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
               ? serverItem.displayText
               : serverItem.message || '',
             attachments: serverAttachments,
+            ...(serverItem.selectedSkills?.length ? { selectedSkills: copySelectedSkills(serverItem.selectedSkills) } : {}),
             intent: typeof serverItem.intent === 'string' ? serverItem.intent : null,
             ...(normalizePageContext(serverItem.pageContext)
               ? { pageContext: normalizePageContext(serverItem.pageContext)! } : {}),
@@ -832,12 +839,18 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
           void retryCancellingItem(item)
           continue
         }
+        if (item.selectedSkills?.length && !sameSelectedSkills(item.selectedSkills, serverItem.selectedSkills)) {
+          await writeWalItem(item, 'retryable')
+          options.onPendingPersistenceError?.('server_rejected')
+          continue
+        }
         if (Array.isArray(serverItem.attachments)) {
           // A list response is also the authoritative ACK for an enqueue whose
           // transport response was lost. Replace the WAL's File/base64/upload
           // snapshot with safe server-owned metadata before marking it staged.
           item.attachments = serverAttachments
         }
+        if (serverItem.selectedSkills) item.selectedSkills = copySelectedSkills(serverItem.selectedSkills)
         const serverPageContext = normalizePageContext(serverItem.pageContext)
         if (serverPageContext) item.pageContext = serverPageContext
         item.pendingRequestFingerprint = serverItem.requestFingerprint
@@ -956,6 +969,7 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
       pendingUiId: createClientRequestId(),
       text: payload.text,
       ...(payload.pageContext ? { pageContext: normalizePageContext(payload.pageContext)! } : {}),
+      ...(payload.selectedSkills?.length ? { selectedSkills: copySelectedSkills(payload.selectedSkills) } : {}),
       ...(draftIds.length ? { draftIds } : {}),
       attachments: (payload.attachments || []).map(a => ({ ...a })),
       intent: payload.intent ?? null,
@@ -1007,18 +1021,21 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
     enqueueOptions?: {
       confirmedPlainText?: boolean
       draftIds?: readonly string[]
+      selectedSkills?: SelectedSkillRef[]
       pageContext?: ChatPageContext
       attachments?: Attachment[]
       deliveryIdentity?: string
     },
   ): boolean | Promise<boolean> {
     if (isControlInput(text) && !enqueueOptions?.confirmedPlainText) return false
+    const composerSkills = copySelectedSkills(options.selectedSkills?.value)
     const composerText = options.inputText.value
     const composerAttachments = snapshotComposerAttachments(options.pendingAttachments.value)
     const composerIntent = options.pendingSessionIntent.value
     const composerSessionKey = options.sessionKey.value
     const queued = enqueuePendingPayload({
       text,
+      selectedSkills: copySelectedSkills(enqueueOptions?.selectedSkills ?? composerSkills),
       ...(enqueueOptions?.pageContext ? { pageContext: enqueueOptions.pageContext } : {}),
       ...(enqueueOptions?.draftIds?.length
         ? { draftIds: enqueueOptions.draftIds }
@@ -1032,10 +1049,12 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
       if (
         options.sessionKey.value !== composerSessionKey
         || options.inputText.value !== composerText
+        || !sameSelectedSkills(options.selectedSkills?.value, composerSkills)
         || !composerAttachmentsMatch(options.pendingAttachments.value, composerAttachments)
         || options.pendingSessionIntent.value !== composerIntent
       ) return
       options.inputText.value = ''
+      if (options.selectedSkills) options.selectedSkills.value = []
       options.pendingAttachments.value = []
       options.pendingSessionIntent.value = null
       options.autoResizeTextarea()
@@ -1626,18 +1645,39 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
     const identity = options.deliveryIdentity?.value
     const revision = options.composerRevision?.value
     const text = options.inputText.value
+    const skills = copySelectedSkills(options.selectedSkills?.value)
     const attachments = snapshotComposerAttachments(options.pendingAttachments.value)
     const intent = options.pendingSessionIntent.value
     return () => options.sessionKey.value === sessionKey
       && options.deliveryIdentity?.value === identity
       && options.composerRevision?.value === revision
       && options.inputText.value === text
+      && sameSelectedSkills(options.selectedSkills?.value, skills)
       && composerAttachmentsMatch(options.pendingAttachments.value, attachments)
       && options.pendingSessionIntent.value === intent
   }
 
+  function mergedSkills(items: readonly ChatPendingItem[]): SelectedSkillRef[] | null {
+    const skills = copySelectedSkills(options.selectedSkills?.value)
+    for (const item of items) {
+      if (item.selectedSkills?.length && !options.selectedSkills) return null
+      for (const ref of item.selectedSkills || []) {
+        const prior = skills.find(skill => skill.name === ref.name)
+        if (prior && !sameSelectedSkills([prior], [ref])) return null
+        if (!prior) skills.push({ ...ref })
+      }
+    }
+    return skills.length <= 16 ? skills : null
+  }
+
+  function restoreSkills(items: readonly ChatPendingItem[]): void {
+    const skills = mergedSkills(items)
+    if (skills && options.selectedSkills) options.selectedSkills.value = skills
+  }
+
   function canRestoreToComposer(item: ChatPendingItem): boolean {
-    return (!item.ownerSessionKey || item.ownerSessionKey === options.sessionKey.value)
+    return mergedSkills([item]) !== null
+      && (!item.ownerSessionKey || item.ownerSessionKey === options.sessionKey.value)
       && (!item.pendingDeliveryIdentity || item.pendingDeliveryIdentity === options.deliveryIdentity?.value)
   }
 
@@ -1675,6 +1715,7 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
       || hasUneditablePendingAttachments(item)
     ) return false
     const restore = () => {
+      restoreSkills([item])
       options.inputText.value = [item.text, options.inputText.value]
         .filter(text => text.trim())
         .join('\n')
@@ -1722,6 +1763,7 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
     if (hasUneditablePendingAttachments(tail)) return false
     if (durableItem(tail)) {
       void cancelForComposer(tail, composerOwnershipGuard(), () => {
+        restoreSkills([tail])
         options.inputText.value = tail.text || ''
         options.pendingAttachments.value = tail.attachments || []
         options.pendingSessionIntent.value = tail.intent || null
@@ -1730,6 +1772,7 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
       return true
     }
     pendingQueue.value.splice(tailIndex, 1)
+    restoreSkills([tail])
     options.inputText.value = tail?.text || ''
     options.pendingAttachments.value = tail?.attachments || []
     options.pendingSessionIntent.value = tail?.intent || null
@@ -1757,7 +1800,7 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
         || !canRestoreToComposer(p)
         || hasUneditablePendingAttachments(p),
     )
-    if (visible.length === 0) return false
+    if (visible.length === 0 || mergedSkills(visible) === null) return false
     const immediate = visible.filter(item => !durableItem(item))
     const durable = visible.filter(durableItem)
     const queuedTexts = immediate.map(p => p.text).filter(Boolean)
@@ -1766,6 +1809,7 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
     const current = options.inputText.value || ''
     const joined = [current, ...queuedTexts].filter(Boolean).join('\n')
     pendingQueue.value = [...retained, ...durable]
+    restoreSkills(immediate)
     options.inputText.value = joined
     options.pendingAttachments.value = [...options.pendingAttachments.value, ...queuedAttachments]
     options.pendingSessionIntent.value = options.pendingSessionIntent.value || headIntent || null
@@ -1774,6 +1818,7 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
     let stillOwnsComposer = composerOwnershipGuard()
     for (const item of durable) {
       void cancelForComposer(item, () => stillOwnsComposer(), () => {
+        restoreSkills([item])
         options.inputText.value = [options.inputText.value, item.text]
           .filter(Boolean)
           .join('\n')
@@ -1873,6 +1918,7 @@ export function useChatPendingQueue(options: UseChatPendingQueueOptions) {
         || pendingQueue.value[0] !== head
       ) return
       pendingQueue.value.shift()
+      if (options.selectedSkills) options.selectedSkills.value = copySelectedSkills(head.selectedSkills)
       options.inputText.value = head.text || ''
       options.pendingAttachments.value = head.attachments || []
       options.pendingSessionIntent.value = head.intent || null

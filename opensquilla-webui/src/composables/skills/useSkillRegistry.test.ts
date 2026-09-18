@@ -40,6 +40,11 @@ function catalogFromCall(
         message: result.message || '',
       }
     },
+    supportsCandidates: () => hasRpcMethod('skills.candidates'),
+    listCandidates: options => call('skills.candidates', options?.sessionKey
+      ? { sessionKey: options.sessionKey } : {}),
+    supportsSetEnabled: () => hasRpcMethod('skills.setEnabled'),
+    setEnabled: request => call('skills.setEnabled', { name: request.name, enabled: request.enabled }),
     reload: () => call('skills.reload'),
     install: request => call('skills.install', {
       identifier: request.identifier,

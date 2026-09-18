@@ -305,7 +305,7 @@ _COMMANDS: tuple[CommandDef, ...] = (
         usage="/new [title]",
         description="Start a new chat session.",
         execution={
-            _W: _rpc("sessions.reset", _key),
+            _W: _local("new_chat"),
             _T: _local("session.new"),
             _S: _local("session.new"),
             _C: _rpc("sessions.reset", _key),
