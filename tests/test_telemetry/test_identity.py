@@ -82,8 +82,8 @@ def test_windows_identity_reads_machine_registry_in_64_bit_view(monkeypatch) -> 
 def test_device_identity_linux_fallback_and_process_cache(monkeypatch) -> None:
     paths = []
     def read(path):
-        paths.append(str(path))
-        return None if str(path) == "/etc/machine-id" else "00112233445566778899aabbccddeeff"
+        paths.append(path.as_posix())
+        return None if path.as_posix() == "/etc/machine-id" else "00112233445566778899aabbccddeeff"
 
     monkeypatch.setattr(device_identity.sys, "platform", "linux")
     monkeypatch.setattr(device_identity, "_read_machine_id_file", read)
