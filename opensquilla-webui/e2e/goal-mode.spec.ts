@@ -899,65 +899,101 @@ test('Composer Add menu stays above active Goal progress across responsive layou
   })).toBeLessThanOrEqual(-7)
 })
 
-test('Session model routing stays above active Goal progress across responsive layouts', async ({ page }) => {
-  const gateway = await installFakeGoalGateway(page, { sessionRouting: true })
-  await page.goto(CONTROL_URL + 'chat?session=' + encodeURIComponent(SESSION_KEY))
-  await expect(page.locator('.conn-pill.connected')).toBeVisible({ timeout: 10_000 })
-  await expect(page.locator('.chat-textarea')).toBeEditable({ timeout: 10_000 })
+for (const goalStatus of ['active', 'blocked'] as const) {
+  test(`Session model routing stays above ${goalStatus} Goal progress across responsive layouts`, async ({ page }) => {
+    const gateway = await installFakeGoalGateway(page, { sessionRouting: true })
+    await page.goto(CONTROL_URL + 'chat?session=' + encodeURIComponent(SESSION_KEY))
+    await expect(page.locator('.conn-pill.connected')).toBeVisible({ timeout: 10_000 })
+    await expect(page.locator('.chat-textarea')).toBeEditable({ timeout: 10_000 })
 
-  gateway.emitGoal(goalSnapshot({
-    stateRevision: 2,
-    objective: 'Verify that this active Goal remains usable while the session model routing panel overlaps it across responsive layouts.',
-  }))
-  const goalDock = page.locator('.goal-run-dock')
-  await expect(goalDock).toBeVisible()
-
-  const routingButton = page.getByRole('button', {
-    name: "This chat's model routing",
-    exact: true,
-  })
-  const routingPanel = page.locator('.composer-model-routing')
-
-  for (const viewport of [
-    { width: 1368, height: 546 },
-    { width: 390, height: 844 },
-  ]) {
-    await page.setViewportSize(viewport)
-    await routingButton.click()
-    await expect(routingPanel).toBeVisible()
-
-    await expect.poll(async () => page.evaluate(() => {
-      const panel = document.querySelector<HTMLElement>('.composer-model-routing')
-      const goal = document.querySelector<HTMLElement>('.goal-run-dock')
-      if (!panel || !goal) return 'missing-panel-or-goal'
-      const panelRect = panel.getBoundingClientRect()
-      const goalRect = goal.getBoundingClientRect()
-      const left = Math.max(panelRect.left, goalRect.left)
-      const top = Math.max(panelRect.top, goalRect.top)
-      const right = Math.min(panelRect.right, goalRect.right)
-      const bottom = Math.min(panelRect.bottom, goalRect.bottom)
-      if (right <= left || bottom <= top) return 'no-overlap'
-      const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2)
-      if (hit !== null && panel.contains(hit)) return 'routing-panel'
-      return JSON.stringify({
-        hit: hit instanceof HTMLElement ? `${hit.tagName.toLowerCase()}.${hit.className}` : null,
-        goalZIndex: getComputedStyle(goal).zIndex,
-        panelZIndex: getComputedStyle(panel).zIndex,
-        inputBackdropFilter: getComputedStyle(panel.closest('.chat-input-panel')!).backdropFilter,
-      })
-    })).toBe('routing-panel')
-
-    await routingButton.click()
-    await expect(routingPanel).toHaveCount(0)
+    gateway.emitGoal(goalSnapshot({
+      stateRevision: 2,
+      objective: 'Verify that the synthetic Goal report remains usable while the session model routing panel overlaps it across responsive layouts.',
+      ...(goalStatus === 'blocked' ? {
+        status: 'blocked',
+        activeTaskId: null,
+        executionState: 'idle',
+        turnsSettled: 1,
+        blockedReason: 'llm_timeout',
+        progressRevision: 1,
+        progress: {
+          explanation: 'Inputs are inspected and the verification checklist is prepared. Report validation remains blocked.',
+          steps: [
+            { text: 'Inspect the synthetic release inputs', status: 'completed' },
+            { text: 'Prepare the verification checklist', status: 'completed' },
+            { text: 'Validate the generated report', status: 'in_progress' },
+            { text: 'Summarize the remaining verification results', status: 'pending' },
+            { text: 'Publish the synthetic report', status: 'pending' },
+          ],
+        },
+      } : {}),
+    }))
+    const goalDock = page.locator('.goal-run-dock')
     await expect(goalDock).toBeVisible()
+    await expect(goalDock.locator('.goal-ribbon')).toHaveAttribute('data-status', goalStatus)
+    if (goalStatus === 'blocked') {
+      const progress = goalDock.locator('.goal-ribbon__progress')
+      await progress.locator('summary').click()
+      await expect(progress).toHaveAttribute('open', '')
+      await expect(progress.locator('li')).toHaveCount(5)
+    }
 
-    await goalDock.getByRole('button', { name: 'Goal actions', exact: true }).click()
-    const goalMenu = goalDock.getByRole('menu', { name: 'Goal actions', exact: true })
-    await expect(goalMenu).toBeVisible()
-    await page.keyboard.press('Escape')
-    await expect(goalMenu).toHaveCount(0)
-  }
-})
+    const routingButton = page.getByRole('button', {
+      name: "This chat's model routing",
+      exact: true,
+    })
+    const routingPanel = page.locator('.composer-model-routing')
+
+    for (const viewport of [
+      { width: 1368, height: 546 },
+      { width: 390, height: 844 },
+    ]) {
+      await page.setViewportSize(viewport)
+      await routingButton.click()
+      await expect(routingPanel).toBeVisible()
+
+      await expect.poll(async () => page.evaluate(() => {
+        const panel = document.querySelector<HTMLElement>('.composer-model-routing')
+        const goal = document.querySelector<HTMLElement>('.goal-run-dock')
+        if (!panel || !goal) return 'missing-panel-or-goal'
+        const panelRect = panel.getBoundingClientRect()
+        const goalRect = goal.getBoundingClientRect()
+        const left = Math.max(panelRect.left, goalRect.left)
+        const top = Math.max(panelRect.top, goalRect.top)
+        const right = Math.min(panelRect.right, goalRect.right)
+        const bottom = Math.min(panelRect.bottom, goalRect.bottom)
+        if (right <= left || bottom <= top) return 'no-overlap'
+        const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2)
+        if (hit !== null && panel.contains(hit)) return 'routing-panel'
+        return JSON.stringify({
+          hit: hit instanceof HTMLElement ? `${hit.tagName.toLowerCase()}.${hit.className}` : null,
+          goalZIndex: getComputedStyle(goal).zIndex,
+          panelZIndex: getComputedStyle(panel).zIndex,
+          inputBackdropFilter: getComputedStyle(panel.closest('.chat-input-panel')!).backdropFilter,
+        })
+      })).toBe('routing-panel')
+
+      const closeButton = routingPanel.getByRole('button', { name: 'Close composer settings', exact: true })
+      const options = routingPanel.getByRole('radio')
+      await expect(options).toHaveCount(3)
+      // Actionability checks catch individual controls covered by expanded Goal
+      // progress without changing the session's routing configuration.
+      for (const control of [closeButton, ...await options.all()]) {
+        await expect(control).toBeInViewport()
+        await control.click({ trial: true })
+      }
+      await closeButton.click()
+      await expect(routingPanel).toHaveCount(0)
+      await expect(goalDock).toBeVisible()
+
+      await goalDock.getByRole('button', { name: 'Goal actions', exact: true }).click()
+      const goalMenu = goalDock.getByRole('menu', { name: 'Goal actions', exact: true })
+      await expect(goalMenu).toBeVisible()
+      await page.keyboard.press('Escape')
+      await expect(goalMenu).toHaveCount(0)
+    }
+  })
+}
 
 test('Goal mode continues through a real Gateway, refresh, and deterministic provider', async ({
   page,
