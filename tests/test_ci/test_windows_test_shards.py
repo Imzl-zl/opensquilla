@@ -548,6 +548,10 @@ def test_runner_saturated_subprocess_contracts_are_marked_ci_serial() -> None:
         "test_real_gateway_suppresses_goal_sentinel_everywhere",
     )
     assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/functional/test_gateway_silent_reply_process_e2e.py"),
+        "test_default_timing_sample_has_one_provider_call_and_no_goal",
+    )
+    assert "pytest.mark.ci_serial" in _function_decorators(
         Path("tests/test_desktop/test_gateway_functional_probes.py"),
         "test_mcp_probe_uses_real_stdio_server_and_gateway",
     )

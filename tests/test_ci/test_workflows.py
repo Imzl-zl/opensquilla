@@ -1955,6 +1955,12 @@ def test_desktop_recovery_e2e_runs_compiled_flows_on_all_release_platforms() -> 
     # Select by a stable contract tag, not the scenario's human-readable title.
     # Renaming the test must not silently leave this release-platform gate empty.
     assert '--grep "@session-hang-recovery"' in session_recovery["run"]
+    assert '--grep "@plan-goal-runtime"' in session_recovery["run"]
+    for spec in ("plan-presentation.spec.ts", "task-progress.spec.ts", "goal-mode.spec.ts"):
+        assert spec in session_recovery["run"]
+        assert "@plan-goal-runtime" in Path("opensquilla-webui/e2e", spec).read_text(
+            encoding="utf-8"
+        )
     assert "--retries=0" in session_recovery["run"]
     recovery_spec = Path("opensquilla-webui/e2e/history-hydration.spec.ts").read_text(
         encoding="utf-8"
@@ -2407,6 +2413,8 @@ def test_webui_chat_recovery_runs_the_verified_dist_through_gateway() -> None:
         "idle-chat-recovery.spec.ts",
         "new-task-ensemble-race.spec.ts",
         "plan-questionnaire-lifecycle.spec.ts",
+        "plan-presentation.spec.ts",
+        "task-progress.spec.ts",
         "provider-error-experience.spec.ts",
         "router-physical-model.spec.ts",
         "queue-steer.spec.ts",
@@ -2480,6 +2488,26 @@ def test_windows_high_risk_job_runs_parallel_reported_shards() -> None:
     assert upload_step["uses"] == "actions/upload-artifact@v4"
     assert upload_step["with"]["if-no-files-found"] == "error"
     assert upload_step["with"]["retention-days"] == 14
+
+
+def test_native_shell_contracts_require_powershell_on_core_and_partitioned_shards() -> None:
+    steps = _workflow("ci.yml")["jobs"]["windows-full"]["steps"]
+    provision = next(
+        step for step in steps
+        if step.get("name") == "Verify PowerShell 7 for native shell contracts"
+    )
+    assert provision["if"] == (
+        "${{ matrix.shard == 'core' || startsWith(matrix.shard, 'core-') }}"
+    )
+    assert provision["shell"] == "pwsh"
+    assert "$PSVersionTable.PSVersion.Major -lt 7" in provision["run"]
+    assert 'throw "Native shell contracts require PowerShell 7"' in provision["run"]
+    assert "Get-Command pwsh -CommandType Application -ErrorAction Stop" in provision["run"]
+    assert not provision.get("continue-on-error")
+    assert steps.index(provision) < next(
+        index for index, step in enumerate(steps)
+        if step.get("name") == "Test Windows shard"
+    )
 
 
 def test_recovery_windows_shard_uses_and_always_cleans_distinct_real_volumes() -> None:
@@ -2599,6 +2627,11 @@ def test_macos_recovery_planner_inputs_match_workflow_pytest_targets() -> None:
         for line in array.group("body").splitlines()
         if line.strip().startswith("tests/")
     }
+    preflight_step = next(
+        step for step in job["steps"]
+        if step.get("name") == "Preflight offline test environment"
+    )
+    workflow_targets.update(re.findall(r"tests/[a-zA-Z0-9_/.]+\.py", preflight_step["run"]))
     assert workflow_targets == expected_targets
 
 
@@ -2976,3 +3009,96 @@ def test_desktop_cleanup_flow_allows_windows_helper_release_latency() -> None:
 
     assert "process.platform === 'win32' ? 90_000 : 30_000" in source
     assert "pending synthetic targets" in source
+
+
+@pytest.mark.parametrize(("job_name", "test_step_name"), [
+    ("ubuntu-full", "Test Ubuntu full shard"),
+    ("windows-full", "Test Windows shard"),
+    ("macos-recovery", "Test native profile recovery contracts"),
+])
+def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_name):
+    steps = _workflow("ci.yml")["jobs"][job_name]["steps"]
+    preflight = next(step for step in steps if step.get("name") == (
+        "Preflight offline test environment"
+    ))
+    main = next(step for step in steps if step.get("name") == test_step_name)
+    assert steps.index(preflight) < steps.index(main)
+    assert preflight.get("continue-on-error") is not True
+    assert "set -euo pipefail" in preflight["run"]
+    assert "sys.executable" in preflight["run"]
+    assert "opensquilla.__file__" in preflight["run"]
+    expected_preflight_files = {
+        "tests/test_sandbox/test_trusted_sandbox_execution.py",
+        "tests/test_tools/test_approval_unification.py",
+        "tests/test_live_multi_provider_matrix.py",
+        "tests/test_live_provider_profile_smoke.py",
+    }
+    if job_name in {"ubuntu-full", "windows-full"}:
+        expected_preflight_files.update({
+            "tests/test_ci/test_architecture_import_contracts.py",
+            "tests/test_engine/turn_runner/test_stage_test_boundaries.py",
+            "tests/test_engine/test_runtime_artifacts.py",
+            "tests/test_engine/test_tokenjuice_tool_result_projection.py",
+            "tests/test_tools/test_tool_upgrade_compatibility.py",
+            "tests/test_gateway/test_goal_rpc.py",
+            "tests/test_tools/test_dispatch_legacy_coverage.py",
+            "tests/unit/cli/repl/test_slash_bridge.py",
+            "tests/test_gateway/test_channel_turn_ingress.py",
+            "tests/test_gateway/test_goal_registry_cleanup.py",
+            "tests/test_gateway/test_task_runtime_terminal_cleanup.py",
+            "tests/test_gateway/test_goal_turn_authority.py",
+            "tests/test_gateway/test_task_progress_projection.py",
+            "tests/functional/test_gateway_silent_reply_process_e2e.py",
+            "tests/test_engine/test_cancelled_turn_segments.py",
+            "tests/test_tools/test_shell_workdir.py",
+            "tests/test_sandbox/test_shell_code_network_hints.py",
+            "tests/test_tools/test_shell_runtime_preflight.py",
+            "tests/test_sandbox/test_windows_shell_process_runtime.py",
+        })
+        selector = '"${family}"' if job_name == "windows-full" else '"${{ matrix.shard }}"'
+        assert f'{selector} == "desktop-installer-contracts"' in preflight["run"]
+        assert f'{selector} == "gateway-sqlite"' in preflight["run"]
+        assert '"${regression_args[@]}"' in preflight["run"]
+        assert "-o faulthandler_timeout=60" in preflight["run"]
+    if job_name == "windows-full":
+        expected_preflight_files.update({
+            "tests/test_ci/test_windows_signatures.py",
+            "tests/test_tools/test_shell_process_isolation.py",
+        })
+        assert '"${family}" == "core"' in preflight["run"]
+    assert set(re.findall(r"tests/[a-zA-Z0-9_/.]+\.py", preflight["run"])) == (
+        expected_preflight_files
+    )
+    assert "-vv --tb=short" in preflight["run"]
+    assert "-o faulthandler_timeout=60" in main["run"]
+    assert "--showlocals" not in preflight["run"]
+    assert "--showlocals" not in main["run"]
+
+
+@pytest.mark.parametrize(("family", "expected_file"), [
+    ("core", "tests/test_ci/test_windows_signatures.py"),
+    ("gateway-sqlite", "tests/test_gateway/test_goal_registry_cleanup.py"),
+    ("recovery-migration", "tests/test_sandbox/test_windows_shell_process_runtime.py"),
+    ("desktop-installer-contracts", "tests/test_ci/test_architecture_import_contracts.py"),
+])
+def test_windows_preflight_selects_regressions_for_physical_partitions(family, expected_file):
+    steps = _workflow("ci.yml")["jobs"]["windows-full"]["steps"]
+    preflight = next(step for step in steps if step.get("name") == (
+        "Preflight offline test environment"
+    ))
+    selector = "regression_args=()" + preflight["run"].split("regression_args=()", 1)[1]
+    selector = selector.split("uv run pytest", 1)[0]
+    suites = json.loads(Path(".github/ci/suites.v1.json").read_text(encoding="utf-8"))
+    partitions = [
+        shard for shard in suites["full_python_matrix"]["windows"]
+        if shard.startswith(f"{family}-")
+    ]
+    assert partitions
+    for shard in partitions:
+        script = selector.replace("${{ matrix.shard }}", shard)
+        script += '\nprintf "%s\\n" "${regression_args[@]}"\n'
+        result = subprocess.run(
+            [_bash_executable(), "-c", script],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+        assert expected_file in result.stdout.splitlines(), shard
