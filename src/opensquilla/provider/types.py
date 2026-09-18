@@ -132,6 +132,10 @@ class DoneEvent:
     # False means no explicit signal was observed, not a refusal classifier.
     # Consumers may decline an auxiliary artifact while still accounting usage.
     refusal: bool = False
+    # Composite providers retain additive input_tokens for billing, while
+    # recovery decisions need the input size of the terminal physical request.
+    # None means input_tokens already describes the current request.
+    terminal_request_input_tokens: int | None = None
 
     @property
     def upstream_cost_usd(self) -> float:
