@@ -4373,6 +4373,7 @@
       "unknownProviderCalls": "{count} appel fournisseur a une utilisation inconnue | {count} appels fournisseur ont une utilisation inconnue"
     },
     "newTaskModel": {
+      "showAll": "Afficher tous les modèles",
       "title": "Modèle de la nouvelle tâche",
       "catalog": "Catalogue de la passerelle",
       "gatewayDefault": "Modèle par défaut",

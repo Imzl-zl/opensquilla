@@ -4373,6 +4373,7 @@
       "unknownProviderCalls": "{count} 件のプロバイダー呼び出しの使用量が不明"
     },
     "newTaskModel": {
+      "showAll": "すべてのモデルを表示",
       "title": "新しいタスクのモデル",
       "catalog": "ゲートウェイのモデル一覧",
       "gatewayDefault": "既定のモデル",

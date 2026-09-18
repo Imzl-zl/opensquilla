@@ -4457,6 +4457,7 @@
       "unknownProviderCalls": "{count} 次服务商调用的用量未知"
     },
     "newTaskModel": {
+      "showAll": "查看全部模型",
       "title": "新任务模型",
       "catalog": "网关模型目录",
       "gatewayDefault": "默认模型",

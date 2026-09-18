@@ -115,6 +115,75 @@ describe('Native cascading model routing menu', () => {
     await key(input, 'Enter')
     expect(selected).toHaveBeenCalledWith({ model: 'a2', provider: 'provider-a' })
   })
+  it('limits each provider to 12 while prioritizing the primary model and retaining API order', async () => {
+    const rows = (provider: string) => Array.from({ length: 15 }, (_, index) => ({
+      id: `m-${index}`, name: `Model ${index}`, provider,
+    }))
+    await mount({
+      availableModels: [...rows('provider-b'), ...rows('provider-a')],
+      defaultModel: { model: 'm-13', provider: 'provider-a' },
+    })
+    const groups = [...document.querySelectorAll('[role="listbox"] > [role="group"]')]
+    expect(groups).toHaveLength(3)
+    expect(groups[1]!.textContent).toContain('provider-a')
+    expect([...groups[1]!.querySelectorAll('.routing-model__name')].map(el => el.textContent))
+      .toEqual(['Model 13', ...Array.from({ length: 11 }, (_, i) => `Model ${i}`)])
+    expect([...groups[2]!.querySelectorAll('.routing-model__name')].map(el => el.textContent))
+      .toEqual(Array.from({ length: 12 }, (_, i) => `Model ${i}`))
+    expect(document.querySelectorAll('[role="option"]')).toHaveLength(25)
+    expect(query('.routing-show-all').textContent).toBe('View all models')
+  })
+  it.each(['m-14', 'private-model'])('keeps selected %s visible within its provider budget', async (model) => {
+    const { selected } = await mount({
+      availableModels: Array.from({ length: 15 }, (_, index) => ({
+        id: `m-${index}`, name: `Model ${index}`, provider: 'provider-a',
+      })),
+      modelSelection: { model, provider: 'provider-a' },
+    })
+    expect(document.querySelectorAll('[role="option"]')).toHaveLength(13)
+    expect(query('[aria-selected="true"]').getAttribute('aria-disabled')).toBe('false')
+    query<HTMLButtonElement>('[aria-selected="true"]').click()
+    expect(selected).toHaveBeenCalledWith({ model, provider: 'provider-a' })
+  })
+  it('searches beyond the preview limit with provider identity and restores the limit when cleared', async () => {
+    const { selected } = await mount({ availableModels: ['provider-a', 'provider-b'].flatMap(provider =>
+      Array.from({ length: 15 }, (_, index) => ({ id: `m-${index}`, name: `Model ${index}`, provider })),
+    ) })
+    const input = await search('m-14')
+    expect(document.querySelectorAll('[role="option"]')).toHaveLength(2)
+    expect(query('.routing-show-all')).toBeNull()
+    await key(input, 'ArrowUp')
+    await key(input, 'Enter')
+    expect(selected).toHaveBeenCalledWith({ model: 'm-14', provider: 'provider-b' })
+    await search('')
+    expect(document.querySelectorAll('[role="option"]')).toHaveLength(25)
+    expect(query('.routing-show-all')).toBeTruthy()
+  })
+  it('makes expansion keyboard reachable and preserves the highlighted model without selecting', async () => {
+    const { selected, mode, close } = await mount({ availableModels: ['provider-a', 'provider-b'].flatMap(provider =>
+      Array.from({ length: 15 }, (_, index) => ({ id: `m-${index}`, name: `Model ${index}`, provider })),
+    ) })
+    const input = query<HTMLInputElement>('input')
+    input.focus()
+    await key(input, 'ArrowUp') // provider-b m-11, last in the preview
+    await key(input, 'Tab')
+    const showAll = query<HTMLButtonElement>('.routing-show-all')
+    expect(document.activeElement).toBe(showAll)
+    expect(showAll.closest('[role="listbox"]')).toBeNull()
+    await key(showAll, 'Tab', { shiftKey: true })
+    expect(document.activeElement).toBe(input)
+    await key(input, 'Tab')
+    showAll.click() // Native Enter/Space activation is exercised in the browser.
+    await nextTick()
+    expect(document.querySelectorAll('[role="option"]')).toHaveLength(31)
+    expect(query('.routing-show-all')).toBeNull()
+    expect(document.activeElement).toBe(input)
+    expect(close).not.toHaveBeenCalled()
+    expect(mode).not.toHaveBeenCalled()
+    expect(selected).not.toHaveBeenCalled()
+    await key(input, 'Enter')
+    expect(selected).toHaveBeenCalledWith({ model: 'm-11', provider: 'provider-b' })
+  })
   it('does not add provider headings or loading noise to a usable single-provider list', async () => {
     await mount({
       availableModels: [{ id: 'a1', name: 'Alpha', provider: 'provider-a' }],

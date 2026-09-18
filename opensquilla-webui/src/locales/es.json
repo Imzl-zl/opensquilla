@@ -4373,6 +4373,7 @@
       "unknownProviderCalls": "{count} llamada al proveedor tiene uso desconocido | {count} llamadas al proveedor tienen uso desconocido"
     },
     "newTaskModel": {
+      "showAll": "Ver todos los modelos",
       "title": "Modelo de la nueva tarea",
       "catalog": "Catálogo de la pasarela",
       "gatewayDefault": "Modelo predeterminado",

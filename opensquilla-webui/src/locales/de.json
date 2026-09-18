@@ -4373,6 +4373,7 @@
       "unknownProviderCalls": "{count} Provider-Aufruf mit unbekannter Nutzung | {count} Provider-Aufrufe mit unbekannter Nutzung"
     },
     "newTaskModel": {
+      "showAll": "Alle Modelle anzeigen",
       "title": "Modell für die neue Aufgabe",
       "catalog": "Modellkatalog des Gateways",
       "gatewayDefault": "Standardmodell",

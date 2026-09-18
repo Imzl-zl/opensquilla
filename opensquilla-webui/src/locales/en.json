@@ -4458,6 +4458,7 @@
       "unknownProviderCalls": "{count} provider call has unknown usage | {count} provider calls have unknown usage"
     },
     "newTaskModel": {
+      "showAll": "View all models",
       "title": "New task model",
       "catalog": "Gateway model catalog",
       "gatewayDefault": "Default model",

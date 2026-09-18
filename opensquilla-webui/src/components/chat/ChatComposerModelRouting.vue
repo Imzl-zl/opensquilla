@@ -36,8 +36,11 @@ const id = useId()
 const rootRef = ref<HTMLElement | null>(null)
 const primaryRef = ref<HTMLElement | null>(null)
 const searchRef = ref<HTMLInputElement | null>(null)
+const showAllRef = ref<HTMLButtonElement | null>(null)
 const singleRef = ref<HTMLButtonElement | null>(null)
 const search = ref('')
+const allModelsExpanded = ref(false)
+const MODELS_PER_PROVIDER = 12
 const submenuOpen = ref(false)
 const activeModel = ref(-1)
 const compact = ref(false)
@@ -105,7 +108,17 @@ const models = computed(() => {
       model: '',
       provider: '',
     },
-    ...[...providers.values()].flat(),
+    ...[
+      ...(props.defaultModel && providers.has(props.defaultModel.provider)
+        ? [providers.get(props.defaultModel.provider)!] : []),
+      ...[...providers.entries()]
+        .filter(([provider]) => provider !== props.defaultModel?.provider)
+        .map(([, group]) => group),
+    ].flatMap((group) => {
+      const primaryKey = props.defaultModel ? key(props.defaultModel) : null
+      const primary = group.find((model) => model.key === primaryKey)
+      return primary ? [primary, ...group.filter((model) => model !== primary)] : group
+    }),
   ]
 })
 const pickerTitle = computed(() => t(props.isNewTask ? 'chat.newTaskModel.title' : 'chat.modelRouting.sessionModelTitle'))
@@ -132,13 +145,38 @@ const defaultModelHint = computed(() =>
     ? `${defaultModelName.value} · ${props.defaultModel!.provider}`
     : t('chat.newTaskModel.gatewayDefaultHint'),
 )
-const filteredModels = computed(() =>
-  models.value.filter((model) =>
-    `${model.label} ${model.provider} ${model.model}`
-      .toLocaleLowerCase()
-      .includes(search.value.trim().toLocaleLowerCase()),
-  ),
-)
+const filteredModels = computed(() => {
+  const query = search.value.trim().toLocaleLowerCase()
+  if (query) return models.value.filter((model) =>
+    `${model.label} ${model.provider} ${model.model}`.toLocaleLowerCase().includes(query),
+  )
+  if (allModelsExpanded.value) return models.value
+  const groups = new Map<string | null, ModelOption[]>()
+  for (const model of models.value) {
+    if (model.key === 'default') continue
+    const group = groups.get(model.provider) ?? []
+    group.push(model)
+    groups.set(model.provider, group)
+  }
+  const visible = new Set(['default'])
+  for (const group of groups.values()) {
+    const initial = group.slice(0, MODELS_PER_PROVIDER)
+    const selected = group.find((model) => model.key === selectedKey.value)
+    // Keep a saved choice visible without exceeding the provider's budget or
+    // changing the relative order of the other returned models.
+    if (selected && !initial.includes(selected)) initial[MODELS_PER_PROVIDER - 1] = selected
+    initial.forEach((model) => visible.add(model.key))
+  }
+  return models.value.filter((model) => visible.has(model.key))
+})
+const hasHiddenModels = computed(() => !search.value.trim() && filteredModels.value.length < models.value.length)
+async function showAllModels() {
+  allModelsExpanded.value = true
+  await nextTick()
+  searchRef.value?.focus({ preventScroll: true })
+  if (activeModel.value >= 0)
+    document.getElementById(`${id}-model-${activeModel.value}`)?.scrollIntoView({ block: 'nearest' })
+}
 // Provider sections stay inside the existing second level; search and keyboard
 // navigation continue to operate on one flat list of model identities.
 const modelGroups = computed(() => {
@@ -274,6 +312,16 @@ function onKey(event: KeyboardEvent) {
     if (submenuOpen.value) closeModels()
     else emit('close')
   } else if (event.key === 'Tab') {
+    if (!event.shiftKey && document.activeElement === searchRef.value && showAllRef.value) {
+      event.preventDefault()
+      showAllRef.value.focus()
+      return
+    }
+    if (event.shiftKey && document.activeElement === showAllRef.value) {
+      event.preventDefault()
+      searchRef.value?.focus()
+      return
+    }
     props.anchor?.querySelector<HTMLButtonElement>('button')?.focus()
     emit('close', false)
   }
@@ -494,61 +542,69 @@ defineExpose({ element: () => rootRef.value })
             @keydown="onSearchKey"
           />
         </label>
-        <div
-          :id="`${id}-models`"
-          class="routing-models"
-          role="listbox"
-          :aria-label="pickerTitle"
-          :aria-busy="modelsLoading"
-        >
+        <div class="routing-models">
           <div
-            v-for="(group, groupIndex) in modelGroups"
-            :key="group.key"
-            role="group"
-            :aria-labelledby="showProviderGroups && group.provider ? `${id}-provider-${groupIndex}` : undefined"
+            :id="`${id}-models`"
+            role="listbox"
+            :aria-label="pickerTitle"
+            :aria-busy="modelsLoading"
           >
             <div
-              v-if="showProviderGroups && group.provider"
-              :id="`${id}-provider-${groupIndex}`"
-              class="routing-provider-heading"
-            >{{ group.provider }}</div>
-            <button
-              v-for="{ model, index } in group.rows"
-              :id="`${id}-model-${index}`"
-              :key="model.key"
-              type="button"
-              role="option"
-              tabindex="-1"
-              :aria-selected="modelRoutingMode === 'off' && model.key === selectedKey"
-              :aria-disabled="modelDisabled(model)"
-              class="routing-model"
-              :class="{ 'is-highlighted': activeModel === index }"
-              @pointermove="activeModel = index"
-              @mousedown.prevent
-              @click="selectModel(index)"
+              v-for="(group, groupIndex) in modelGroups"
+              :key="group.key"
+              role="group"
+              :aria-labelledby="showProviderGroups && group.provider ? `${id}-provider-${groupIndex}` : undefined"
             >
-              <span class="routing-model__avatar" aria-hidden="true">
-                <Icon v-if="model.key === 'default'" name="settings" :size="15" />
-                <template v-else>{{ model.label.charAt(0).toUpperCase() }}</template>
-              </span>
-              <span class="routing-model__copy">
-                <span class="routing-model__name">{{ model.label }}</span>
-                <span class="routing-model__provider">
-                  {{ model.key === 'default' ? defaultModelHint : model.provider }}
+              <div
+                v-if="showProviderGroups && group.provider"
+                :id="`${id}-provider-${groupIndex}`"
+                class="routing-provider-heading"
+              >{{ group.provider }}</div>
+              <button
+                v-for="{ model, index } in group.rows"
+                :id="`${id}-model-${index}`"
+                :key="model.key"
+                type="button"
+                role="option"
+                tabindex="-1"
+                :aria-selected="modelRoutingMode === 'off' && model.key === selectedKey"
+                :aria-disabled="modelDisabled(model)"
+                class="routing-model"
+                :class="{ 'is-highlighted': activeModel === index }"
+                @pointermove="activeModel = index"
+                @mousedown.prevent
+                @click="selectModel(index)"
+              >
+                <span class="routing-model__avatar" aria-hidden="true">
+                  <Icon v-if="model.key === 'default'" name="settings" :size="15" />
+                  <template v-else>{{ model.label.charAt(0).toUpperCase() }}</template>
                 </span>
-              </span>
-              <Icon
-                v-if="modelRoutingMode === 'off' && model.key === selectedKey"
-                name="check"
-                :size="16"
-              />
-            </button>
+                <span class="routing-model__copy">
+                  <span class="routing-model__name">{{ model.label }}</span>
+                  <span class="routing-model__provider">
+                    {{ model.key === 'default' ? defaultModelHint : model.provider }}
+                  </span>
+                </span>
+                <Icon
+                  v-if="modelRoutingMode === 'off' && model.key === selectedKey"
+                  name="check"
+                  :size="16"
+                />
+              </button>
+            </div>
+            <p v-if="!filteredModels.length" class="routing-empty" role="status">
+              {{
+                modelsLoading ? t('chat.newTaskModel.loading') : t('chat.newTaskModel.empty')
+              }}
+            </p>
           </div>
-          <p v-if="!filteredModels.length" class="routing-empty" role="status">
-            {{
-              modelsLoading ? t('chat.newTaskModel.loading') : t('chat.newTaskModel.empty')
-            }}
-          </p>
+          <button
+            v-if="hasHiddenModels"
+            ref="showAllRef"
+            type="button"
+            class="routing-show-all"
+            @click="showAllModels"
+          >{{ t('chat.newTaskModel.showAll') }}</button>
         </div>
         <div v-if="issue || (modelsLoading && !availableModels?.length)" class="routing-issue" role="status">
           <span>{{ modelsLoading && !availableModels?.length ? t('chat.newTaskModel.loading') : issue }}</span>
@@ -790,6 +846,22 @@ defineExpose({ element: () => rootRef.value })
   padding: 0 8px 8px;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+.routing-show-all {
+  width: 100%;
+  padding: 10px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--fs-xs);
+  text-align: left;
+  cursor: pointer;
+}
+.routing-show-all:hover {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 .routing-provider-heading {
   padding: 10px 10px 4px;
