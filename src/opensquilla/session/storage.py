@@ -9793,6 +9793,7 @@ class SessionStorage:
         session_key: str,
         details_patch: dict[str, Any],
         remove_detail_keys: Sequence[str],
+        plan_result: dict[str, Any] | None = None,
         **fields: Any,
     ) -> AgentTaskRecord:
         """Merge terminal-owned details into the latest row in one transaction.
@@ -9824,6 +9825,12 @@ class SessionStorage:
             for key in remove_detail_keys:
                 details.pop(key, None)
             details.update(details_patch)
+            metadata = dict(details.get("metadata") or {})
+            metadata.pop("plan_result", None)
+            if plan_result is not None:
+                metadata["plan_result"] = dict(plan_result)
+            if metadata or "metadata" in details:
+                details["metadata"] = metadata
             update = {**fields, "details": details, "updated_at": _now_ms()}
             assignments = ", ".join(f"{key} = ?" for key in update)
             async with conn.execute(

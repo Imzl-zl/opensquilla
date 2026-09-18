@@ -7490,6 +7490,7 @@ class TaskRuntime:
                 key: value for key, value in details.items() if key in _TERMINAL_DETAIL_KEYS
             },
             remove_detail_keys=remove_keys,
+            plan_result=(details.get("metadata") or {}).get("plan_result"),
             **{key: value for key, value in update.items() if key != "details"},
         )
 

@@ -214,7 +214,15 @@ async def test_terminal_compensation_does_not_overwrite_later_audit_details(
             assert before_compensation.details is not None
             await original_update(
                 payload["task_id"],
-                details={**before_compensation.details, "synthetic_audit": {"revision": 3}},
+                details={
+                    **before_compensation.details,
+                    "synthetic_audit": {"revision": 3},
+                    "metadata": {
+                        **before_compensation.details.get("metadata", {}),
+                        "synthetic_audit": {"revision": 3},
+                        "plan_result": {"status": "submitted"},
+                    },
+                },
             )
 
     runtime = TaskRuntime(
@@ -251,6 +259,8 @@ async def test_terminal_compensation_does_not_overwrite_later_audit_details(
         assert durable.status == AgentTaskStatus.FAILED
         assert durable.details is not None
         assert durable.details["synthetic_audit"] == {"revision": 3}
+        assert durable.details["metadata"]["synthetic_audit"] == {"revision": 3}
+        assert "plan_result" not in durable.details["metadata"]
         assert durable.details["turn_outcome"]["kind"] != "completed"
         assert timeline == ["terminal_event"]
         assert handle.task_id not in runtime._terminal_fallback_records
