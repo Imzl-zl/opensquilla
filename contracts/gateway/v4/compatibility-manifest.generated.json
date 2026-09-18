@@ -141,7 +141,7 @@
       "delivery": "live-only-best-effort",
       "family": "sessions.routing.changed",
       "schema": "sessions/sessions-routing-changed.schema.json",
-      "schemaSha256": "8cfde21817d79eeab7da86484f28388a0fd5b97e5585aaf272db1086c2695884",
+      "schemaSha256": "21c16f9554f16c7f3bda4816932668b57d496a6959b8054a66719e36445c6fde",
       "schemaVersion": 1,
       "wireNames": [
         "sessions.routing.changed"
@@ -356,7 +356,7 @@
       "lifecycle": "stable",
       "name": "chat.send",
       "schema": "conversation/chat-send.schema.json",
-      "schemaSha256": "5d7aad9e790eadb830ab64461b638f5c14229ae405727260167ae112f9d42205"
+      "schemaSha256": "d6baded0b633c50e3981a45810fa085bd202ecb93ff3e2d7f4d715abd60483ad"
     },
     {
       "lifecycle": "stable",
@@ -737,7 +737,7 @@
       "lifecycle": "stable",
       "name": "models.list",
       "schema": "platform/models-list.schema.json",
-      "schemaSha256": "18ad8ea39c1b305a3f98df829113c6caaca3ceb25ca1098f7af9e13e5c9445e2"
+      "schemaSha256": "b99bc09fcc2d71eca1a7d45f45dd9597223438f769bcca219252f5230b797633"
     },
     {
       "lifecycle": "stable",
@@ -1274,13 +1274,13 @@
       "lifecycle": "stable",
       "name": "sessions.routing.get",
       "schema": "sessions/sessions-routing-get.schema.json",
-      "schemaSha256": "59920bed080825b7267e29970edf57d261409049c172fa8ff7abd52f0d6b5b1d"
+      "schemaSha256": "b2c33c894df8ac2983bf71b9fa513f6e9f9a2b0ec52b3e4edd1cfe9cea72cb77"
     },
     {
       "lifecycle": "stable",
       "name": "sessions.routing.set",
       "schema": "sessions/sessions-routing-set.schema.json",
-      "schemaSha256": "92a44f42be405fd4f9ac04ad7985ea16d929619b4e3939e48817c2b5b4ae3183"
+      "schemaSha256": "d6aba2ea6a1a5b0a4116eac1a4b794c602c69b3b14e7869b3cebc963f2ad80b8"
     },
     {
       "lifecycle": "stable",
@@ -1490,10 +1490,10 @@
   "protocol": "opensquilla-websocket-json",
   "source": {
     "eventFamilyCount": 10,
-    "generatorSha256": "98262cd21bdbc6de2e38075601b5b389d1fa05bf4db4df748881369a779f55e1",
+    "generatorSha256": "825a4861acf919d29c4959935a3c6fbafc1e44673e9f63c1c1de10885a52d504",
     "methodCount": 219,
     "schemaCount": 229,
-    "schemaTreeSha256": "702e2b1619e41cda24d6fba1c415efd9fb6e68406bf981bd05aed4db967d7d21",
+    "schemaTreeSha256": "25ba5fd16e1a1a31294eb099c4f93d5e3475b7189a53deaf865d91f17f524b69",
     "toolchains": {
       "legacyTypes": {
         "python": {

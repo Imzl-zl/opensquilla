@@ -703,6 +703,7 @@
       "kind": "method",
       "wireName": "models.list",
       "roles": [
+        "params",
         "result"
       ]
     },

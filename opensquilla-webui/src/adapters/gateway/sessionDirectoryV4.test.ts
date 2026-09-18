@@ -215,6 +215,23 @@ describe('v4 SessionDirectory Adapter', () => {
     })
   })
 
+  it.each(['vendor/exact-Model-ID', null])('preserves the stored session model %s without inferring a provider', async (model) => {
+    const directory = createV4SessionDirectory({
+      request: vi.fn().mockResolvedValue({
+        session_key: 'agent:main:webchat:stored',
+        session_id: 'session-stored',
+        model,
+        usage: { model: 'last-routed-model' },
+      }) as SessionDirectoryTransport['request'],
+    })
+
+    await expect(directory.resolve({ key: 'session-stored' })).resolves.toEqual({
+      key: 'agent:main:webchat:stored',
+      id: 'session-stored',
+      model,
+    })
+  })
+
   it('rejects a malformed resolve result at the domain boundary', async () => {
     const directory = createV4SessionDirectory({
       request: vi.fn().mockResolvedValue({ session_key: 'only-key' }) as

@@ -318,7 +318,8 @@
         id="content"
       >
         <ErrorBoundary @error-captured="clearChatRouteHeaderAfterError">
-          <router-view v-slot="{ Component, route }">
+          <SettingsBackgroundRoute :route="settingsContentRoute">
+          <router-view :route="settingsContentRoute" v-slot="{ Component, route }">
             <!-- out-in: one view in the DOM at a time, so pages never overlap (no
                  double-exposure, and never two composers/textareas mid-swap).
                  Console views are kept-alive, so the entering page is instant —
@@ -336,6 +337,8 @@
               <component v-else :is="Component" :key="route.meta.viewKey || route.name" />
             </Transition>
           </router-view>
+          </SettingsBackgroundRoute>
+          <router-view v-if="settingsBackgroundRoute" />
         </ErrorBoundary>
       </main>
       <AppWorkbench
@@ -440,6 +443,7 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { SettingsBackgroundRoute, useSettingsRouteOverlay } from './router/settingsRouteOverlay'
 import { useI18n } from 'vue-i18n'
 import { routeTitle } from './router'
 import { getPlatform } from '@/platform'
@@ -562,10 +566,12 @@ const shortcutsStore = useShortcutsStore()
 const artifactImageLightbox = provideArtifactImageLightbox()
 const { t } = useI18n()
 const $route = useRoute()
+const router = useRouter()
+const { backgroundRoute: settingsBackgroundRoute, contentRoute: settingsContentRoute } = useSettingsRouteOverlay(router)
 // Every transient control in the global topbar shares one active owner. The
 // controls render on chat and non-chat routes, so route-scoped coordination
 // would allow sibling menus such as Language and Theme to overlap.
-const isChatRoute = computed(() => $route.path === '/chat' || $route.path === '/chat/new')
+const isChatRoute = computed(() => settingsContentRoute.value.path === '/chat' || settingsContentRoute.value.path === '/chat/new')
 const topbarPopoverCoordinationEnabled = ref(true)
 const topbarPopoverCoordinator = provideChatTopbarPopoverCoordinator(
   topbarPopoverCoordinationEnabled,
@@ -634,8 +640,6 @@ const effectiveConnectionState = computed(() => effectiveChatConnectionState(
 const connectionStateLabel = computed(() => getPlatform().id === 'web' && gatewayAccess.requiresCredential
   ? t('setup.connection.tokenRequired')
   : t(`chrome.connectionState.${effectiveConnectionState.value}`))
-const router = useRouter()
-
 // afterEach only fires on navigation, so a same-route language switch needs an
 // explicit re-localize of the tab title.
 watch(() => appStore.locale, () => {

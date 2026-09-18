@@ -5621,7 +5621,17 @@ class SessionStorage:
         for c in cols:
             if c == "session_key" or c in _SESSION_DEDICATED_WRITER_COLUMNS:
                 continue
-            if c == "epoch":
+            if c in {
+                "model", "provider_override", "auth_profile_override",
+                "auth_profile_override_source", "model_override", "model_provider",
+            }:
+                # A concurrent rename/usage update may hold an older SessionNode.
+                # Preserve the atomic model choice made by the newer routing CAS.
+                update_columns.append(
+                    f"{c} = CASE WHEN sessions.model_routing_revision > "
+                    f"excluded.model_routing_revision THEN sessions.{c} ELSE excluded.{c} END"
+                )
+            elif c == "epoch":
                 # Hard guarantee: epoch can only increase, never roll back.
                 update_columns.append("epoch = MAX(sessions.epoch, excluded.epoch)")
             else:
@@ -5635,7 +5645,9 @@ class SessionStorage:
         async with self._write_transaction("upsert_session") as conn:
             async with conn.execute(
                 """
-                SELECT session_id, epoch, model_routing_mode, model_routing_revision
+                SELECT session_id, epoch, model_routing_mode, model_routing_revision,
+                       model, provider_override, auth_profile_override,
+                       auth_profile_override_source, model_override, model_provider
                 FROM sessions WHERE session_key = ?
                 """,
                 (node.session_key,),
@@ -5644,6 +5656,15 @@ class SessionStorage:
             if previous_identity is not None:
                 # Keep the caller-visible node coherent with the dedicated
                 # writer fields that this general-purpose UPSERT preserves.
+                if (
+                    int(previous_identity["model_routing_revision"] or 0)
+                    > node.model_routing_revision
+                ):
+                    for field in (
+                        "model", "provider_override", "auth_profile_override",
+                        "auth_profile_override_source", "model_override", "model_provider",
+                    ):
+                        setattr(node, field, previous_identity[field])
                 node.model_routing_mode = previous_identity["model_routing_mode"]
                 node.model_routing_revision = max(
                     0,
@@ -6255,6 +6276,11 @@ class SessionStorage:
     # ── Per-session model routing ──────────────────────────────────────────
 
     @staticmethod
+    def _session_model_selection(row: Any) -> dict[str, Any] | None:
+        model = row["model"]
+        return {"model": model, "provider": row["provider_override"]} if model else None
+
+    @staticmethod
     def _normalize_model_routing_mode(value: str) -> str:
         mode = value.strip().lower() if isinstance(value, str) else ""
         if mode not in {"direct", "router", "ensemble"}:
@@ -6265,7 +6291,8 @@ class SessionStorage:
     async def _read_model_routing_state(self, session_key: str) -> Any:
         async with self.conn.execute(
             """
-            SELECT model_routing_mode, model_routing_revision
+            SELECT model_routing_mode, model_routing_revision, model,
+                   provider_override, auth_profile_override
             FROM sessions WHERE session_key = ?
             """,
             (session_key,),
@@ -6298,6 +6325,7 @@ class SessionStorage:
                 "revision": revision,
                 "source": "session",
                 "initialized": False,
+                "modelSelection": self._session_model_selection(row),
             }
 
         # Only legacy NULL rows require writer ownership. Re-read after taking
@@ -6306,7 +6334,8 @@ class SessionStorage:
         async with self._write_transaction("resolve_model_routing_mode") as conn:
             async with conn.execute(
                 """
-                SELECT model_routing_mode, model_routing_revision
+                SELECT model_routing_mode, model_routing_revision, model,
+                   provider_override, auth_profile_override
                 FROM sessions WHERE session_key = ?
                 """,
                 (session_key,),
@@ -6322,6 +6351,7 @@ class SessionStorage:
                     "revision": revision,
                     "source": "session",
                     "initialized": False,
+                    "modelSelection": self._session_model_selection(row),
                 }
             async with conn.execute(
                 """
@@ -6338,7 +6368,8 @@ class SessionStorage:
                 # its authoritative choice rather than overwriting it.
                 async with conn.execute(
                     """
-                    SELECT model_routing_mode, model_routing_revision
+                    SELECT model_routing_mode, model_routing_revision, model,
+                   provider_override, auth_profile_override
                     FROM sessions WHERE session_key = ?
                     """,
                     (session_key,),
@@ -6353,12 +6384,14 @@ class SessionStorage:
                     "revision": max(0, int(row["model_routing_revision"] or 0)),
                     "source": "session",
                     "initialized": False,
+                    "modelSelection": self._session_model_selection(row),
                 }
             return {
                 "mode": fallback,
                 "revision": revision + 1,
                 "source": "legacy_initialized",
                 "initialized": True,
+                "modelSelection": self._session_model_selection(row),
             }
 
     async def set_model_routing_mode(
@@ -6367,8 +6400,11 @@ class SessionStorage:
         mode: str,
         *,
         expected_revision: int | None = None,
+        update_model: bool = False,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> dict[str, Any]:
-        """Compare-and-set one persisted session routing mode."""
+        """Atomically compare-and-set a session's mode and optional deployment."""
 
         session_key = canonicalize_session_key(session_key)
         normalized_mode = self._normalize_model_routing_mode(mode)
@@ -6378,10 +6414,15 @@ class SessionStorage:
             or expected_revision < 0
         ):
             raise ValueError("expected_revision must be a non-negative integer")
+        if update_model and model is not None and normalized_mode != "direct":
+            raise ValueError("a model selection requires direct routing")
+        if update_model and provider is not None and not model:
+            raise ValueError("a provider selection requires a model")
         async with self._write_transaction("set_model_routing_mode") as conn:
             async with conn.execute(
                 """
-                SELECT model_routing_mode, model_routing_revision
+                SELECT model_routing_mode, model_routing_revision, model,
+                   provider_override, auth_profile_override
                 FROM sessions WHERE session_key = ?
                 """,
                 (session_key,),
@@ -6391,7 +6432,14 @@ class SessionStorage:
                 raise KeyError(f"Session not found: {session_key}")
             current_mode = row["model_routing_mode"]
             current_revision = max(0, int(row["model_routing_revision"] or 0))
-            if current_mode == normalized_mode:
+            selection = (
+                {"model": model, "provider": provider} if model else None
+            ) if update_model else self._session_model_selection(row)
+            selection_changed = update_model and (
+                selection != self._session_model_selection(row)
+                or bool(row["auth_profile_override"])
+            )
+            if current_mode == normalized_mode and not selection_changed:
                 # A lost acknowledgement may retry the same durable choice
                 # with the caller's older generation. Treat that as idempotent
                 # rather than forcing a needless UI reload.
@@ -6400,6 +6448,7 @@ class SessionStorage:
                     "revision": current_revision,
                     "source": "session",
                     "initialized": False,
+                    "modelSelection": self._session_model_selection(row),
                     "changed": False,
                 }
             if expected_revision is not None and current_revision != expected_revision:
@@ -6411,10 +6460,21 @@ class SessionStorage:
                 UPDATE sessions
                 SET model_routing_mode = ?,
                     model_routing_revision = model_routing_revision + 1,
-                    updated_at = ?
+                    updated_at = ?,
+                    model = CASE WHEN ? THEN ? ELSE model END,
+                    provider_override = CASE WHEN ? THEN ? ELSE provider_override END,
+                    auth_profile_override = CASE WHEN ? THEN NULL ELSE auth_profile_override END,
+                    auth_profile_override_source = CASE WHEN ? THEN NULL
+                        ELSE auth_profile_override_source END,
+                    model_override = CASE WHEN ? THEN NULL ELSE model_override END,
+                    model_provider = CASE WHEN ? THEN NULL ELSE model_provider END
                 WHERE session_key = ? AND model_routing_revision = ?
                 """,
-                (normalized_mode, _now_ms(), session_key, current_revision),
+                (
+                    normalized_mode, _now_ms(), update_model, model,
+                    update_model, provider, update_model, update_model,
+                    selection_changed, selection_changed, session_key, current_revision,
+                ),
             ) as cur:
                 changed = cur.rowcount or 0
             if changed != 1:
@@ -6426,6 +6486,7 @@ class SessionStorage:
                 "revision": current_revision + 1,
                 "source": "session",
                 "initialized": current_mode is None,
+                "modelSelection": selection,
                 "changed": True,
             }
 

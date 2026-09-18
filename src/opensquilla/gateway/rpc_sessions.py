@@ -1633,6 +1633,24 @@ def _validate_rpc_session_deployment(
         )
 
 
+def _validate_initial_session_model(
+    ctx: RpcContext,
+    *,
+    session_key: str,
+    model: str,
+    provider: str | None,
+    routing_mode: str | None,
+) -> None:
+    from opensquilla.gateway.model_routing import model_routing_snapshot
+
+    effective_mode = routing_mode or str(model_routing_snapshot(ctx.config).get("mode") or "direct")
+    if effective_mode != "direct":
+        raise ValueError("initialModel requires direct routing")
+    _validate_rpc_session_deployment(
+        ctx, session_key=session_key, model=model, provider=provider, auth_profile=None,
+    )
+
+
 def _raise_explicit_session_deployment_model_required() -> NoReturn:
     raise RpcHandlerError(
         code="INVALID_PARAMS",
@@ -4513,6 +4531,10 @@ def _session_routing_snapshot(
         "source": str(source or "session"),
         "initialized": bool(initialized),
         "appliesTo": applies_to,
+        "modelSelection": (
+            value.get("modelSelection") if isinstance(value, dict)
+            else getattr(value, "modelSelection", None)
+        ),
     }
 
 
@@ -4635,6 +4657,26 @@ async def _handle_sessions_routing_set(
         or expected_revision < 0
     ):
         raise ValueError("params.expectedRevision must be a non-negative integer")
+    update_model = "modelSelection" in (params or {})
+    selection = (params or {}).get("modelSelection")
+    model: str | None = None
+    provider: str | None = None
+    if update_model and selection is not None:
+        if not isinstance(selection, dict) or set(selection) != {"model", "provider"}:
+            raise ValueError("params.modelSelection must contain model and provider, or be null")
+        for field in ("model", "provider"):
+            value = selection[field]
+            limit = 512 if field == "model" else 128
+            if not isinstance(value, str) or not value.strip() or len(value.strip()) > limit:
+                raise ValueError(
+                    f"params.modelSelection.{field} must be a non-empty bounded string"
+                )
+        model, provider = selection["model"].strip(), selection["provider"].strip().lower()
+        if mode != "direct":
+            raise ValueError("params.modelSelection requires direct routing")
+        _validate_rpc_session_deployment(
+            ctx, session_key=key, model=model, provider=provider, auth_profile=None,
+        )
     # Reuse the global control's activation planner as validation only. It
     # catches an unbuildable Ensemble lineup without changing shared config.
     from opensquilla.gateway.model_routing import model_routing_patches
@@ -4652,7 +4694,13 @@ async def _handle_sessions_routing_set(
 
     async def _commit() -> dict[str, Any]:
         try:
-            stored = await setter(key, mode, expected_revision=expected_revision)
+            model_kwargs = (
+                {"update_model": True, "model": model, "provider": provider}
+                if update_model else {}
+            )
+            stored = await setter(
+                key, mode, expected_revision=expected_revision, **model_kwargs,
+            )
             snapshot = _session_routing_snapshot(stored)
             changed = (
                 stored.get("changed") is True
@@ -4683,11 +4731,41 @@ async def _handle_sessions_routing_set(
                 accepted=False,
             ) from exc
 
+    async def _commit_idle_model() -> dict[str, Any]:
+        """Reject in-flight work rather than changing its execution deployment."""
+        def busy() -> RpcHandlerError:
+            return RpcHandlerError(
+                "SESSION_MODEL_BUSY",
+                "Wait for the current and queued turns to finish before changing the model.",
+                retryable=True, accepted=False,
+            )
+
+        has_work = getattr(runtime, "has_session_work", None)
+        if callable(has_work) and await has_work(key):
+            raise busy()
+        # This also covers durable tasks being restored after a restart.
+        list_tasks = getattr(storage, "list_agent_tasks", None)
+        if callable(list_tasks):
+            for status in _ACTIVE_TASK_STATUSES:
+                if await list_tasks(session_key=key, status=status, limit=1):
+                    raise busy()
+        lock = get_session_lock(ctx.turn_runner, key)
+        if lock is not None:
+            # asyncio.Lock.acquire does not suspend when unlocked; the check
+            # and acquisition cannot let a legacy/direct turn slip between.
+            if lock.locked():
+                raise busy()
+            async with lock:
+                return await _commit()
+        return await _commit()
+
     try:
         collector = getattr(runtime, "collect_admission", None)
         if callable(collector):
             async with collector(key):
-                snapshot = await _commit()
+                snapshot = await (_commit_idle_model() if update_model else _commit())
+        elif update_model:
+            snapshot = await _commit_idle_model()
         else:
             lock = get_session_lock(ctx.turn_runner, key)
             if lock is None:
@@ -4705,6 +4783,10 @@ async def _handle_sessions_routing_set(
             accepted=False,
         ) from exc
 
+    if update_model:
+        keepalive_service = getattr(ctx, "prompt_cache_keepalive_service", None)
+        if keepalive_service is not None:
+            keepalive_service.refresh_required(key, "session_deployment_changed")
     event = {
         "key": key,
         "sessionKey": key,
@@ -5627,6 +5709,7 @@ class _GatewayAdmissionPrimitives(GatewayAdmissionRuntime):
         self.positive_int = _coerce_positive_int
         self.workspace_error = partial(map_project_workspace_error, owner=self.is_owner)
         self.validate_initial_routing = partial(model_routing_patches, ctx.config)
+        self.validate_initial_model = partial(_validate_initial_session_model, ctx)
         self._emit_disposition = partial(
             _publish_admission_disposition,
             ctx,

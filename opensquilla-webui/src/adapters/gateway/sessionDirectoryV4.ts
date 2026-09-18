@@ -359,6 +359,7 @@ export function createV4SessionDirectory(
         return {
           key: result.session_key,
           id: result.session_id,
+          ...(result.model !== undefined ? { model: result.model } : {}),
         }
       } catch (error) {
         if (isAbort(error, request.signal)) throw error
