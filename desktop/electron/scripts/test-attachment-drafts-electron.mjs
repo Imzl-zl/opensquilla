@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { _electron as electron } from 'playwright'
-import ts from 'typescript'
+import ts from '@typescript/typescript6'
 
 if (process.platform === 'linux' && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY
   && process.env.OPENSQUILLA_ATTACHMENT_DRAFTS_XVFB !== '1') {

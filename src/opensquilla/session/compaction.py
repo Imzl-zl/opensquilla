@@ -2259,6 +2259,8 @@ async def call_compaction_provider(
                 elif isinstance(event, DoneEvent) or getattr(event, "kind", "") == "done":
                     # Usage accounting finalizes on the same terminal event.
                     saw_done = True
+                    if getattr(event, "refusal", False):
+                        raise _CompactionProviderError("provider refused the summary")
                     if str(getattr(event, "stop_reason", "") or "").lower() not in {
                         "end_turn", "stop", "stop_sequence", "completed",
                     }:

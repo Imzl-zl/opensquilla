@@ -37,10 +37,9 @@ dependencies = [
     "typer>=0.27.2,<0.28",
     "click>=8.5.0,<9",
     "rich>=13.0",
-    # Keep fresh installs on the current transport family while Lark declares
-    # websockets<16 in newer SDKs. Revisit both bounds together after real SDK
-    # reconnect/close acceptance; this is not a long-term support guarantee.
-    "websockets>=16.0,<17",
+    # Lark 1.5's handshake errors are adapted per client and exercised against
+    # websockets 16/17. Newer Lark SDKs require <16; review both bounds together.
+    "websockets>=16.0,<18",
     "aiosqlite>=0.20",
     "apscheduler>=3.11.3",
     "pyyaml>=6.0",
@@ -267,8 +266,13 @@ ignore_missing_imports = true
 [dependency-groups]
 desktop-build = ["pyinstaller==6.22.3"]
 wheelhouse-build = ["pip==26.2.1"]
+# Frozen sessions.list types are regenerated in a separate, locked environment.
+legacy-contract-codegen = ["datamodel-code-generator==0.75.1"]
 dev = [
-    "datamodel-code-generator==0.75.1",
+    "datamodel-code-generator==0.81.0",
     "laboratory>=1.0.2",
     "syrupy>=6.1.1",
 ]
+
+[tool.uv]
+conflicts = [[{ group = "dev" }, { group = "legacy-contract-codegen" }]]

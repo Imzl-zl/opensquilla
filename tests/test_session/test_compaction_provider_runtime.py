@@ -1485,9 +1485,43 @@ async def test_actual_checkpoint_replans_only_a_complete_automatic_final_prefix(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("layout", ["prefix", "suffix"])
+async def test_structured_refusal_preserves_source_and_finalizes_usage_once(
+    monkeypatch: pytest.MonkeyPatch, layout: str,
+) -> None:
+    monkeypatch.setenv("OPENSQUILLA_COMPACTION_PROMPT_LAYOUT", layout)
+    provider = _Provider(lambda: _Stream([
+        TextDeltaEvent(text="I cannot provide a summary of this conversation."),
+        DoneEvent(stop_reason="stop", refusal=True, input_tokens=12, output_tokens=10),
+    ]))
+    entries = _entries(6)
+    sink = _Sink()
+
+    with bind_usage_accounting_scope(_usage_scope(sink)):
+        result = await compact_context(CompactionRequest(
+            session_id="refused-checkpoint", entries=entries,
+            context_window_tokens=1000, forced_prefix_cut=4,
+            config=_suffix_config(provider),
+        ))
+
+    assert result.removed_count == result.kept_start_index == 0
+    assert result.kept_entries == entries
+    assert result.summary == ""
+    assert result.skip_reason == (
+        "suffix_summary_failed" if layout == "suffix" else "summary_failed"
+    )
+    assert len(provider.calls) == 1
+    assert provider.streams[0].closed
+    assert len(sink.starts) == len(sink.finalized) == 1
+    assert sink.unknown == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [
     [TextDeltaEvent(text="incomplete second checkpoint"), DoneEvent(stop_reason="length")],
     [ErrorEvent(message="synthetic second-chunk failure")],
+    [TextDeltaEvent(text="I cannot summarize the remaining conversation."),
+     DoneEvent(stop_reason="stop", refusal=True)],
 ])
 async def test_suffix_later_chunk_failure_preserves_the_entire_source(
     monkeypatch: pytest.MonkeyPatch, failure: list[Any],
