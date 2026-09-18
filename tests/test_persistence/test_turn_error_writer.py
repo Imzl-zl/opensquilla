@@ -78,6 +78,20 @@ def test_record_error_inserts_scrubbed_row(tmp_path: Path) -> None:
     writer.close()
 
 
+def test_record_error_scrubs_cli_credentials_before_persisting(tmp_path: Path) -> None:
+    writer, db = _make_writer(tmp_path)
+    try:
+        assert writer.record_error(_base_record(
+            message='helper --api-key="synthetic cli credential" failed',
+            traceback="helper --password=synthetic-password --token=synthetic-token",
+        )) is True
+        row = _rows(db)[0]
+        assert row["message"] == 'helper --api-key="[redacted]" failed'
+        assert row["traceback"] == "helper --password=[redacted] --token=[redacted]"
+    finally:
+        writer.close()
+
+
 def test_record_error_requires_error_id_and_session_key(tmp_path: Path) -> None:
     writer, db = _make_writer(tmp_path)
     assert writer.record_error(_base_record(error_id=None)) is False
