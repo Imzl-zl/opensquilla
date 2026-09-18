@@ -559,6 +559,10 @@ def test_runner_saturated_subprocess_contracts_are_marked_ci_serial() -> None:
         Path("tests/test_tools/test_shell_process_isolation.py"),
         "test_exec_command_writes_optional_stdin",
     )
+    assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/test_skills/test_hub_transaction_process_gates.py"),
+        "test_unleased_build_services_does_not_sweep_another_process_reservation",
+    )
 
 
 def test_real_skill_install_cancellation_is_marked_ci_serial() -> None:
