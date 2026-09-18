@@ -23,6 +23,26 @@ describe('useSetupBehaviorForm', () => {
     expect(form.patches()).toEqual({ 'naming.enabled': false })
   })
 
+  it('defaults commit message drafting on when config omits it', () => {
+    const form = useSetupBehaviorForm()
+
+    form.initFromConfig({})
+
+    expect(form.commitMessageEnabled.value).toBe(true)
+    expect(form.isDirty.value).toBe(false)
+    expect(form.patches()).toEqual({})
+  })
+
+  it('patches the commit-message switch on its own', () => {
+    const form = useSetupBehaviorForm()
+
+    form.initFromConfig({ commit_message: { enabled: true } })
+    form.setCommitMessageEnabled(false)
+
+    expect(form.isDirty.value).toBe(true)
+    expect(form.patches()).toEqual({ 'commit_message.enabled': false })
+  })
+
   it('defaults the commit message rule to empty when config omits it', () => {
     const form = useSetupBehaviorForm()
 
@@ -44,15 +64,17 @@ describe('useSetupBehaviorForm', () => {
     })
   })
 
-  it('keeps both edits when a save follows two changes', () => {
+  it('keeps every edit when a save follows more than one change', () => {
     const form = useSetupBehaviorForm()
 
     form.initFromConfig({ naming: { enabled: true } })
     form.setAutoSessionTitles(false)
+    form.setCommitMessageEnabled(false)
     form.setCommitMessageInstructions('Say why, not what.')
 
     expect(form.patches()).toEqual({
       'naming.enabled': false,
+      'commit_message.enabled': false,
       'commit_message.instructions': 'Say why, not what.',
     })
   })
@@ -75,6 +97,18 @@ describe('useSetupBehaviorForm', () => {
     form.initFromConfig({ naming: { enabled: false } })
 
     expect(form.autoSessionTitles.value).toBe(false)
+    expect(form.isDirty.value).toBe(false)
+    expect(form.patches()).toEqual({})
+  })
+
+  it('resets the switch dirtiness when reloaded from saved config', () => {
+    const form = useSetupBehaviorForm()
+
+    form.initFromConfig({ commit_message: { enabled: true } })
+    form.setCommitMessageEnabled(false)
+    form.initFromConfig({ commit_message: { enabled: false } })
+
+    expect(form.commitMessageEnabled.value).toBe(false)
     expect(form.isDirty.value).toBe(false)
     expect(form.patches()).toEqual({})
   })

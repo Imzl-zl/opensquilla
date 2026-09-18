@@ -1371,6 +1371,8 @@
       "title": "Comportamiento de la sesión",
       "autoTitlesLabel": "Títulos automáticos de sesión",
       "autoTitlesDesc": "Genera títulos breves tras el primer mensaje; si está desactivado, usa el primer mensaje como alternativa.",
+      "commitMessageLabel": "Redactar mensajes de commit",
+      "commitMessageDesc": "Redacta un mensaje de commit a partir de los cambios preparados; desactivado, el campo queda manual.",
       "commitMessageRuleLabel": "Regla para el mensaje de commit",
       "commitMessageRuleDesc": "Indicación adicional que sigue el mensaje de commit generado. Déjalo vacío para usar solo la indicación integrada.",
       "commitMessageRulePlaceholder": "p. ej. Usar prefijos de Conventional Commits y escribir el asunto en inglés.",

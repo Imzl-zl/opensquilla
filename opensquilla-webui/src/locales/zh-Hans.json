@@ -1453,6 +1453,8 @@
       "title": "会话行为",
       "autoTitlesLabel": "自动会话标题",
       "autoTitlesDesc": "在首条消息后生成简短标题；关闭则使用首条消息作为后备标题。",
+      "commitMessageLabel": "生成提交信息",
+      "commitMessageDesc": "按需根据已暂存的改动生成提交信息；关闭后提交信息完全手写。",
       "commitMessageRuleLabel": "提交信息规则",
       "commitMessageRuleDesc": "生成提交信息时额外遵循的要求。留空则只使用内置规则。",
       "commitMessageRulePlaceholder": "例如：使用 Conventional Commits 前缀，主题行用英文。",

@@ -7,6 +7,7 @@ const { t } = useI18n()
 interface BehaviorPanelContract {
   autoSessionTitles: boolean
   autoSessionTitlesDirty: boolean
+  commitMessageEnabled: boolean
   commitMessageInstructions: string
   statusText: string
 }
@@ -18,6 +19,7 @@ defineProps<{
 
 const emit = defineEmits<{
   updateAutoSessionTitles: [enabled: boolean]
+  updateCommitMessageEnabled: [enabled: boolean]
   updateCommitMessageInstructions: [value: string]
 }>()
 </script>
@@ -43,8 +45,24 @@ const emit = defineEmits<{
       </div>
     </label>
     <!-- The other auto-written text in the app: the commit message the
-         workspace review panel drafts. Its rule is a setting here rather than
-         a field in the panel, so one place owns what a message should say. -->
+         workspace review panel drafts. Its switch and its rule are one block,
+         because the rule is what the switch governs; with drafting off the
+         staged patch never reaches a model. The rule lives here rather than in
+         the review panel, so one place owns what a message should say. -->
+    <label class="control-row">
+      <div class="control-row__label-block">
+        <span class="control-row__label">{{ t('setup.behavior.commitMessageLabel') }}</span>
+        <span class="control-row__desc">{{ t('setup.behavior.commitMessageDesc') }}</span>
+      </div>
+      <div class="control-row__control">
+        <ControlSwitch
+          :checked="panel.commitMessageEnabled"
+          name="setup_commit_message_enabled"
+          :aria-label="t('setup.behavior.commitMessageLabel')"
+          @change="(value) => emit('updateCommitMessageEnabled', value)"
+        />
+      </div>
+    </label>
     <label class="control-row control-row--stack">
       <div class="control-row__label-block">
         <span class="control-row__label">{{ t('setup.behavior.commitMessageRuleLabel') }}</span>

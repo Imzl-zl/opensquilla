@@ -1454,6 +1454,8 @@
       "title": "Session behavior",
       "autoTitlesLabel": "Auto session titles",
       "autoTitlesDesc": "Generate short titles after the first message; off uses the first-message fallback.",
+      "commitMessageLabel": "Draft commit messages",
+      "commitMessageDesc": "Write a commit message from the staged changes on request; off keeps the commit field manual.",
       "commitMessageRuleLabel": "Commit message rule",
       "commitMessageRuleDesc": "Extra guidance the generated commit message follows. Leave empty to use the built-in guidance.",
       "commitMessageRulePlaceholder": "e.g. Use Conventional Commits prefixes and write the subject in English.",

@@ -10,6 +10,7 @@ function panel(overrides: Record<string, unknown> = {}) {
   return {
     autoSessionTitles: true,
     autoSessionTitlesDirty: false,
+    commitMessageEnabled: true,
     commitMessageInstructions: '',
     statusText: 'New sessions receive a short generated title.',
     ...overrides,
@@ -18,19 +19,26 @@ function panel(overrides: Record<string, unknown> = {}) {
 
 async function mountPanel(panelValue = panel()) {
   const updateAutoSessionTitles = vi.fn()
+  const updateCommitMessageEnabled = vi.fn()
   const updateCommitMessageInstructions = vi.fn()
   const el = document.createElement('div')
   document.body.appendChild(el)
   const app = createApp(SetupBehaviorPanel, {
     panel: panelValue,
     onUpdateAutoSessionTitles: updateAutoSessionTitles,
+    onUpdateCommitMessageEnabled: updateCommitMessageEnabled,
     onUpdateCommitMessageInstructions: updateCommitMessageInstructions,
   })
   app.use(i18n)
   app.mount(el)
   mounted.push(app)
   await nextTick()
-  return { el, updateAutoSessionTitles, updateCommitMessageInstructions }
+  return {
+    el,
+    updateAutoSessionTitles,
+    updateCommitMessageEnabled,
+    updateCommitMessageInstructions,
+  }
 }
 
 afterEach(() => {
@@ -73,6 +81,23 @@ describe('SetupBehaviorPanel', () => {
 
     // Empty means "use the built-in guidance", which is a patch, not a no-op.
     expect(updateCommitMessageInstructions).toHaveBeenCalledWith('')
+  })
+
+  it('offers the drafting switch, and it emits on its own event', async () => {
+    i18n.global.locale.value = 'en'
+    const { el, updateCommitMessageEnabled, updateCommitMessageInstructions } = await mountPanel(
+      panel({ commitMessageEnabled: true }),
+    )
+    const toggle = el.querySelector<HTMLInputElement>('[name="setup_commit_message_enabled"]')
+
+    expect(toggle?.checked).toBe(true)
+    expect(el.textContent).toContain('Draft commit messages')
+
+    toggle!.checked = false
+    toggle!.dispatchEvent(new Event('change'))
+
+    expect(updateCommitMessageEnabled).toHaveBeenCalledWith(false)
+    expect(updateCommitMessageInstructions).not.toHaveBeenCalled()
   })
 
   it('keeps the auto-title switch on its own event', async () => {

@@ -1371,6 +1371,8 @@
       "title": "セッションの動作",
       "autoTitlesLabel": "セッションタイトルの自動生成",
       "autoTitlesDesc": "最初のメッセージの後に短いタイトルを生成します。オフの場合は最初のメッセージをそのままタイトルにします。",
+      "commitMessageLabel": "コミットメッセージの下書き",
+      "commitMessageDesc": "ステージ済みの変更からコミットメッセージを生成します。オフにするとコミット欄は手入力のみになります。",
       "commitMessageRuleLabel": "コミットメッセージのルール",
       "commitMessageRuleDesc": "生成されるコミットメッセージが追加で従う指示。空欄の場合は組み込みの指示のみを使用します。",
       "commitMessageRulePlaceholder": "例: Conventional Commits の接頭辞を使い、件名は英語で書く。",

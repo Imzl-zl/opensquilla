@@ -1371,6 +1371,8 @@
       "title": "Comportement des sessions",
       "autoTitlesLabel": "Titres de session automatiques",
       "autoTitlesDesc": "Génère de courts titres après le premier message ; désactivé, utilise le repli sur le premier message.",
+      "commitMessageLabel": "Rédiger les messages de commit",
+      "commitMessageDesc": "Rédige un message de commit à partir des modifications indexées ; désactivé, le champ reste manuel.",
       "commitMessageRuleLabel": "Règle de message de commit",
       "commitMessageRuleDesc": "Consigne supplémentaire que suit le message de commit généré. Laisser vide pour n'utiliser que la consigne intégrée.",
       "commitMessageRulePlaceholder": "ex. Utiliser les préfixes Conventional Commits et rédiger le sujet en anglais.",

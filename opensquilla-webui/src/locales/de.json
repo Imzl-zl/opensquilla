@@ -1371,6 +1371,8 @@
       "title": "Sitzungsverhalten",
       "autoTitlesLabel": "Automatische Sitzungstitel",
       "autoTitlesDesc": "Kurze Titel nach der ersten Nachricht generieren; bei Deaktivierung wird die erste Nachricht als Ersatz verwendet.",
+      "commitMessageLabel": "Commit-Nachrichten entwerfen",
+      "commitMessageDesc": "Schreibt auf Anfrage eine Commit-Nachricht aus den bereitgestellten Änderungen; aus bleibt das Feld manuell.",
       "commitMessageRuleLabel": "Regel für Commit-Nachrichten",
       "commitMessageRuleDesc": "Zusätzliche Vorgabe, der die erzeugte Commit-Nachricht folgt. Leer lassen, um nur die eingebaute Vorgabe zu verwenden.",
       "commitMessageRulePlaceholder": "z. B. Conventional-Commits-Präfixe verwenden und den Betreff auf Englisch schreiben.",

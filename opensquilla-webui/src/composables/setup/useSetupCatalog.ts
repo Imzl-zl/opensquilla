@@ -413,6 +413,7 @@ interface ConfigData {
     enabled?: boolean
   }
   commit_message?: {
+    enabled?: boolean
     instructions?: string | null
   }
   search_provider?: string
@@ -2868,6 +2869,10 @@ function setAutoSessionTitles(enabled: boolean) {
   behaviorForm.setAutoSessionTitles(enabled)
 }
 
+function setCommitMessageEnabled(enabled: boolean) {
+  behaviorForm.setCommitMessageEnabled(enabled)
+}
+
 function setCommitMessageInstructions(value: string) {
   behaviorForm.setCommitMessageInstructions(value)
 }
@@ -4584,6 +4589,7 @@ async function copyConfigPath() {
     saveProvider,
     saveProviderAndActivate,
     saveBehavior,
+    setCommitMessageEnabled,
     setCommitMessageInstructions,
     savePrivacy,
     saveMemoryAutoCapture,
