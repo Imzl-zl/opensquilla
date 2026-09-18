@@ -282,6 +282,7 @@ def transcript_entries_to_chat_messages(
         artifacts = None
         prompt_annotations = None
         page_context = None
+        selected_skills = None
         if content and content.startswith("{"):
             try:
                 parsed = json.loads(content)
@@ -298,6 +299,12 @@ def transcript_entries_to_chat_messages(
                              "size": ref.get("size"), "workspaceFile": ref}
                             for ref in workspace_files
                         ]]
+                    from opensquilla.contracts.selected_skills import normalize_selected_skills
+
+                    try:
+                        selected_skills = normalize_selected_skills(parsed.get("selected_skills"))
+                    except ValueError:
+                        selected_skills = None
                     raw_page_context = parsed.get("page_context")
                     if isinstance(raw_page_context, dict):
                         page_context = raw_page_context
@@ -398,6 +405,8 @@ def transcript_entries_to_chat_messages(
             msg["promptAnnotations"] = prompt_annotations
         if page_context:
             msg["pageContext"] = page_context
+        if selected_skills:
+            msg["selectedSkills"] = list(selected_skills)
         usage = getattr(projected_entry, "turn_usage", None)
         if isinstance(usage, dict):
             msg["usage"] = usage

@@ -878,11 +878,14 @@ describe('useChatPendingQueue delivery state', () => {
     queue.cleanup()
   })
 
-  it('retains a native workspace reference through offline WAL reload and server staging', async () => {
+  it.each([false, true])('retains a native workspace reference through WAL and staging with selected skills: %s', async withSkills => {
     const { wal, records } = memoryWal()
+    const skills = withSkills ? [{ name: 'tables', instanceId: 'skill:tables', digest: 'a'.repeat(64) }] : []
+    const selectedSkills = ref(skills)
     const workspaceFile = { workspaceId: 'project-fixture', relativePath: 'docs/notes.md',
       name: 'notes.md', mime: 'text/markdown', size: 14 }
     const original = makeQueue(undefined, () => true, undefined, undefined, {
+      selectedSkills,
       pendingInputWal: wal, connectionState: ref('disconnected'),
       deliveryIdentity: ref('fixture-gateway:owner'),
     })
@@ -893,6 +896,8 @@ describe('useChatPendingQueue delivery state', () => {
     })).resolves.toBe(true)
     expect([...records.values()][0]?.attachments).toMatchObject([{ kind: 'workspace', workspaceFile }])
     expect(original.pendingAttachments.value).toEqual([])
+    expect(selectedSkills.value).toEqual([])
+    if (withSkills) expect([...records.values()][0]?.selectedSkills).toEqual(skills)
     original.queue.cleanup()
     const call = vi.fn(async (method: string) => method === 'sessions.pending_inputs.list'
       ? { items: [] } : { requestFingerprint: 'fixture-fingerprint', revision: 1 })
@@ -905,8 +910,10 @@ describe('useChatPendingQueue delivery state', () => {
       await vi.waitFor(() => expect(restored.queue.pendingQueue.value[0]?.pendingPersistenceState).toBe('staged'))
       expect(call).toHaveBeenCalledWith('sessions.pending_inputs.enqueue', expect.objectContaining({
         workspaceFiles: [workspaceFile], attachments: [],
+        ...(withSkills ? { selectedSkills: skills } : {}),
       }))
       expect(restored.queue.pendingQueue.value[0]?.attachments).toMatchObject([{ kind: 'workspace', workspaceFile }])
+      if (withSkills) expect(restored.queue.pendingQueue.value[0]?.selectedSkills).toEqual(skills)
       expect([...records.values()][0]?.attachments).toMatchObject([{ kind: 'workspace', workspaceFile,
         durable_material: true }])
       expect(JSON.stringify([...records.values()])).not.toContain('file_uuid')
@@ -2918,4 +2925,70 @@ describe('useChatPendingQueue delivery state', () => {
       .map(record => record.text)).toEqual(['C', 'A', 'B'])
     first.queue.cleanup()
   })
+})
+
+describe('explicit skill pending input durability', () => {
+  const skill = { name: 'synthetic-table', instanceId: 'instance-one', digest: 'digest-one' }
+
+  it('persists selected identities before clearing and restores them after remount', async () => {
+    const { wal, records } = memoryWal()
+    const selectedSkills = ref([{ ...skill }])
+    const harness = makeQueue(undefined, () => false, undefined, undefined, { pendingInputWal: wal, selectedSkills })
+    harness.inputText.value = 'Make a table'
+    expect(await harness.queue.enqueuePendingInput('Make a table')).toBe(true)
+    expect(selectedSkills.value).toEqual([])
+    expect([...records.values()][0]?.selectedSkills).toEqual([skill])
+    const restored = makeQueue(undefined, () => false, undefined, undefined, { pendingInputWal: wal })
+    await restored.queue.hydratePendingQueue('agent:main:webchat:test')
+    expect(restored.queue.pendingQueue.value[0]?.selectedSkills).toEqual([skill])
+  })
+
+  it('keeps a newer selection while an older WAL write is pending', async () => {
+    const { wal } = memoryWal()
+    let finish!: () => void
+    wal.put = vi.fn(() => new Promise<void>(resolve => { finish = resolve }))
+    const selectedSkills = ref([{ ...skill }])
+    const harness = makeQueue(undefined, () => false, undefined, undefined, { pendingInputWal: wal, selectedSkills })
+    harness.inputText.value = 'Make a table'
+    const enqueue = harness.queue.enqueuePendingInput('Make a table')
+    const other = { ...skill, name: 'synthetic-paper', instanceId: 'instance-two' }
+    selectedSkills.value = [other]
+    finish()
+    expect(await enqueue).toBe(true)
+    expect(selectedSkills.value).toEqual([other])
+    expect(harness.inputText.value).toBe('Make a table')
+    expect(harness.queue.pendingQueue.value[0]?.selectedSkills).toEqual([skill])
+  })
+})
+
+it('does not replace a queued skill identity with a conflicting server projection', async () => {
+  const skill = { name: 'synthetic-table', instanceId: 'instance-one', digest: 'digest-one' }
+  const record: PendingInputWalRecord = {
+    schemaVersion: 1, pendingInputId: 'pending-skill', sessionKey: 'agent:main:webchat:test',
+    clientRequestId: 'request-skill', clientMessageId: 'message-skill', text: 'Make a table',
+    attachments: [], intent: null, state: 'staged', selectedSkills: [skill],
+    requestFingerprint: 'original-fingerprint', createdAt: 1, updatedAt: 1,
+  }
+  const { wal } = memoryWal([record])
+  const port: PendingInputQueuePort = {
+    supportsQueue: () => true, supportsReorder: () => false,
+    enqueue: vi.fn(async () => { throw new Error('Conflicting immutable request') }),
+    list: vi.fn(async () => [{
+      pendingInputId: record.pendingInputId, clientRequestId: record.clientRequestId,
+      clientMessageId: record.clientMessageId, message: record.text,
+      selectedSkills: [{ ...skill, instanceId: 'replacement-instance' }],
+      requestFingerprint: 'different-fingerprint', revision: 2,
+    }]),
+    cancel: vi.fn(async () => {}), reorder: vi.fn(async () => ({ items: [] })),
+  }
+  const result = makeQueue(undefined, () => true, undefined, undefined, {
+    pendingInputWal: wal, pendingInputQueue: port,
+  })
+  try {
+    await result.queue.hydratePendingQueue(record.sessionKey)
+    expect(result.queue.pendingQueue.value[0]).toMatchObject({
+      selectedSkills: [skill], pendingRequestFingerprint: 'original-fingerprint',
+      pendingPersistenceState: 'retryable',
+    })
+  } finally { result.queue.cleanup() }
 })

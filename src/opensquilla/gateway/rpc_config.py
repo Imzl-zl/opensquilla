@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
-from opensquilla.application.app_settings import AppSettings, SettingChange
-from opensquilla.gateway.adapters.app_settings import GatewayAppSettingsPort
+from opensquilla.application.app_settings import SettingChange
+from opensquilla.gateway.adapters.app_settings import app_settings_for_rpc as _app_settings
 from opensquilla.gateway.rpc import RpcContext, get_dispatcher
-
-if TYPE_CHECKING:
-    from opensquilla.gateway.config import GatewayConfig
-    from opensquilla.provider.selector import ProviderConfig
 
 _d = get_dispatcher()
 
@@ -29,20 +25,6 @@ def _public_gateway_config_schema() -> dict[str, Any]:
             if isinstance(properties, dict):
                 properties.pop("extra_body", None)
     return schema
-
-
-def _app_settings(
-    ctx: RpcContext, *, source: str = "config.patch"
-) -> AppSettings[GatewayConfig, ProviderConfig | None]:
-    return AppSettings(
-        GatewayAppSettingsPort(
-            ctx.config,
-            task_runtime=getattr(ctx, "task_runtime", None),
-            provider_selector=getattr(ctx, "provider_selector", None),
-            subscription_manager=getattr(ctx, "subscription_manager", None),
-            source=source,
-        )
-    )
 
 
 @_d.method("config.set", scope="operator.admin")

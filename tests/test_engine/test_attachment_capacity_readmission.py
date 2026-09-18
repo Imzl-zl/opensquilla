@@ -7,6 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -380,6 +381,80 @@ async def test_attachment_route_counts_plan_reference_without_promoting_or_repea
         message.content.count("SYNTHETIC_PLAN_REFERENCE")
         for message in call["messages"] if isinstance(message.content, str)
     ) == 1
+
+
+@pytest.mark.parametrize("skill_state", ["valid", "changed", "oversized"])
+async def test_selected_skill_and_attachment_share_verified_request_capacity(
+    attachment_retry_stack: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    skill_state: str,
+) -> None:
+    from opensquilla.skills import eligibility
+    from opensquilla.skills.tree import compute_tree_sha256
+    from opensquilla.skills.types import SkillLayer, SkillSpec
+    from opensquilla.tools.registry import ToolRegistry, tool
+    from opensquilla.tools.types import PlanAccess
+
+    stack = attachment_retry_stack
+    directory = tmp_path / "synthetic-selected-skill"
+    directory.mkdir()
+    content = "SYNTHETIC_SELECTED_INSTRUCTIONS " + (
+        "Synthetic explicit constraint. " * (10_000 if skill_state == "oversized" else 20)
+    )
+    (directory / "SKILL.md").write_text(content, encoding="utf-8")
+    skill = SkillSpec(
+        name="synthetic-reader", description="Synthetic attachment reader",
+        layer=SkillLayer.PERSONAL, always=False, triggers=[], content=content,
+        base_dir=str(directory), instance_id="synthetic-instance",
+        tree_digest=compute_tree_sha256(directory),
+    )
+    catalog = SimpleNamespace(skills=(skill,), generation=1)
+    monkeypatch.setattr(stack["runner"], "_resolve_skill_catalog", lambda: catalog)
+    monkeypatch.setattr(eligibility, "_live_skills_cfg_getter", None)
+    registry = ToolRegistry()
+
+    @tool(
+        name="skill_view", description="Synthetic skill reader", default_access="deny",
+        plan_access=PlanAccess.READ_ONLY, registry=registry,
+    )
+    async def skill_reader():
+        return content
+
+    stack["runner"]._tool_registry = registry
+    stack["tool_context"] = ToolContext(
+        is_owner=True, caller_kind=CallerKind.CLI,
+        selected_skills=({
+            "name": skill.name, "instanceId": skill.instance_id, "digest": skill.tree_digest,
+        },),
+    )
+    if skill_state == "changed":
+        (directory / "SKILL.md").write_text("Changed synthetic instructions", encoding="utf-8")
+
+    events = await _run(stack)
+    errors = [event for event in events if getattr(event, "kind", "") == "error"]
+    if skill_state != "valid":
+        assert errors
+        assert not stack["calls"]
+        assert not stack["summaries"]
+        return
+
+    assert not errors
+    assert stack["summaries"]
+    assert len(stack["calls"]) == 1
+    call = stack["calls"][0]
+    visible = (call["config"].system or "") + "\n".join(
+        message.content for message in call["messages"] if isinstance(message.content, str)
+    )
+    assert visible.count("SYNTHETIC_SELECTED_INSTRUCTIONS") == 1
+    images = [
+        block for message in call["messages"] if isinstance(message.content, list)
+        for block in message.content if isinstance(block, ContentBlockImage)
+    ]
+    assert len(images) == 1 and images[0].data == stack["attachment"]["data"]
+    receipts = [event.content for event in events if getattr(event, "kind", "") == "skill_load"]
+    assert [receipt["status"] for receipt in receipts] == ["loading", "loaded"]
+    assert stack["projections"][-1]["snapshot_generation"] > (
+        stack["projections"][0]["snapshot_generation"]
+    )
 
 
 @pytest.mark.parametrize("explicit_model", [

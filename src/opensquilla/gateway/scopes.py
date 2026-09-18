@@ -213,6 +213,7 @@ METHOD_SCOPES: dict[str, str] = {
     "agent.identity.get": READ_SCOPE,
     "skills.status": READ_SCOPE,
     "skills.list": READ_SCOPE,
+    "skills.candidates": READ_SCOPE,
     "skills.get": READ_SCOPE,
     "skills.search": READ_SCOPE,
     "skills.doctor": READ_SCOPE,
@@ -386,6 +387,7 @@ METHOD_SCOPES: dict[str, str] = {
     "skills.update": ADMIN_SCOPE,
     "skills.uninstall": ADMIN_SCOPE,
     "skills.reload": ADMIN_SCOPE,
+    "skills.setEnabled": ADMIN_SCOPE,
     "skills.deps.install": ADMIN_SCOPE,
     # Optional developer runtimes execute native, catalog-pinned payloads and
     # mutate profile-local managed state, so every lifecycle mutation remains

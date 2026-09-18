@@ -6,6 +6,7 @@ export type SkillMutationOwner =
   | 'uninstall'
   | 'reload'
   | 'proposal'
+  | 'allow_use'
 
 export interface SkillMutationGate {
   owner: ComputedRef<SkillMutationOwner | null>

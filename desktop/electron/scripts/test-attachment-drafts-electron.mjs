@@ -22,12 +22,16 @@ for (const [route, file] of Object.entries({
   '/wal.js': 'utils/chat/pendingInputWal.ts',
   '/attachments.js': 'utils/chat/attachments.ts',
   '/page-context.js': 'types/pageContext.ts',
+  '/selected-skills.js': 'types/selectedSkills.ts',
+  '/message-identity.js': 'utils/chat/messageIdentity.ts',
 })) {
   const source = await readFile(new URL(`../../../opensquilla-webui/src/${file}`, import.meta.url), 'utf8')
   const compiled = ts.transpileModule(source, { compilerOptions: {
     target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022,
   } }).outputText.replaceAll("'@/types/pageContext'", "'/page-context.js'")
+    .replaceAll("'@/types/selectedSkills'", "'/selected-skills.js'")
     .replaceAll("'./attachments'", "'/attachments.js'")
+    .replaceAll("'./messageIdentity'", "'/message-identity.js'")
   modules.set(route, compiled)
 }
 const root = await mkdtemp(join(tmpdir(), 'opensquilla-attachment-drafts-electron-'))
@@ -54,14 +58,15 @@ try {
     const attachment = new Proxy({ kind: 'workspace', local_id: 1, name: 'code.ts',
       mime: 'text/plain', workspaceFile }, {})
     const wal = createPendingInputWal(indexedDB)
+    const selectedSkills = [{ name: 'tables', instanceId: 'skill:tables', digest: 'a'.repeat(64) }]
     await wal.put({ schemaVersion: 1, pendingInputId: 'fixture-pending', sessionKey: 'session-A',
       clientRequestId: 'fixture-request', clientMessageId: 'fixture-message',
-      text: 'edit project notes', attachments: [attachment], intent: null, state: 'local_only',
+      text: 'edit project notes', attachments: [attachment], selectedSkills, intent: null, state: 'local_only',
       createdAt: 1, updatedAt: 1 })
     await wal.putHandoff({ schemaVersion: 1, ownerRequestId: 'fixture-request', requestSessionKey: 'session-A',
       clientRequestId: 'fixture-request', clientMessageId: 'fixture-message',
       params: { message: 'edit project notes', sessionKey: 'session-A', clientRequestId: 'fixture-request',
-        clientMessageId: 'fixture-message', ...serializeChatFiles([attachment]) },
+        clientMessageId: 'fixture-message', selectedSkills, ...serializeChatFiles([attachment]) },
       composerText: 'edit project notes', recoveryAttachments: [snapshotAttachment(attachment)],
       state: 'submitting', createdAt: 1, updatedAt: 1 })
     wal.close()
@@ -74,7 +79,10 @@ try {
     let now = Date.now()
     const store = new IndexedDbAttachmentDraftStore(indexedDB, () => now)
     const scope = { identity: 'gateway-user-A', sessionKey: 'session-A' }
-    const loaded = await store.load(scope)
+    const initialSnapshot = await store.loadSnapshot(scope)
+    const loaded = initialSnapshot.attachments
+    const legacyRevisionRestored = Boolean(initialSnapshot.revision)
+      && (await store.loadSnapshot(scope)).revision === initialSnapshot.revision
     const { createPendingInputWal } = await import('/wal.js')
     const wal = createPendingInputWal(indexedDB)
     const queued = await wal.list('session-A')
@@ -82,6 +90,8 @@ try {
     const walRestored = queued[0]?.attachments[0]?.workspaceFile?.relativePath === 'src/code.ts'
       && handoffs[0]?.params.workspaceFiles?.[0]?.relativePath === 'src/code.ts'
       && handoffs[0]?.recoveryAttachments[0]?.kind === 'workspace'
+      && queued[0]?.selectedSkills[0]?.instanceId === 'skill:tables'
+      && handoffs[0]?.params.selectedSkills[0]?.instanceId === 'skill:tables'
     wal.close()
     const blobText = await loaded[0].file.text()
     const isolated = (await store.load({ ...scope, identity: 'gateway-user-B' })).length === 0
@@ -132,14 +142,54 @@ try {
         request.onerror = () => reject(request.error)
       }
     })
-    return { blobText, isolated, workspace, walRestored, capabilityAbsent: !savedRaw.includes('must-never-persist'),
+    return { blobText, isolated, workspace, walRestored, legacyRevisionRestored, capabilityAbsent: !savedRaw.includes('must-never-persist'),
       expired, aggregateRejected, existingPreserved, perDraftRejected, removed, acceptedRetained }
   })
   assert.equal(result.blobText, 'draft contents')
   assert.equal(result.workspace[0].kind, 'workspace')
   assert.equal(result.workspace[0].workspaceFile.relativePath, 'src/code.ts')
-  for (const key of ['walRestored', 'isolated', 'capabilityAbsent', 'expired', 'aggregateRejected', 'existingPreserved', 'perDraftRejected', 'removed', 'acceptedRetained']) assert.equal(result[key], true, key)
+  for (const key of ['walRestored', 'legacyRevisionRestored', 'isolated', 'capabilityAbsent', 'expired', 'aggregateRejected', 'existingPreserved', 'perDraftRejected', 'removed', 'acceptedRetained']) assert.equal(result[key], true, key)
+  const nextWindow = app.waitForEvent('window')
+  await app.evaluate(async ({ BrowserWindow }, url) => {
+    const window = new BrowserWindow({ show: false, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false } })
+    await window.loadURL(url)
+  }, `http://127.0.0.1:${server.address().port}`)
+  const otherPage = await nextWindow
+  const scope = { identity: 'gateway-user-A', sessionKey: 'late-acceptance' }
+  const files = ['first.txt', 'second.txt'].map((name, index) => ({
+    kind: 'workspace', local_id: index + 1, name, mime: 'text/plain', size: 3,
+    workspaceFile: { workspaceId: 'project-A', relativePath: name, name, mime: 'text/plain', size: 3 },
+  }))
+  await page.evaluate(async ({ scope, files }) => {
+    const { IndexedDbAttachmentDraftStore } = await import('/drafts.js')
+    await new IndexedDbAttachmentDraftStore(indexedDB).save(scope, files, 'accepted-version')
+  }, { scope, files })
+  // A different renderer writes an identical-looking new draft. Content or
+  // local attachment IDs alone must never authorize the old ACK to erase it.
+  await otherPage.evaluate(async ({ scope, files }) => {
+    const { IndexedDbAttachmentDraftStore } = await import('/drafts.js')
+    await new IndexedDbAttachmentDraftStore(indexedDB).save(scope, files, 'new-tab-version')
+  }, { scope, files })
+  const consumption = await page.evaluate(async scope => {
+    const { IndexedDbAttachmentDraftStore } = await import('/drafts.js')
+    const store = new IndexedDbAttachmentDraftStore(indexedDB)
+    const restored = await store.loadSnapshot(scope)
+    const rejectedOldVersion = !await store.consume(scope, 'accepted-version', [0, 1])
+    const newerRetained = (await store.load(scope)).length === 2
+    const consumedCurrentVersion = await store.consume(scope, restored.revision, [0])
+    const rejectedDuplicate = !await store.consume(scope, restored.revision, [0])
+    const remainingSnapshot = await store.loadSnapshot(scope)
+    const remainder = remainingSnapshot.attachments
+    const consumedRemainder = await store.consume(scope, remainingSnapshot.revision, [0])
+      && (await store.load(scope)).length === 0
+    return { newerRetained, rejectedOldVersion, consumedCurrentVersion, rejectedDuplicate, consumedRemainder,
+      revision: restored.revision, remainder: remainder.map(item => item.name) }
+  }, scope)
+  assert.equal(consumption.revision, 'new-tab-version')
+  for (const key of ['newerRetained', 'rejectedOldVersion', 'consumedCurrentVersion', 'rejectedDuplicate', 'consumedRemainder']) assert.equal(consumption[key], true, key)
+  assert.deepEqual(consumption.remainder, ['second.txt'])
   console.log('Electron IndexedDB attachment drafts: reload/Blob, isolation, workspace and handoff WAL, expiry, budgets and queue ownership passed')
+  console.log('Two-renderer IndexedDB acceptance: newer identical draft survives, partial consumption and duplicate ACK passed')
 } finally {
   await app?.close()
   await new Promise(resolve => server.close(resolve))

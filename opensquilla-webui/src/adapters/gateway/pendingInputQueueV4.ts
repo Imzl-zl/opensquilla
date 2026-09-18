@@ -1,4 +1,6 @@
 import { normalizeWorkspaceFileReferences } from '@/utils/chat/attachments'
+import { copySelectedSkills, isSelectedSkills } from '@/types/selectedSkills'
+import { SKILLS_CANDIDATES_METHOD } from '@/contracts/generated/v4/skillsCandidates'
 import { normalizePageContext } from '@/types/pageContext'
 import {
   readTransportFailure,
@@ -94,6 +96,7 @@ function projectPendingInputItem(value: unknown): PendingInputServerItem | null 
   const clientMessageId = stringValue(firstValue(value, 'clientMessageId', 'client_message_id'))
   if (!pendingInputId || !clientRequestId || !clientMessageId) return null
 
+  if (value.selectedSkills !== undefined && !isSelectedSkills(value.selectedSkills)) return null
   const attachments = Array.isArray(value.attachments)
     ? value.attachments.flatMap(attachment => {
         const projected = projectServerAttachment(attachment)
@@ -127,6 +130,7 @@ function projectPendingInputItem(value: unknown): PendingInputServerItem | null 
     ...(revision !== undefined ? { revision } : {}),
     ...(requestFingerprint !== undefined ? { requestFingerprint } : {}),
     ...(pageContext ? { pageContext } : {}),
+    ...(isSelectedSkills(value.selectedSkills) ? { selectedSkills: copySelectedSkills(value.selectedSkills) } : {}),
     ...(intent !== undefined ? { intent } : {}),
     ...(value.confirmedPlainText === true ? { confirmedPlainText: true } : {}),
   }
@@ -208,10 +212,16 @@ function createRawPendingInputQueuePort(
   return {
     supportsQueue: () => supports(methods.enqueue),
     supportsReorder: () => supports(methods.reorder),
-    enqueue: request => requestPending(source, methods.enqueue, {
-      ...request,
-      attachments: [...request.attachments],
-    }),
+    enqueue: request => {
+      if (request.selectedSkills?.length && !supports(SKILLS_CANDIDATES_METHOD)) {
+        return Promise.reject(new PendingInputQueueError('unsupported', 'Update the Gateway to use selected skills.', false))
+      }
+      return requestPending(source, methods.enqueue, {
+        ...request,
+        ...(request.selectedSkills?.length ? { selectedSkills: copySelectedSkills(request.selectedSkills) } : {}),
+        attachments: [...request.attachments],
+      })
+    },
     list: sessionKey => requestPending(source, methods.list, { key: sessionKey }),
     cancel: request => requestPending(source, methods.cancel, { ...request }),
     reorder: request => requestPending(source, methods.reorder, {

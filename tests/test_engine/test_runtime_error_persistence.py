@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -108,6 +109,131 @@ class _ProviderSelector:
 
     def clone(self) -> _SelectorClone:
         return _SelectorClone(self.provider)
+
+
+@pytest.mark.parametrize(
+    "outcome", ["loaded", "missing", "cancelled", "delayed", "cancelled_inflight"],
+)
+async def test_selected_skill_stream_and_history_match_actual_load(
+    tmp_path, monkeypatch, outcome,
+) -> None:
+    from opensquilla.gateway.config import GatewayConfig
+    from opensquilla.provider import ToolDefinition
+    from opensquilla.skills.tree import compute_tree_sha256
+    from opensquilla.skills.types import SkillLayer, SkillSpec
+
+    monkeypatch.setattr("opensquilla.engine.runtime.log", MagicMock())
+    directory = tmp_path / "report"
+    directory.mkdir()
+    (directory / "SKILL.md").write_text("Synthetic selected instructions", encoding="utf-8")
+    spec = SkillSpec(
+        "report", "Synthetic reporting", SkillLayer.PERSONAL, False, [],
+        "Synthetic selected instructions", base_dir=str(directory),
+        instance_id="synthetic-report", tree_digest=compute_tree_sha256(directory),
+        disable_model_invocation=True,
+    )
+    snapshot = SimpleNamespace(skills=() if outcome == "missing" else (spec,), generation=1)
+    digest_started, finish_digest = asyncio.Event(), asyncio.Event()
+    loading_received = asyncio.Event()
+    if outcome in {"delayed", "cancelled_inflight"}:
+        original_to_thread = asyncio.to_thread
+
+        async def delayed_digest(function, *args, **kwargs):
+            if function is compute_tree_sha256:
+                digest_started.set()
+                await finish_digest.wait()
+            return await original_to_thread(function, *args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "to_thread", delayed_digest)
+    if outcome == "cancelled":
+        def cancel_digest(*_args):
+            raise asyncio.CancelledError("synthetic stop")
+
+        monkeypatch.setattr(
+            "opensquilla.engine.steps.selected_skills.compute_tree_sha256", cancel_digest,
+        )
+    calls = []
+
+    class RecordingProvider(_SingleReplyProvider):
+        def chat(self, messages, tools=None, config=None):
+            calls.append((messages, config))
+            return self._stream()
+
+    manager = _RecordingSessionManager()
+    config = GatewayConfig()
+    config.squilla_router.enabled = False
+    config.skills.injection_mode = "system"
+    runner = TurnRunner(
+        provider_selector=_ProviderSelector(RecordingProvider()),
+        session_manager=manager, config=config,
+    )
+    monkeypatch.setattr(runner, "_resolve_skill_catalog", lambda: snapshot)
+    monkeypatch.setattr(
+        runner, "_build_tools",
+        lambda *args, **kwargs: ([ToolDefinition(
+            name="skill_view", description="Read skill", input_schema={"type": "object"},
+        )], None),
+    )
+    context = ToolContext(
+        is_owner=True, caller_kind=CallerKind.WEB,
+        selected_skills=({
+            "name": spec.name, "instanceId": spec.instance_id, "digest": spec.tree_digest,
+        },),
+    )
+    events = []
+
+    async def consume():
+        async for event in runner.run(
+            "Synthetic request", "agent:main:webchat:selected-skill", context,
+            no_memory_capture=True, input_mode="text",
+        ):
+            events.append(event)
+            if event.kind == "skill_load" and event.content["status"] == "loading":
+                loading_received.set()
+
+    if outcome in {"delayed", "cancelled_inflight"}:
+        task = asyncio.create_task(consume())
+        try:
+            await asyncio.wait_for(digest_started.wait(), timeout=5)
+            # The UI receives progress before the body check or assembly completes.
+            await asyncio.wait_for(loading_received.wait(), timeout=5)
+            assert not calls
+            if outcome == "cancelled_inflight":
+                task.cancel("synthetic stop")
+                with pytest.raises(asyncio.CancelledError, match="synthetic stop"):
+                    await task
+            else:
+                finish_digest.set()
+                await task
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    elif outcome == "cancelled":
+        with pytest.raises(asyncio.CancelledError, match="synthetic stop"):
+            await consume()
+    else:
+        await consume()
+    loads = [event for event in events if event.kind == "skill_load"]
+    loaded = outcome in {"loaded", "delayed"}
+    assert [event.content["status"] for event in loads] == [
+        "loading", "loaded" if loaded else "failed",
+    ]
+    assert all(event.content["turnId"] for event in loads)
+    assert bool(calls) is loaded
+    assert bool([event for event in events if event.kind == "error"]) is (outcome == "missing")
+    persisted = [
+        segment
+        for row in manager.append_calls
+        for segment in row.get("tool_calls", []) or []
+        if segment.get("type") == "skill_load"
+    ]
+    assert [row["status"] for row in persisted] == [event.content["status"] for event in loads]
+    if loaded:
+        assert "Synthetic selected instructions" in str(calls[0])
+    elif outcome in {"cancelled", "cancelled_inflight"}:
+        assert "cancelled" in loads[-1].content["error"]
+        assert any(event.kind == "control_terminal" for event in events)
 
 
 @pytest.mark.asyncio

@@ -103,7 +103,7 @@ describe('native chat attachment intake', () => {
     const adding = attachments.addAttachments([file])
     await vi.waitFor(() => expect(attachments.pendingAttachments.value[0]?.kind).toBe('uploading'))
     await attachments.flushAttachmentDraft()
-    expect(store.save).toHaveBeenLastCalledWith(expect.anything(), [expect.not.objectContaining({ file })])
+    expect(store.save).toHaveBeenLastCalledWith(expect.anything(), [expect.not.objectContaining({ file })], expect.stringMatching(/\S/))
     expect(attachments.pendingAttachments.value[0].file).toBeUndefined()
     imported.resolve(receipt)
     await adding
@@ -172,6 +172,7 @@ describe('native chat attachment intake', () => {
     expect(store.save).toHaveBeenLastCalledWith(
       { identity: 'fixture-owner', sessionKey: 'fixture-session' },
       [expect.objectContaining({ name: 'new.txt', data: 'bmV3' })],
+      expect.stringMatching(/\S/),
     )
   })
 

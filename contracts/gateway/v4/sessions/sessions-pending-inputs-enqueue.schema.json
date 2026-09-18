@@ -145,6 +145,13 @@
             }
           ]
         },
+        "selectedSkills": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/SelectedSkillRef"
+          }
+        },
         "workspaceFiles": {
           "type": "array",
           "maxItems": 10,
@@ -203,6 +210,13 @@
         },
         "position": {
           "type": "integer"
+        },
+        "selectedSkills": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/SelectedSkillRef"
+          }
         }
       }
     },
@@ -350,6 +364,32 @@
           ],
           "maxLength": 16384,
           "description": "The Gateway enforces a 16384-byte UTF-8 limit."
+        }
+      }
+    },
+    "SelectedSkillRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "instanceId",
+        "digest"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "instanceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
         }
       }
     },

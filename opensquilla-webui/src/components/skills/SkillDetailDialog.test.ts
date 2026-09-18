@@ -39,6 +39,7 @@ function mountDialog(initial: Skill | null, initialProposal: Proposal | null = n
     proposal.value = null
   })
   const installDeps = vi.fn()
+  const setEnabled = vi.fn()
   const host = document.createElement('div')
   document.body.appendChild(host)
   const app = createApp({
@@ -52,15 +53,28 @@ function mountDialog(initial: Skill | null, initialProposal: Proposal | null = n
       uninstallingName: null,
       onClose: close,
       onInstallDeps: installDeps,
+      canSetEnabled: true,
+      onSetEnabled: setEnabled,
     }),
   })
   app.use(createI18n({ legacy: false, locale: 'en', messages: { en } }))
   app.mount(host)
   apps.push(app)
-  return { skill, proposal, close, installDeps, host, dialog: host.querySelector('dialog')! }
+  return { skill, proposal, close, installDeps, setEnabled, host, dialog: host.querySelector('dialog')! }
 }
 
 describe('SkillDetailDialog behavior contract', () => {
+  it('allows a disabled skill without implicitly installing its dependencies', async () => {
+    const mounted = mountDialog({ name: 'synthetic', disabled: true, missing_bins: ['synthetic-bin'] })
+    await nextTick()
+    const toggle = mounted.dialog.querySelector<HTMLButtonElement>('[role="switch"]')!
+    expect(toggle.getAttribute('aria-checked')).toBe('false')
+    toggle.click()
+    expect(mounted.setEnabled).toHaveBeenCalledExactlyOnceWith('synthetic', true)
+    expect(mounted.installDeps).not.toHaveBeenCalled()
+    expect(mounted.dialog.textContent).toContain('Use is disabled')
+  })
+
   it('routes native cancel through the parent close path and can reopen', async () => {
     const alpha = { name: 'alpha', description: 'Alpha skill' }
     const mounted = mountDialog(alpha)

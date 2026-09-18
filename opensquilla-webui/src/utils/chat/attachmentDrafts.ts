@@ -1,4 +1,5 @@
 import type { Attachment, WorkspaceFileReference } from '@/types/chat'
+import { createClientRequestId } from './messageIdentity'
 
 const DATABASE = 'opensquilla-attachment-drafts'
 const STORE = 'drafts'
@@ -17,11 +18,19 @@ interface StoredAttachment {
 }
 interface DraftRecord {
   key: string; version: 1; updatedAt: number; expiresAt: number; bytes: number
+  revision?: string
   attachments: StoredAttachment[]
 }
 export interface AttachmentDraftStore {
   load(scope: AttachmentDraftScope): Promise<Attachment[]>
-  save(scope: AttachmentDraftScope, attachments: readonly Attachment[]): Promise<void>
+  loadSnapshot?(scope: AttachmentDraftScope): Promise<{ attachments: Attachment[]; revision?: string }>
+  save(scope: AttachmentDraftScope, attachments: readonly Attachment[], revision?: string): Promise<void>
+  consume?(scope: AttachmentDraftScope, revision: string, indexes: readonly number[]): Promise<boolean>
+}
+export interface AttachmentDraftConsumption {
+  consume(): Promise<void>
+  isRestoredCurrent(): boolean
+  consumeCurrent(isCurrent: () => boolean, onConsumed: () => void, isOriginal?: () => boolean): Promise<void>
 }
 
 export function attachmentDraftKey(scope: AttachmentDraftScope): string {
@@ -114,6 +123,9 @@ export class IndexedDbAttachmentDraftStore implements AttachmentDraftStore {
     return this.databasePromise
   }
   async load(scope: AttachmentDraftScope): Promise<Attachment[]> {
+    return (await this.loadSnapshot(scope)).attachments
+  }
+  async loadSnapshot(scope: AttachmentDraftScope): Promise<{ attachments: Attachment[]; revision?: string }> {
     const key = attachmentDraftKey(scope)
     const db = await this.database()
     const transaction = db.transaction(STORE, 'readwrite')
@@ -127,11 +139,15 @@ export class IndexedDbAttachmentDraftStore implements AttachmentDraftStore {
         store.delete(key)
         record = undefined
       }
+      if (record && !record.revision) {
+        record = { ...record, revision: createClientRequestId() }
+        store.put(record)
+      }
     }
     await done
-    return record ? restore(record, this.now()) : []
+    return record ? { attachments: restore(record, this.now()), revision: record.revision } : { attachments: [] }
   }
-  async save(scope: AttachmentDraftScope, attachments: readonly Attachment[]): Promise<void> {
+  async save(scope: AttachmentDraftScope, attachments: readonly Attachment[], revision?: string): Promise<void> {
     const key = attachmentDraftKey(scope)
     if (attachments.length > 10) throw new Error('Too many attachments to save as a draft')
     const stored = attachments.map(storedAttachment)
@@ -168,12 +184,35 @@ export class IndexedDbAttachmentDraftStore implements AttachmentDraftStore {
         return
       }
       store.put({ key, version: 1, updatedAt: now, expiresAt: now + ATTACHMENT_DRAFT_TTL_MS,
+        ...(revision ? { revision } : {}),
         bytes, attachments: stored } satisfies DraftRecord)
     }
     try { await done } catch (error) {
       if (quotaError) throw new Error('Attachment draft storage is full; clear older drafts to enable recovery')
       throw error
     }
+  }
+  /** A late acceptance may consume its exact draft version, never a newer tab's files. */
+  async consume(scope: AttachmentDraftScope, revision: string, indexes: readonly number[]): Promise<boolean> {
+    const key = attachmentDraftKey(scope)
+    const db = await this.database()
+    const transaction = db.transaction(STORE, 'readwrite')
+    const done = complete(transaction)
+    const store = transaction.objectStore(STORE)
+    const request = store.get(key)
+    let consumed = false
+    request.onsuccess = () => {
+      const record = request.result as DraftRecord | undefined
+      if (!record || record.revision !== revision || !Array.isArray(record.attachments)) return
+      consumed = true
+      const accepted = new Set(indexes)
+      const attachments = record.attachments.filter((_item, index) => !accepted.has(index))
+      if (!attachments.length) store.delete(key)
+      else store.put({ ...record, revision: undefined, attachments,
+        bytes: attachments.reduce((sum, item) => sum + item.size, 0) })
+    }
+    await done
+    return consumed
   }
 }
 export function createAttachmentDraftStore(): AttachmentDraftStore | null {

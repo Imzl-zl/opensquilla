@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useAttachmentDraftPersistence } from './useAttachmentDraftPersistence'
 import type { AttachmentDraftScope, AttachmentDraftStore } from '@/utils/chat/attachmentDrafts'
 import i18n from '@/i18n'
@@ -118,6 +118,7 @@ async function fileLooksLikeUtf8Text(file: File): Promise<boolean> {
 interface ChatAttachmentOptions {
   draftScope?: () => AttachmentDraftScope | null
   draftScopePending?: () => boolean
+  draftOwnerState?: () => unknown
   draftStore?: AttachmentDraftStore | null
   native?: PlatformFilesApi
   nativeContext?: () => NativeAttachmentContext | null | Promise<NativeAttachmentContext | null>
@@ -531,6 +532,7 @@ export function useChatAttachments(artifactContent?: ArtifactContentAccess, opti
     draftPersistence = useAttachmentDraftPersistence({
       attachments: pendingAttachments,
       scope: options.draftScope,
+      ownerState: options.draftOwnerState,
       store: options.draftStore,
       beforeScopeChange: clearAttachmentState,
       onError: message => pushToast(message, { tone: 'danger' }),
@@ -541,6 +543,23 @@ export function useChatAttachments(artifactContent?: ArtifactContentAccess, opti
         pendingAttachments.value = restored.filter(attachment => !automatic.includes(attachment))
         nextAttachmentId.value = Math.max(nextAttachmentId.value, ...restored.map(a => a.local_id + 1))
         if (isAttachmentGenerationCurrent(generation)) await addAttachments(automatic.map(a => a.file!))
+        const automaticFiles = new Set(automatic.map(attachment => attachment.file))
+        const preparing = () => pendingAttachments.value.some(attachment => automaticFiles.has(attachment.file)
+          && (attachment.kind === 'inline_pending' || attachment.kind === 'uploading'))
+        if (preparing()) await new Promise<void>(resolve => {
+          const stop = watch(preparing, pending => { if (!pending) { stop(); resolve() } }, { flush: 'sync' })
+        })
+        if (!isAttachmentGenerationCurrent(generation)) return false
+        // Automatic file preparation may assign new local IDs and finish out
+        // of order. Retain the saved slots so its revision still identifies
+        // exactly the same draft, without comparing file bytes.
+        const position = (attachment: Attachment) => restored.findIndex(original => attachment.file
+          ? original.file === attachment.file : original.local_id === attachment.local_id)
+        const positions = pendingAttachments.value.map(position)
+        if (positions.length !== restored.length || positions.some(index => index < 0)
+          || new Set(positions).size !== restored.length) return false
+        pendingAttachments.value = [...pendingAttachments.value].sort((left, right) => position(left) - position(right))
+        return true
       },
     })
   }
@@ -557,6 +576,7 @@ export function useChatAttachments(artifactContent?: ArtifactContentAccess, opti
     retryAttachment,
     hasPendingAttachmentWork,
     prepareAttachmentsForSend,
+    captureDraftConsumption: (attachments: readonly Attachment[]) => draftPersistence?.captureConsumption(attachments),
     flushAttachmentDraft: () => draftPersistence?.flush() ?? Promise.resolve(),
   }
 }

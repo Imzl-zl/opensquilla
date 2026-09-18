@@ -309,6 +309,13 @@ class ToolContext:
 
     usage_root_turn_id: str | None = None
 
+    # Authenticated per-turn selection; never inferred from model tool arguments.
+    selected_skills: tuple[dict[str, str], ...] = field(default=(), repr=False)
+    verified_skill_ids: set[str] = field(default_factory=set, repr=False)
+    skill_load_emitter: Callable[[dict[str, Any]], Awaitable[None]] | None = field(
+        default=None, repr=False,
+    )
+
     # Durable, session-owned original -> editable file relationships. Append
     # after every published field, including fields declared below methods.
     workspace_files: list[dict[str, Any]] = field(default_factory=list)

@@ -51,6 +51,7 @@ class PendingInputProjection(TypedDict, total=False):
     displayText: str
     confirmedPlainText: bool
     pageContext: dict[str, Any]
+    selectedSkills: list[dict[str, str]]
 
 
 class PendingInputEnqueueResult(PendingInputProjection, total=False):

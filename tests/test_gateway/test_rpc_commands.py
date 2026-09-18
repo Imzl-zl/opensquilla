@@ -72,6 +72,14 @@ def test_web_catalog_includes_usage_rpc_execution() -> None:
     }
 
 
+def test_web_new_creates_a_task_instead_of_resetting_the_current_session() -> None:
+    payload = asyncio.run(_list_for_surface("web_chat"))
+    command = next(cmd for cmd in payload["commands"] if cmd["name"] == "/new")
+    assert command["execution"] == {"kind": "local", "action": "new_chat"}
+    reset = next(cmd for cmd in payload["commands"] if cmd["name"] == "/reset")
+    assert reset["execution"]["action"] == "sessions.reset"
+
+
 def test_cli_gateway_catalog_serializes_argument_choices() -> None:
     payload = asyncio.run(_list_for_surface("cli_gateway"))
     permissions = next(cmd for cmd in payload["commands"] if cmd["name"] == "/permissions")

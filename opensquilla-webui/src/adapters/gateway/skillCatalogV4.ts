@@ -1,6 +1,16 @@
 import type { TransportCallOptions as RpcCallOptions } from './transportTypes'
 import { readTransportFailure } from './transportTypes'
 import {
+  SKILLS_CANDIDATES_METHOD,
+  type Result as SkillsCandidatesResult,
+} from '@/contracts/generated/v4/skillsCandidates'
+import { validateResult as validateSkillsCandidatesResult } from '@/contracts/generated/v4/skillsCandidatesValidators.mjs'
+import {
+  SKILLS_SET_ENABLED_METHOD,
+  type Result as SkillsSetEnabledResult,
+} from '@/contracts/generated/v4/skillsSetEnabled'
+import { validateResult as validateSkillsSetEnabledResult } from '@/contracts/generated/v4/skillsSetEnabledValidators.mjs'
+import {
   META_LIST_METHOD,
   type Result as MetaListResult,
 } from '@/contracts/generated/v4/metaList'
@@ -231,6 +241,14 @@ function combineCatalog(skills: Skill[], metas: MetaListResult): Skill[] {
 }
 
 export function createV4SkillCatalog(rpc: RpcTransport): SkillCatalog {
+  const invalidationListeners = new Set<() => void>()
+  function invalidate() {
+    for (const listener of invalidationListeners) {
+      // A view callback must not turn a committed mutation into a failed RPC.
+      try { listener() } catch { /* The next palette open also refreshes. */ }
+    }
+  }
+
   async function compatibleMetaRead<T>(method: string, read: () => Promise<T>): Promise<T | null> {
     if (!rpc.supports(method)) return null
     try {
@@ -243,6 +261,43 @@ export function createV4SkillCatalog(rpc: RpcTransport): SkillCatalog {
   }
 
   return {
+    subscribeInvalidation(listener) {
+      invalidationListeners.add(listener)
+      return () => { invalidationListeners.delete(listener) }
+    },
+    supportsCandidates() {
+      return rpc.supports(SKILLS_CANDIDATES_METHOD)
+    },
+    async listCandidates(options) {
+      await rpc.ready({ signal: options?.signal })
+      if (!rpc.supports(SKILLS_CANDIDATES_METHOD)) {
+        throw new Error('Explicit skill selection requires an updated Gateway.')
+      }
+      const result = await rpc.request<SkillsCandidatesResult>(
+        SKILLS_CANDIDATES_METHOD,
+        options?.sessionKey ? { sessionKey: options.sessionKey } : {},
+        callOptions(options?.signal),
+      )
+      if (!validateSkillsCandidatesResult(result)) throw invalid(SKILLS_CANDIDATES_METHOD)
+      return result
+    },
+    supportsSetEnabled() {
+      return rpc.supports(SKILLS_SET_ENABLED_METHOD)
+    },
+    async setEnabled(request) {
+      await rpc.ready({ signal: request.signal })
+      if (!rpc.supports(SKILLS_SET_ENABLED_METHOD)) {
+        throw new Error('Changing skill availability requires an updated Gateway.')
+      }
+      const result = await rpc.request<SkillsSetEnabledResult>(
+        SKILLS_SET_ENABLED_METHOD,
+        { name: request.name, enabled: request.enabled },
+        callOptions(request.signal),
+      )
+      if (!validateSkillsSetEnabledResult(result)) throw invalid(SKILLS_SET_ENABLED_METHOD)
+      if (result.persisted) invalidate()
+      return result
+    },
     async list(options) {
       await rpc.ready({ signal: options?.signal })
       const params: SkillsListParams = { includeLifecycle: true }
@@ -333,6 +388,7 @@ export function createV4SkillCatalog(rpc: RpcTransport): SkillCatalog {
         callOptions(options?.signal),
       )
       if (!validateSkillsReloadResult(result)) throw invalid(SKILLS_RELOAD_METHOD)
+      invalidate()
       return result as unknown as SkillReloadResult
     },
     async install(request) {
@@ -350,6 +406,7 @@ export function createV4SkillCatalog(rpc: RpcTransport): SkillCatalog {
         callOptions(request.signal),
       )
       if (!validateSkillsInstallResult(result)) throw invalid(SKILLS_INSTALL_METHOD)
+      if (result.success || result.installed) invalidate()
       return result as unknown as SkillInstallResult
     },
     supportsInstallStatus() {
@@ -360,6 +417,7 @@ export function createV4SkillCatalog(rpc: RpcTransport): SkillCatalog {
         SKILLS_INSTALL_STATUS_METHOD, { operationId }, callOptions(options?.signal),
       )
       if (!validateSkillsInstallStatusResult(result)) throw invalid(SKILLS_INSTALL_STATUS_METHOD)
+      if (result.state === 'succeeded') invalidate()
       return result as unknown as SkillInstallStatus
     },
     supportsInstallCancellation() {
@@ -390,6 +448,7 @@ export function createV4SkillCatalog(rpc: RpcTransport): SkillCatalog {
         callOptions(request.signal),
       )
       if (!validateSkillsDepsInstallResult(result)) throw invalid(SKILLS_DEPS_INSTALL_METHOD)
+      invalidate()
       return result as unknown as SkillInstallResult
     },
     async uninstall(request) {
@@ -404,6 +463,7 @@ export function createV4SkillCatalog(rpc: RpcTransport): SkillCatalog {
         callOptions(request.signal),
       )
       if (!validateSkillsUninstallResult(result)) throw invalid(SKILLS_UNINSTALL_METHOD)
+      if (result.success) invalidate()
       return result as unknown as SkillInstallResult
     },
     async proposals(options) {

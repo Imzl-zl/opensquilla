@@ -81,6 +81,9 @@ async def test_page_context_is_user_content_on_the_normal_owner_route(tmp_path, 
     command = AdmitTurn(
         deps["key"], "update the heading", "session",
         page_context={"targetRef": "page-synthetic"},
+        selected_skills=(
+            {"name": "synthetic-page", "instanceId": "instance-one", "digest": "digest-one"},
+        ),
     )
     prepared = await preparation.prepare_route(command, **deps)
     deps["page_context_resolver"].assert_awaited_once_with(
@@ -91,6 +94,8 @@ async def test_page_context_is_user_content_on_the_normal_owner_route(tmp_path, 
     assert "artifact_context" not in prepared.envelope.runtime_services
     assert "turn_authority_cleanup" not in prepared.envelope.runtime_services
     assert prepared.host_execute_allowed is True
+    assert prepared.envelope.metadata["selected_skills"] == list(command.selected_skills)
+    assert prepared.envelope.tool_context(is_owner=True).selected_skills == command.selected_skills
 
 
 @pytest.mark.asyncio

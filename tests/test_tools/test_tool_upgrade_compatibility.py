@@ -166,12 +166,18 @@ def test_tool_context_appends_new_runtime_fields_after_legacy_fields() -> None:
         "suspend_compute_slot",
         "update_progress",
         "usage_root_turn_id",
+        "selected_skills",
+        "verified_skill_ids",
+        "skill_load_emitter",
         "workspace_files",
         "attachment_working_files",
         "persist_attachment_working_files",
     ]
 
     assert ToolContext().skill_install_turn is None
+    assert ToolContext().selected_skills == ()
+    assert ToolContext().verified_skill_ids == set()
+    assert ToolContext().skill_load_emitter is None
     assert ToolContext().suspend_compute_slot is None
     assert ToolContext().update_progress is None
     assert ToolContext().usage_root_turn_id is None
@@ -263,9 +269,10 @@ def test_tool_context_preserves_install_receipt_positional_constructor() -> None
 
 def test_attachment_fields_follow_published_shared_runtime_positions() -> None:
     defaults = ToolContext()
-    published_fields = fields(ToolContext)[:115]
-    assert [item.name for item in published_fields[-3:]] == [
+    published_fields = fields(ToolContext)[:118]
+    assert [item.name for item in published_fields[-6:]] == [
         "suspend_compute_slot", "update_progress", "usage_root_turn_id",
+        "selected_skills", "verified_skill_ids", "skill_load_emitter",
     ]
 
     def suspend():
@@ -274,13 +281,23 @@ def test_attachment_fields_follow_published_shared_runtime_positions() -> None:
     async def progress(**kwargs):
         return kwargs
 
+    async def emit_skill_load(receipt):
+        return None
+
+    selection = ({"name": "synthetic", "instanceId": "personal:synthetic", "digest": "a" * 64},)
+    verified_ids = {"personal:synthetic"}
     published_values = [getattr(defaults, item.name) for item in published_fields]
-    published_values[-3:] = [suspend, progress, "synthetic-root-turn"]
+    published_values[-6:] = [
+        suspend, progress, "synthetic-root-turn", selection, verified_ids, emit_skill_load,
+    ]
     context = ToolContext(*published_values)
 
     assert context.suspend_compute_slot is suspend
     assert context.update_progress is progress
     assert context.usage_root_turn_id == "synthetic-root-turn"
+    assert context.selected_skills is selection
+    assert context.verified_skill_ids is verified_ids
+    assert context.skill_load_emitter is emit_skill_load
     assert context.workspace_files == []
     assert context.attachment_working_files == {}
     assert context.persist_attachment_working_files is None

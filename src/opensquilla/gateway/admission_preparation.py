@@ -256,6 +256,8 @@ async def prepare_route(
         principal_is_owner=principal.is_owner,
     )
     route_envelope.metadata["sandbox_mode_resolution"] = mode_resolution.to_payload()
+    if command.selected_skills:
+        route_envelope.metadata["selected_skills"] = list(command.selected_skills)
     if guest_profile is not None:
         route_envelope.metadata["guest_safe"] = True
         route_envelope.metadata["guest_profile_root"] = str(guest_profile.root)

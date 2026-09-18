@@ -4,7 +4,7 @@
     class="chat-composer"
     :class="{
       'chat-composer--new-landing': isNewLanding,
-      'chat-composer--collapsed': collapsed && promptAnnotations.length === 0,
+      'chat-composer--collapsed': collapsed && promptAnnotations.length === 0 && selectedSkills.length === 0,
       'chat-composer--floating': floating,
       'chat-composer--docked': !floating,
     }"
@@ -124,6 +124,16 @@
             </template>
           </div>
         </div>
+      </div>
+      <div v-if="selectedSkills.length" class="chat-selected-skills" data-testid="selected-skills">
+        <span class="chat-selected-skills__label">{{ t('chat.skillPalette.thisMessage') }}</span>
+        <span v-for="skill in selectedSkills" :key="skill.instanceId" class="attachment-chip">
+          <span class="attachment-chip__name">{{ skill.name }}</span>
+          <button type="button" class="attachment-action attachment-remove" :aria-label="t('chat.skillPalette.remove', { name: skill.name })" @click="emit('removeSkill', skill.instanceId)">
+            <Icon name="x" :size="12" />
+          </button>
+        </span>
+        <span v-if="isStreaming" class="chat-selected-skills__label">{{ t('chat.skillPalette.queuedHint') }}</span>
       </div>
       <div class="chat-input-panel">
         <div v-if="replanActive" class="chat-collapse-region">
@@ -398,9 +408,19 @@
             @set-mode="emit('setCollaborationMode', $event)"
           />
           <div class="chat-input-actions chat-input-actions--right">
+            <button
+              v-if="showSkillQueueSend"
+              type="button"
+              class="btn btn--icon btn--danger chat-send-btn"
+              :title="t('chat.stopResponseEsc')"
+              :aria-label="t('chat.stopResponse')"
+              @click="emit('stop')"
+            >
+              <Icon name="stop" :size="16" />
+            </button>
             <Transition name="composer-ctl" mode="out-in">
               <button
-                v-if="canStop"
+                v-if="canStop && !showSkillQueueSend"
                 key="stop"
                 class="btn btn--icon btn--danger chat-send-btn"
                 :title="stopTargetsPlanRun
@@ -419,7 +439,8 @@
                 class="btn btn--icon btn--primary chat-send-btn"
                 :class="{ 'is-ready': hasSendContent && !sendBlockedMessage && !inputDisabled }"
                 :title="sendBlockedMessage
-                  || (sessionRoutingBusy ? t('chat.composer.routingUpdateBlocked') : sendButtonTitle)"
+                  || (sessionRoutingBusy ? t('chat.composer.routingUpdateBlocked')
+                    : showSkillQueueSend ? t('chat.sendQueues') : sendButtonTitle)"
                 :aria-label="replanActive ? t('chat.plan.reviseSend') : t('chat.send')"
                 :aria-describedby="sendBlockedMessage ? 'chat-composer-send-status' : undefined"
                 :aria-busy="sendPending || sessionRoutingBusy ? 'true' : 'false'"
@@ -462,6 +483,7 @@
 </template>
 
 <script setup lang="ts">
+import type { SelectedSkillRef } from '@/types/selectedSkills'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
@@ -495,6 +517,7 @@ interface ChatComposerExpose {
 }
 
 const props = withDefaults(defineProps<{
+  selectedSkills?: readonly SelectedSkillRef[]
   attachments: Attachment[]
   chooseAttachments?: () => Promise<boolean>
   busySendMode: 'queue' | 'steer'
@@ -559,6 +582,7 @@ const props = withDefaults(defineProps<{
   safeSetupAvailable: false,
   floating: false,
   promptAnnotations: () => [],
+  selectedSkills: () => [],
 })
 
 const emit = defineEmits<{
@@ -567,6 +591,7 @@ const emit = defineEmits<{
   fileChange: [event: Event]
   input: [event: Event]
   keydown: [event: KeyboardEvent]
+  removeSkill: [instanceId: string]
   removeAttachment: [index: number]
   retryAttachment: [index: number]
   previewImage: [attachment: Attachment]
@@ -595,6 +620,13 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+
+const showSkillQueueSend = computed(() => props.canStop
+  && props.isStreaming
+  && !props.stopTargetsPlanRun
+  && !props.replanActive
+  && props.selectedSkills.length > 0
+  && props.hasSendContent)
 
 const inputText = defineModel<string>({ required: true })
 const composerEl = ref<HTMLElement | null>(null)
@@ -870,7 +902,7 @@ function composerElement(): HTMLElement | null {
 
 function canCollapse(): boolean {
   const activeElement = document.activeElement
-  return !anyPopoverOpen.value
+  return props.selectedSkills.length === 0 && !anyPopoverOpen.value
     && (
       !activeElement
       || activeElement === textareaEl.value
@@ -1261,6 +1293,19 @@ defineExpose<ChatComposerExpose>({
     display: none;
   }
 
+}
+
+.chat-selected-skills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.chat-selected-skills__label {
+  color: var(--text-muted);
+  font-size: 0.75rem;
 }
 
 .attachment-chip {

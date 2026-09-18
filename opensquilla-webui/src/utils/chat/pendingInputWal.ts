@@ -1,3 +1,5 @@
+import { copySelectedSkills, isSelectedSkills } from '@/types/selectedSkills'
+import type { SelectedSkillRef } from '@/types/selectedSkills'
 import { normalizePageContext, type ChatPageContext } from '@/types/pageContext'
 import type { Attachment } from '@/types/chat'
 import { snapshotAttachment } from './attachments'
@@ -27,6 +29,7 @@ export interface PendingInputWalRecord {
   /** Read-only upgrade input; never sent to Gateway. */
   promptAnnotationIds?: string[]
   retiredAnnotationInput?: boolean
+  selectedSkills?: SelectedSkillRef[]
   pageContext?: ChatPageContext
   attachments: Attachment[]
   intent: string | null
@@ -156,6 +159,7 @@ function isPendingInputWalRecord(value: unknown): value is PendingInputWalRecord
       && record.deliveryIdentity.length > 0
     ))
     && validAnnotationDraftIds(record.draftIds)
+    && (record.selectedSkills === undefined || isSelectedSkills(record.selectedSkills))
     && (record.pageContext === undefined || normalizePageContext(record.pageContext) !== null)
     && Array.isArray(record.attachments)
     && record.attachments.every(attachment => (
@@ -207,6 +211,7 @@ function isResponseHandoffWalRecord(value: unknown): value is ResponseHandoffWal
     && params?.clientRequestId === record.clientRequestId
     && params?.clientMessageId === record.clientMessageId
     && params?.sessionKey === record.requestSessionKey
+    && (params?.selectedSkills === undefined || isSelectedSkills(params.selectedSkills))
     && typeof record.composerText === 'string'
     && Array.isArray(record.recoveryAttachments)
     && record.recoveryAttachments.every(attachment => (
@@ -253,6 +258,7 @@ function cloneRecord(record: PendingInputWalRecord): PendingInputWalRecord {
     ...current,
     ...(promptAnnotationIds?.length ? { retiredAnnotationInput: true } : {}),
     ...(record.pageContext ? { pageContext: normalizePageContext(record.pageContext)! } : {}),
+    ...(record.selectedSkills ? { selectedSkills: copySelectedSkills(record.selectedSkills) } : {}),
     ...(record.draftIds
       ? { draftIds: [...record.draftIds] }
       : {}),
