@@ -33,6 +33,7 @@ from scripts.live_harness_security import (  # noqa: E402
     minimal_child_environment,
     registry_endpoint,
     require_temporary_report_path,
+    restrict_private_file_permissions,
     write_safe_report,
 )
 from scripts.live_tokenrhythm_budget import (  # noqa: E402
@@ -110,7 +111,7 @@ def prepare_fixtures(root: Path, manifest_path: Path) -> dict[str, Any]:
         pages: int | None = None, textless_pages: int | None = None,
     ) -> None:
         path = root / name
-        path.chmod(0o600)
+        restrict_private_file_permissions(path)
         cases.append({"id": path.name, "name": name, "mime": mime,
                       "sha256": digest(path.read_bytes()), "size": path.stat().st_size,
                       "answers": answers, "requires_vision": vision,
@@ -194,7 +195,7 @@ def prepare_fixtures(root: Path, manifest_path: Path) -> dict[str, Any]:
                  "Disposable background about colored paper, with no additional task. " * 3
                  for line in range(240)]
         path.write_text("\n".join(lines) + "\n")
-        path.chmod(0o600)
+        restrict_private_file_permissions(path)
         pressure.append({"name": path.name, "sha256": digest(path.read_bytes()),
                          "prompt": f"Read {path.name} with read_file, then reply BACKGROUND_READ. "
                          "Keep the earlier record's exact code and edit status for continuation."})
@@ -395,10 +396,18 @@ def write_private_desktop_handoff(path: Path, handoff: dict[str, Any]) -> None:
     path = require_temporary_report_path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-        json.dump(handoff, stream)
-        stream.flush()
-        os.fsync(stream.fileno())
+    try:
+        restrict_private_file_permissions(path, descriptor=descriptor)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
+            json.dump(handoff, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        path.unlink(missing_ok=True)
+        raise
 
 
 async def serve_gateway(args: Any, ready: dict[str, Any], log: FunctionalRequestLog) -> None:

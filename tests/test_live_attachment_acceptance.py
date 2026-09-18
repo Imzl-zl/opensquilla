@@ -5,12 +5,23 @@ import os
 import sqlite3
 import stat
 from contextlib import closing
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
 from scripts import live_attachment_acceptance as harness
+from scripts import live_harness_security as security
 from scripts.live_tokenrhythm_budget import ATTACHMENT_PHASE_CALL_LIMITS, FunctionalRequestLog
+
+
+def assert_private_file(path):
+    if os.name == "nt":
+        from opensquilla.private_paths import windows_path_has_private_dacl
+
+        assert windows_path_has_private_dacl(path, directory=False, require_protected=True)
+    else:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 @pytest.fixture
@@ -47,8 +58,10 @@ def test_prepare_and_preflight_verify_content_and_scan_pages_without_network(pre
     for item in value["fixtures"]:
         assert all(answer not in item["prompt"] for answer in item["answers"])
         assert all(answer not in item["name"] for answer in item["answers"])
-        assert (fixtures / item["name"]).stat().st_mode & 0o777 == 0o600
-    assert manifest.stat().st_mode & 0o777 == 0o600
+        assert_private_file(fixtures / item["name"])
+    for item in value["pressure_files"]:
+        assert_private_file(fixtures / item["name"])
+    assert_private_file(manifest)
     (fixtures / "record.txt").write_text("changed synthetic source")
     assert harness.preflight(fixtures, manifest)["ok"] is False
 
@@ -248,7 +261,7 @@ def test_serve_installs_relay_inside_clean_environment_and_restores_it(
     assert installed == [True, False]
     assert os.environ["TOKENRHYTHM_API_KEY"] == "synthetic-ambient-secret"
     assert os.environ["UNRELATED_SECRET"] == "synthetic-unrelated-secret"
-    assert stat.S_IMODE(report.stat().st_mode) == 0o600
+    assert_private_file(report)
     public = capsys.readouterr().out + report.read_text()
     assert "synthetic-provider-detail" not in public and "synthetic-ambient-secret" not in public
 
@@ -277,7 +290,7 @@ def test_desktop_owner_uses_production_binding_without_network(tmp_path):
         assert "OPENSQUILLA_DESKTOP_GATEWAY_INSTANCE_NONCE" not in os.environ
         harness.write_private_desktop_handoff(private, handoff)
     assert json.loads(private.read_text()) == handoff
-    assert stat.S_IMODE(private.stat().st_mode) == 0o600
+    assert_private_file(private)
     assert handoff["httpUrl"] == "http://127.0.0.1:19223"
     assert not private.is_relative_to(root)
 
@@ -293,3 +306,72 @@ def test_desktop_owner_refuses_model_visible_handoff_and_existing_file(tmp_path)
     with pytest.raises(FileExistsError):
         harness.write_private_desktop_handoff(private, {"schemaVersion": 1})
     assert private.read_text() == "existing private file"
+
+
+@pytest.mark.parametrize("kind", ["handoff", "report"])
+@pytest.mark.parametrize("acl_fails", [False, True])
+def test_windows_output_requires_bound_private_acl_before_writing(
+    tmp_path, monkeypatch, kind, acl_fails,
+):
+    output = tmp_path / "output.json"
+    if kind == "report":
+        output.write_text("existing report")
+    verified = []
+
+    def apply_acl(path, *, directory, expected_device, expected_inode):
+        metadata = path.lstat()
+        assert directory is False
+        assert (expected_device, expected_inode) == (metadata.st_dev, metadata.st_ino)
+        assert path.read_bytes() == b""
+        verified.append(path)
+        if acl_fails:
+            raise PermissionError("synthetic ACL failure")
+
+    monkeypatch.setattr(security, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(security, "apply_windows_private_dacl", apply_acl, raising=False)
+
+    def write():
+        if kind == "handoff":
+            harness.write_private_desktop_handoff(output, {"nonce": "synthetic-nonce"})
+        else:
+            harness.write_safe_report(output, {"status": "synthetic report"}, ())
+
+    if acl_fails:
+        with pytest.raises(PermissionError, match="synthetic ACL failure"):
+            write()
+        if kind == "handoff":
+            assert not output.exists()
+        else:
+            assert output.read_text() == "existing report"
+        assert all(not path.exists() for path in verified)
+    else:
+        write()
+        assert json.loads(output.read_text()) == (
+            {"nonce": "synthetic-nonce"} if kind == "handoff"
+            else {"status": "synthetic report"}
+        )
+    assert len(verified) == 1
+    assert not list(tmp_path.glob(".output.json.tmp-*"))
+
+
+def test_windows_permissions_reject_path_that_no_longer_matches_open_file(tmp_path, monkeypatch):
+    opened, replacement = tmp_path / "opened", tmp_path / "replacement"
+    opened.write_bytes(b"")
+    replacement.write_text("synthetic unrelated file")
+    verified = []
+
+    def apply_acl(path, *, directory, expected_device, expected_inode):
+        assert directory is False
+        assert (expected_device, expected_inode) == (opened.stat().st_dev, opened.stat().st_ino)
+        assert (expected_device, expected_inode) != (path.stat().st_dev, path.stat().st_ino)
+        verified.append(path)
+        raise OSError("synthetic bound identity mismatch")
+
+    monkeypatch.setattr(security, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(security, "apply_windows_private_dacl", apply_acl)
+    with opened.open("wb") as stream:
+        with pytest.raises(OSError, match="bound identity mismatch"):
+            security.restrict_private_file_permissions(replacement, descriptor=stream.fileno())
+    assert verified == [replacement]
+    assert opened.read_bytes() == b""
+    assert replacement.read_text() == "synthetic unrelated file"
