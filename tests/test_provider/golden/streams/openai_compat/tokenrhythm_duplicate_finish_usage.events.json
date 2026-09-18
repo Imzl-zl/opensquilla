@@ -44,6 +44,7 @@
     },
     "reasoning_content": "Reasoning about the reply.",
     "reasoning_tokens": 6,
+    "refusal": false,
     "stop_reason": "stop",
     "thinking_signature": null,
     "type": "DoneEvent",

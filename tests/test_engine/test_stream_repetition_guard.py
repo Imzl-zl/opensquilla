@@ -460,8 +460,17 @@ async def test_guard_close_is_bounded_when_upstream_ignores_close() -> None:
         async for _ in guard_provider_text_stream(upstream, policy=policy):
             pass
 
-    with pytest.raises(ModelRepetitionLoopError):
-        await asyncio.wait_for(consume(), timeout=0.25)
+    consumer = asyncio.create_task(consume())
+    try:
+        # Detection is setup for this close-budget assertion. Start the original
+        # 250ms bound only after the real iterator enters its blocked aclose.
+        await asyncio.wait_for(upstream.close_started.wait(), timeout=1.0)
+        with pytest.raises(ModelRepetitionLoopError):
+            await asyncio.wait_for(consumer, timeout=0.25)
+    finally:
+        if not consumer.done():
+            consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
 
     assert upstream.close_started.is_set()
     assert upstream.close_calls == 1
@@ -577,15 +586,20 @@ async def test_outer_wrapper_task_deadline_propagates_once_to_provider() -> None
     upstream = _LifecycleIterator(emit_first=False)
     guarded = guard_provider_text_stream(upstream)
     agent = _deadline_agent(iteration_timeout=0.01)
+    # Keep the initial budget positive even if a loaded runner deschedules this
+    # test before the first pull. asyncio.wait still exercises the real timeout
+    # and cancellation; expiring before the lazy guard starts tests another path.
+    deadline_clock: Any = SimpleNamespace(time=lambda: 0.0)
 
     with pytest.raises(TimeoutError, match="total timeout"):
         async for _ in agent._stream_provider_events_with_deadline(
             guarded,
-            loop=asyncio.get_running_loop(),
-            total_deadline=asyncio.get_running_loop().time() + 0.01,
+            loop=deadline_clock,
+            total_deadline=0.01,
         ):
             pass
 
+    assert upstream.blocked.is_set()
     assert upstream.close_calls == 1
 
 

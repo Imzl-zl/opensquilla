@@ -237,6 +237,22 @@ const server = createServer((request, response) => {
           const video = document.getElementById('video-probe')
           let running = true
           let frame = 0
+          let presentedFrames = 0
+          let videoFrameHandle
+          let progressDeadline
+          let progressReady
+          let progressFailed
+          const progress = new Promise((resolve, reject) => {
+            progressReady = resolve
+            progressFailed = reject
+          })
+          const observeVideoFrame = () => {
+            videoFrameHandle = video.requestVideoFrameCallback(() => {
+              presentedFrames += 1
+              if (frame > 1 && presentedFrames > 1) progressReady()
+              else observeVideoFrame()
+            })
+          }
           const draw = () => {
             if (!running) return
             frame += 1
@@ -248,15 +264,37 @@ const server = createServer((request, response) => {
           const stream = source.captureStream(15)
           video.srcObject = stream
           try {
-            await video.play()
-            await withTimeout(new Promise(resolve => {
-              if (video.videoWidth > 0 && video.videoHeight > 0) {
-                resolve()
-                return
+            if (typeof video.requestVideoFrameCallback !== 'function') {
+              return { status: 'failed', reason: 'Video frame observation is unavailable' }
+            }
+            observeVideoFrame()
+            try {
+              await video.play()
+              await withTimeout(new Promise(resolve => {
+                if (video.videoWidth > 0 && video.videoHeight > 0) {
+                  resolve()
+                  return
+                }
+                video.addEventListener('loadedmetadata', resolve, { once: true })
+              }), 'captureStream video metadata')
+            } catch (error) {
+              return {
+                status: 'skipped',
+                reason: 'captureStream playback unavailable: '
+                  + String(error && error.name || error),
               }
-              video.addEventListener('loadedmetadata', resolve, { once: true })
-            }), 'captureStream video metadata')
-            await wait(120)
+            }
+            // Metadata alone does not prove playback. Observe both changing
+            // source frames and actual presented video frames within the same
+            // bounded capability-probe budget used above.
+            progressDeadline = setTimeout(() => progressFailed(new Error(
+              'Video frame progress timed out: ' + JSON.stringify({
+                drawnFrames: frame, presentedFrames, readyState: video.readyState,
+                visibility: document.visibilityState, paused: video.paused,
+                videoWidth: video.videoWidth, videoHeight: video.videoHeight,
+              }),
+            )), 5000)
+            await progress
             return {
               status: 'passed',
               tagName: video.tagName,
@@ -265,15 +303,17 @@ const server = createServer((request, response) => {
               videoWidth: video.videoWidth,
               videoHeight: video.videoHeight,
               drawnFrames: frame,
+              presentedFrames,
             }
           } catch (error) {
             return {
-              status: 'skipped',
-              reason: 'captureStream playback unavailable: '
-                + String(error && error.name || error),
+              status: 'failed',
+              reason: String(error && error.message || error),
             }
           } finally {
             running = false
+            clearTimeout(progressDeadline)
+            if (videoFrameHandle !== undefined) video.cancelVideoFrameCallback(videoFrameHandle)
             for (const track of stream.getTracks()) track.stop()
             video.srcObject = null
           }
@@ -1189,6 +1229,21 @@ try {
       if (!annotationOverlay) throw new Error('Trusted annotation overlay was not created.')
       await annotationOverlay.ready
       await waitFor(() => annotationOverlay.view.getVisible(), 'trusted annotation overlay')
+      // Native visibility changes before Chromium necessarily receives setBounds.
+      // Check the renderer viewport before sampling CSS; do not wait for the
+      // expected textarea height, which would hide an actual layout regression.
+      let annotationOverlayLayout = null
+      await waitFor(async () => {
+        const bounds = annotationOverlay.view.getBounds()
+        const zoom = annotationOverlay.view.webContents.getZoomFactor()
+        const viewport = await annotationOverlay.view.webContents.executeJavaScript(
+          '({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio })',
+        )
+        annotationOverlayLayout = { bounds, zoom, viewport }
+        // innerWidth/innerHeight are integers; fractional DPI can round by a pixel.
+        return Math.abs(viewport.width - bounds.width / zoom) < 1
+          && Math.abs(viewport.height - bounds.height / zoom) < 1
+      }, 'trusted annotation renderer viewport', 10_000, () => annotationOverlayLayout)
       const overlayPreferences = annotationOverlay.view.webContents.getLastWebPreferences()
       const annotationOverlaySecurity = {
         contextIsolation: overlayPreferences.contextIsolation,
@@ -2635,6 +2690,7 @@ try {
         annotationOverlayResult,
         annotationOverlaySecurity,
         annotationOverlayVisualStructure,
+        annotationOverlayLayout,
         annotationOverlayDevToolsBlocked,
         annotationOverlayBounds,
         annotationOverlayMovedBounds,
@@ -2846,7 +2902,8 @@ try {
     assert.equal(videoProbe.hasMediaStream, true)
     assert.ok(videoProbe.readyState >= 1)
     assert.ok(videoProbe.videoWidth > 0 && videoProbe.videoHeight > 0)
-    assert.ok(videoProbe.drawnFrames > 1)
+    assert.ok(videoProbe.drawnFrames > 1, JSON.stringify(videoProbe))
+    assert.ok(videoProbe.presentedFrames > 1, JSON.stringify(videoProbe))
   }
 
   const webglProbe = result.fullProbes.webglProbe
@@ -2975,7 +3032,8 @@ try {
   assert.ok(
     Number.parseFloat(annotationTextareaHeight) >= 73
       && Number.parseFloat(annotationTextareaHeight) < 74,
-    'annotation textarea height must remain within one fractional Windows DPI pixel',
+    `annotation textarea height must remain within one fractional Windows DPI pixel; `
+      + `actual=${annotationTextareaHeight}; layout=${JSON.stringify(result.annotationOverlayLayout)}`,
   )
   assert.equal(result.annotationOverlayDevToolsBlocked, true)
   assert.ok(result.annotationOverlayBounds.width <= 304)

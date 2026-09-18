@@ -1985,10 +1985,98 @@
           "label": "Ventana de agrupación (s)"
         },
         "transport_name": {
+          "label": "Modo de conexión",
           "choices": {
             "polling": "Sondeo (polling)",
             "webhook": "Webhook"
           }
+        },
+        "access_token": {
+          "label": "Token de acceso"
+        },
+        "agent_id_int": {
+          "label": "ID de agente (entero)"
+        },
+        "app_password": {
+          "label": "Contraseña de aplicación"
+        },
+        "app_token": {
+          "label": "Token a nivel de aplicación (xapp-...)"
+        },
+        "application_id": {
+          "label": "ID de aplicación"
+        },
+        "cool_app_code": {
+          "label": "Cool App Code"
+        },
+        "corp_id": {
+          "label": "ID de organización"
+        },
+        "default_channel_id": {
+          "label": "ID de canal predeterminado"
+        },
+        "device_id": {
+          "label": "ID de dispositivo"
+        },
+        "domain": {
+          "label": "Dominio"
+        },
+        "drop_pending_updates": {
+          "label": "Descartar actualizaciones pendientes"
+        },
+        "encoding_aes_key": {
+          "label": "Clave AES de codificación"
+        },
+        "encrypt_key": {
+          "label": "Clave de cifrado"
+        },
+        "encryption": {
+          "label": "Cifrado"
+        },
+        "gateway_url": {
+          "label": "URL de la pasarela"
+        },
+        "intents": {
+          "label": "Máscara de bits de intents"
+        },
+        "password": {
+          "label": "Contraseña"
+        },
+        "poll_idle_sleep_s": {
+          "label": "Espera inactiva de sondeo (s)"
+        },
+        "poll_limit": {
+          "label": "Límite de sondeo"
+        },
+        "poll_timeout_s": {
+          "label": "Tiempo de espera de sondeo (s)"
+        },
+        "reply_in_thread": {
+          "label": "Responder en hilo"
+        },
+        "robot_code": {
+          "label": "Código de robot"
+        },
+        "slack_channel_id": {
+          "label": "ID de canal predeterminado"
+        },
+        "token": {
+          "label": "Token de bot (xoxb-...)"
+        },
+        "verification_token": {
+          "label": "Token de verificación"
+        },
+        "webhook_path": {
+          "label": "Ruta del webhook"
+        },
+        "webhook_secret_token": {
+          "label": "Token secreto del webhook"
+        },
+        "webhook_url": {
+          "label": "URL de webhook (solo webhook)"
+        },
+        "websocket_url": {
+          "label": "URL de WebSocket"
         }
       },
       "groups": {
@@ -2424,6 +2512,13 @@
       "enable": "Activar",
       "disable": "Desactivar",
       "notReported": "No informado",
+      "transport": {
+        "polling": "Sondeo (polling)",
+        "webhook": "Webhook",
+        "websocket": "WebSocket",
+        "http_sync": "Sincronización HTTP",
+        "mixed": "Múltiples modos de conexión"
+      },
       "tabs": {
         "overview": "Resumen",
         "pairings": "Miembros",
@@ -3892,6 +3987,8 @@
       }
     },
     "plan": {
+      "hidePlan": "Ocultar plan",
+      "showPlan": "Mostrar plan",
       "label": "Plan",
       "process": "Proceso de planificación",
       "revision": "Revisión {id}",
@@ -3944,7 +4041,7 @@
     },
     "planMode": {
       "label": "Modo de plan",
-      "readOnly": "El agente investiga y propone un plan sin modificar archivos.",
+      "readOnly": "Investigar y discutir el plan antes de implementarlo. Las pruebas y compilaciones siguen los permisos habituales.",
       "nextTurn": "Se aplica al siguiente turno",
       "updating": "Actualizando…",
       "turnOff": "Desactivar modo de plan",
@@ -3990,6 +4087,26 @@
       }
     },
     "goal": {
+      "settings": "Configuración del objetivo",
+      "tokenBudget": "Presupuesto de tokens",
+      "noTokenBudget": "Sin límite de tokens",
+      "invalidTokenBudget": "Introduce un número entero positivo.",
+      "partialUsageHistory": "El uso anterior está incompleto y no se incluye en el presupuesto de tokens.",
+      "pendingUsageReceipts": "Esperando los datos de uso. Reanuda el objetivo cuando el uso esté completo.",
+      "usageReceiptsRecovered": "Los datos de uso están completos. Reanuda el objetivo cuando estés listo.",
+      "usageAccountingSince": "El presupuesto de tokens cuenta el uso registrado desde {time}.",
+      "usageAccountingPending": "El registro del presupuesto comienza con la próxima solicitud al modelo.",
+      "usageCoverageUnavailable": "El registro de uso no está disponible. No se puede establecer un presupuesto de tokens.",
+      "settingsNotConfirmed": "Esta conexión no ha confirmado que admita los ajustes seleccionados del objetivo. Los cambios no se aplicaron y se conservaron para volver a intentarlo.",
+      "emptyContinuations": "En pausa tras varios turnos sin salida ni actividad de herramientas. Revisa el objetivo y reanúdalo cuando estés listo.",
+      "removeTokenBudget": "Eliminar el presupuesto de tokens",
+      "executionPolicy": "Seguir ejecutando",
+      "foreground": "Mientras haya conexión",
+      "background": "En segundo plano",
+      "backgroundHint": "Continúa tras desconectarse. Reiniciar el servidor pausa el objetivo.",
+      "backgroundActive": "Segundo plano",
+      "tokenBudgetReached": "Presupuesto de tokens alcanzado",
+      "tokenBudgetUsage": "{used} / {budget} tokens",
       "placeholder": "Describe el objetivo y envía para empezar a trabajar en él",
       "modeLabel": "Modo objetivo",
       "modeDescription": "Iniciar un objetivo de larga duración",
