@@ -29,6 +29,7 @@ from opensquilla.telemetry.coordination import scope_consent_coordinator_for
 from opensquilla.telemetry.desktop_ingress import drain_desktop_early_spool
 from opensquilla.telemetry.desktop_state import desktop_early_spool_root
 from opensquilla.telemetry.desktop_turn_counts import record_desktop_turn
+from opensquilla.telemetry.device_identity import get_device_id
 from opensquilla.telemetry.outbox import OutboxPriority, TelemetryOutbox
 from opensquilla.telemetry.recorder import RecordResult, RecordStatus, TelemetryRecorder
 from opensquilla.telemetry.uploader import TelemetryUploader
@@ -99,6 +100,15 @@ class ScopedTelemetryRuntime:
     @property
     def opened_scopes(self) -> frozenset[TelemetryScope]:
         return frozenset(self._scopes)
+
+    def device_id_for(self, scope: TelemetryScope) -> str | None:
+        """Read device identity only for a locally produced, allowed event."""
+
+        if self._closed or not resolve_scope_consent(
+            scope, config=self._config, env=self._env
+        ).enqueue_allowed:
+            return None
+        return get_device_id()
 
     async def start(self) -> None:
         """Start the wake-up loop without creating files or making requests."""

@@ -79,7 +79,14 @@ def _build_manifest() -> dict[str, Any]:
             }
             for event_name, event_version, scope in _EVENT_SPECS
         ],
-        "manifest_version": 1,
+        "manifest_version": 2,
+        "device_identity": {
+            "field": "device_id",
+            "format": "sha256-lowercase-hex",
+            "optional": True,
+            "scope": "application-events",
+            "deduplication_unit": "device",
+        },
         "notice_versions": dict(CURRENT_NOTICE_VERSION_BY_SCOPE),
         "wire_limits": {
             "max_event_bytes": MAX_TELEMETRY_EVENT_BYTES,

@@ -76,24 +76,28 @@ is accepted.
 | Account service | `registration_result` | the registration transaction reaches success, fail, or cancel |
 | Runtime | `metaskill_usage` | the first executable MetaSkill step starts; one event counts one run |
 | Runtime | `coding_mode_usage` | a Coding Mode task starts its coding Agent process; one event counts one run |
-| Gateway / CLI runtime | `product_active` | a Desktop or Web owner UI is visibly active, a TUI is ready or receives user input, or a CLI Agent run is submitted; deduplicated per profile, surface, and UTC day |
+| Gateway / CLI runtime | `product_active` | a Desktop or Web owner UI is visibly active, a TUI is ready or receives user input, or a CLI Agent run is submitted; device counts deduplicate across profiles and surfaces per UTC day |
 
 `metaskill_usage` and `coding_mode_usage` intentionally carry no MetaSkill name,
 prompt, plan, step, command, repository, tool argument, or run identifier. The
 runtime-only events are emitted at their first demonstrated execution boundary,
 are gated by the client's unified network-reporting policy, and are counted by
-the dashboard as usage totals plus UTC daily trends. They use a random
-analytics-only identity without requiring a fresh-install cohort; first-use
+the dashboard as usage totals, unique devices, and UTC daily trends. They carry
+the device token without requiring a fresh-install cohort; first-use
 funnel milestones still require that cohort. Enabling Coding Mode or
 injecting its turn directive without starting the coding Agent is not counted.
 
 `product_active` is a v1 Growth event with `source=gateway`, `outcome=null`,
-and one additional field: `surface` (`desktop`, `web`, `tui`, or `cli`). It
-reuses the profile's random `analytics_user_id`, does not create a fresh-user
-cohort, and contains no prompt, response, route, input, account ID, or extra
-identity. Background Gateway uptime and internal Coding Mode child processes
+and `surface` (`desktop`, `web`, `tui`, or `cli`). Its `device_id` is stable
+across profiles on the same OS device; the legacy random `analytics_user_id`
+remains only for cohort and queue compatibility. It does not create a fresh-user
+cohort and contains no prompt, response, route, input, or account ID.
+Background Gateway uptime and internal Coding Mode child processes
 do not count. Its daily observations support cross-surface DAU and rolling
-30-day MAU, both deduplicated by analytics identity rather than event totals.
+30-day MAU, both deduplicated by device token across profiles and surfaces.
+Records without a device token are excluded from these device metrics.
+For Gateway-observed Web/TUI activity the device is the Gateway execution host;
+remote browser machines are not assigned synthetic physical-device identities.
 The local daily ledger is persisted before enqueue; retries retain `event_id`
 and occurrence time. It uses the existing unified reporting control and CI /
 `DO_NOT_TRACK` vetoes, with no new prompt or telemetry preference.
@@ -135,6 +139,18 @@ needed for deletion and emits both the journey's `acquisition_id` and the new
 `analytics_user_id`. Failure and cancellation events must not contain an
 analytics user ID.
 
+All application-owned Growth and Reliability event schemas accept optional
+`device_id`, exactly 64 lowercase hexadecimal characters. Current clients
+derive it as SHA-256 over UTF-8 `opensquilla.telemetry.device.v1`, a NUL byte,
+the platform (`macos`, `windows`, or `linux`), another NUL, and the OS machine
+identifier normalized to 32 lowercase hex characters with UUID hyphens removed.
+Raw machine identifiers, profile paths, MAC/IP addresses and account values
+must never be sent. Missing or invalid OS identity omits the field; it must not
+fall back to a new random identity. Website/CDN/account journey schemas do not
+accept this field. Deploy the updated collector before updated clients; old
+collectors reject the additive field. Pending old events retain their exact
+payload and IDs. Website acquisition journeys remain distinct journey metrics.
+
 ## Deliberately inactive boundaries
 
 The current ordinary NSIS package has no trustworthy acquisition token. It must
@@ -150,7 +166,7 @@ external registration succeeded. The account service owns that result.
 
 ## Privacy and operations
 
-- Never add IP address, MAC address, device fingerprint, raw account ID, URL
+- Never add IP address, MAC address, raw machine identifier, raw account ID, URL
   query, referrer, file data, prompt, response, order, or payment fields.
 - Reject unknown fields through the shared strict event contract.
 - Do not sample growth events.

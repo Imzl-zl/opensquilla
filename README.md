@@ -402,15 +402,21 @@ settings, without separate onboarding choices or consent popups:
   app-readiness, registration, and first-successful-turn milestones. Existing
   installations do not become new-user cohorts just by enabling reporting.
 
-The streams retain separate purpose-specific identifiers, durable queues,
+The streams retain separate session/journey identifiers, durable queues,
 upload endpoints, and retention policies. Reliability events
 go to `/v1/reliability/events`; growth events go to `/v1/growth/events`.
 Retries reuse `event_id` for server-side deduplication, and growth events are
 not sampled.
 
+Application events also carry a one-way, application-specific `device_id`
+derived locally from the OS machine identifier when available. Daily/monthly
+activity and feature device counts deduplicate this token across profiles and
+client surfaces. Legacy events without it are excluded from device counts;
+operation totals and success rates still count actual operations.
+
 V2 telemetry never includes prompts, responses, file names, file paths, file
 contents, tool arguments, task parameters, provider configuration, raw account
-IDs, order data, MAC addresses, IP addresses, or device fingerprints. Complete
+IDs, order data, MAC addresses, IP addresses, or raw OS machine identifiers. Complete
 crash stacks stay local unless the user explicitly prepares and shares a
 support bundle.
 

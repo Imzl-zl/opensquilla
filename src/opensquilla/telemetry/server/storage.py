@@ -45,6 +45,7 @@ _OLDEST_COMPATIBLE_PROTOCOL_FINGERPRINT_SHA256 = (
 )
 _COMPATIBLE_PREVIOUS_PROTOCOL_FINGERPRINTS = frozenset(
     {
+        "9e5d0501e6614fdcd4cf78f8a177db94b739fad156a0409f330809e5b2a5719f",
         "37eef99b9de090a2032669d3caa9cd10f4357061658b2458326595361582732f",
         _EARLIER_COMPATIBLE_PROTOCOL_FINGERPRINT_SHA256,
         _OLDER_COMPATIBLE_PROTOCOL_FINGERPRINT_SHA256,
@@ -103,6 +104,7 @@ _EXPECTED_INDEXES = frozenset(
         "idx_events_outcome_error_occurred",
         "idx_events_received",
         "idx_events_client_launch_user_surface_day",
+        "idx_events_client_launch_device_surface_day",
     }
 )
 _SCHEMA_STATEMENTS = (
@@ -195,6 +197,14 @@ _SCHEMA_STATEMENTS = (
     ON events(analytics_user_id, json_extract(payload_json, '$.surface'),
               substr(occurred_at_utc, 1, 10))
     WHERE event_name = 'client_launch'
+      AND json_extract(payload_json, '$.device_id') IS NULL
+    """,
+    """
+    CREATE UNIQUE INDEX idx_events_client_launch_device_surface_day
+    ON events(json_extract(payload_json, '$.device_id'),
+              json_extract(payload_json, '$.surface'), substr(occurred_at_utc, 1, 10))
+    WHERE event_name = 'client_launch'
+      AND json_extract(payload_json, '$.device_id') IS NOT NULL
     """,
 )
 _EXPECTED_SCHEMA_SQL = {
@@ -210,12 +220,42 @@ _EXPECTED_SCHEMA_SQL = {
     ("index", "idx_events_acquisition_name_occurred"): _SCHEMA_STATEMENTS[9],
     ("index", "idx_events_analytics_user_name_occurred"): _SCHEMA_STATEMENTS[10],
     ("index", "idx_events_client_launch_user_surface_day"): _SCHEMA_STATEMENTS[11],
+    ("index", "idx_events_client_launch_device_surface_day"): _SCHEMA_STATEMENTS[12],
 }
-_LEGACY_EXPECTED_SCHEMA_SQL = {
+_PRE_DEVICE_EXPECTED_SCHEMA_SQL = {
     key: value
     for key, value in _EXPECTED_SCHEMA_SQL.items()
+    if key != ("index", "idx_events_client_launch_device_surface_day")
+}
+_PRE_DEVICE_EXPECTED_SCHEMA_SQL[("index", "idx_events_client_launch_user_surface_day")] = """
+    CREATE UNIQUE INDEX idx_events_client_launch_user_surface_day
+    ON events(analytics_user_id, json_extract(payload_json, '$.surface'),
+              substr(occurred_at_utc, 1, 10))
+    WHERE event_name = 'client_launch'
+"""
+_LEGACY_EXPECTED_SCHEMA_SQL = {
+    key: value
+    for key, value in _PRE_DEVICE_EXPECTED_SCHEMA_SQL.items()
     if key != ("index", "idx_events_client_launch_user_surface_day")
 }
+_DEVICE_LAUNCH_LOOKUP_SQL = """
+    SELECT 1 FROM events
+    WHERE event_name = 'client_launch'
+      AND json_extract(payload_json, '$.device_id') IS NOT NULL
+      AND json_extract(payload_json, '$.device_id') = ?
+      AND json_extract(payload_json, '$.surface') = ?
+      AND substr(occurred_at_utc, 1, 10) = ?
+    LIMIT 1
+"""
+_LEGACY_LAUNCH_LOOKUP_SQL = """
+    SELECT 1 FROM events
+    WHERE event_name = 'client_launch'
+      AND json_extract(payload_json, '$.device_id') IS NULL
+      AND analytics_user_id = ?
+      AND json_extract(payload_json, '$.surface') = ?
+      AND substr(occurred_at_utc, 1, 10) = ?
+    LIMIT 1
+"""
 
 
 class StorageError(RuntimeError):
@@ -296,16 +336,16 @@ def _client_launch_daily_key(
 ) -> tuple[str, str, str] | None:
     if payload.get("event_name") != "client_launch":
         return None
-    analytics_user_id = payload.get("analytics_user_id")
+    identity = payload.get("device_id") or payload.get("analytics_user_id")
     surface = payload.get("surface")
     occurred_at = payload.get("occurred_at_utc")
     if (
-        not isinstance(analytics_user_id, str)
+        not isinstance(identity, str)
         or not isinstance(surface, str)
         or not isinstance(occurred_at, str)
     ):
         raise StorageCompatibilityError
-    return analytics_user_id, surface, occurred_at[:10]
+    return identity, surface, occurred_at[:10]
 
 
 class TelemetryIngestStorage:
@@ -447,9 +487,11 @@ class TelemetryIngestStorage:
     ) -> None:
         if (
             protocol_fingerprint == TELEMETRY_PROTOCOL_FINGERPRINT_SHA256
-            and schema_objects.keys() == _LEGACY_EXPECTED_SCHEMA_SQL.keys()
+            and schema_objects.keys() in (
+                _LEGACY_EXPECTED_SCHEMA_SQL.keys(), _PRE_DEVICE_EXPECTED_SCHEMA_SQL.keys()
+            )
         ):
-            await cls._migrate_legacy_protocol(
+            await cls._migrate_previous_schema(
                 connection,
                 schema_objects=schema_objects,
                 scope=scope,
@@ -521,14 +563,19 @@ class TelemetryIngestStorage:
             raise
 
     @classmethod
-    async def _migrate_legacy_protocol(
+    async def _migrate_previous_schema(
         cls,
         connection: aiosqlite.Connection,
         *,
         schema_objects: dict[tuple[str, str], str],
         scope: ConsentScope,
     ) -> None:
-        for key, expected_sql in _LEGACY_EXPECTED_SCHEMA_SQL.items():
+        expected_schema = (
+            _LEGACY_EXPECTED_SCHEMA_SQL
+            if schema_objects.keys() == _LEGACY_EXPECTED_SCHEMA_SQL.keys()
+            else _PRE_DEVICE_EXPECTED_SCHEMA_SQL
+        )
+        for key, expected_sql in expected_schema.items():
             if _normalized_schema_sql(schema_objects[key]) != _normalized_schema_sql(expected_sql):
                 raise StorageCompatibilityError
         cursor = await connection.execute(
@@ -536,11 +583,14 @@ class TelemetryIngestStorage:
         )
         metadata = await cursor.fetchone()
         await cursor.close()
-        if metadata != (
-            SCHEMA_VERSION,
-            scope.value,
-            _LEGACY_PROTOCOL_FINGERPRINT_SHA256,
-        ):
+        compatible_metadata = {
+            (SCHEMA_VERSION, scope.value, fingerprint)
+            for fingerprint in (
+                *_COMPATIBLE_PREVIOUS_PROTOCOL_FINGERPRINTS,
+                _LEGACY_PROTOCOL_FINGERPRINT_SHA256,
+            )
+        }
+        if metadata not in compatible_metadata:
             raise StorageCompatibilityError
         cursor = await connection.execute("PRAGMA user_version")
         version = await cursor.fetchone()
@@ -549,7 +599,10 @@ class TelemetryIngestStorage:
             raise StorageCompatibilityError
         try:
             await connection.execute("BEGIN IMMEDIATE")
+            if ("index", "idx_events_client_launch_user_surface_day") in schema_objects:
+                await connection.execute("DROP INDEX idx_events_client_launch_user_surface_day")
             await connection.execute(_SCHEMA_STATEMENTS[11])
+            await connection.execute(_SCHEMA_STATEMENTS[12])
             await connection.execute(
                 "UPDATE meta SET protocol_fingerprint = ? WHERE singleton = 1",
                 (TELEMETRY_PROTOCOL_FINGERPRINT_SHA256,),
@@ -621,14 +674,9 @@ class TelemetryIngestStorage:
                             duplicates += 1
                             continue
                         cursor = await self._connection.execute(
-                            """
-                            SELECT 1 FROM events
-                            WHERE event_name = 'client_launch'
-                              AND analytics_user_id = ?
-                              AND json_extract(payload_json, '$.surface') = ?
-                              AND substr(occurred_at_utc, 1, 10) = ?
-                            LIMIT 1
-                            """,
+                            _DEVICE_LAUNCH_LOOKUP_SQL
+                            if payload.get("device_id") is not None
+                            else _LEGACY_LAUNCH_LOOKUP_SQL,
                             launch_key,
                         )
                         existing_launch = await cursor.fetchone()

@@ -31,6 +31,11 @@ from opensquilla.telemetry.server.storage import (
 _SCHEMA_VERSION: Final = 1
 _MAX_COHORT_DAYS: Final = 366
 _MAX_VERSION_BREAKDOWN_ROWS: Final = 24
+_DEVICE_ID_SQL: Final = """CASE
+    WHEN json_type(payload_json, '$.device_id') = 'text'
+      AND length(json_extract(payload_json, '$.device_id')) = 64
+      AND json_extract(payload_json, '$.device_id') NOT GLOB '*[^0-9a-f]*'
+    THEN json_extract(payload_json, '$.device_id') END"""
 _REQUIRED_EVENT_COLUMNS: Final = frozenset(
     {
         "event_id",
@@ -227,6 +232,7 @@ class DashboardQueries:
             )
             return {
                 "asOfReceivedUtc": watermark,
+                "deviceIdentity": self._device_identity_coverage(connection, window),
                 "dailyTrend": self._daily_reliability_trend(connection, window),
                 "hourlyTrend": self._hourly_reliability_trend(connection, window),
                 "byVersion": self._reliability_by_version(connection, window),
@@ -478,16 +484,18 @@ class DashboardQueries:
             activation = self._funnel(
                 connection,
                 window,
-                id_column="analytics_user_id",
+                id_column="device_id",
                 stages=_ACTIVATION_STAGES,
             )
             return {
                 "asOfReceivedUtc": watermark,
+                "deviceIdentity": self._device_identity_coverage(connection, window),
                 "populationExclusions": {
                     "verifiedByDashboard": False,
                     "requiredUpstream": (
-                        "internal testing, automated traffic, and repeat installations"
+                        "internal testing and automated traffic"
                     ),
+                    "deviceDeduplicationEnabled": True,
                     "fingerprintLinkageAllowed": False,
                 },
                 "acquisition": acquisition,
@@ -510,23 +518,44 @@ class DashboardQueries:
             }
 
     @staticmethod
+    def _device_identity_coverage(
+        connection: sqlite3.Connection,
+        window: UtcCohortWindow,
+    ) -> dict[str, Any]:
+        row = connection.execute(
+            f"""
+            SELECT COUNT(DISTINCT {_DEVICE_ID_SQL}) AS devices,
+                   COALESCE(SUM(({_DEVICE_ID_SQL}) IS NULL), 0) AS unidentified
+            FROM events
+            WHERE occurred_at_utc >= ? AND occurred_at_utc < ?
+            """,
+            window.sql_params,
+        ).fetchone()
+        return {
+            "deduplicationUnit": "device",
+            "uniqueDevices": int(row["devices"]),
+            "eventsWithoutDeviceId": int(row["unidentified"]),
+            "legacyProfileFallback": False,
+        }
+
+    @staticmethod
     def _product_activity(
         connection: sqlite3.Connection,
         window: UtcCohortWindow,
     ) -> dict[str, Any]:
-        """Count daily and rolling-30-day users across all observed surfaces."""
+        """Count devices across profiles and surfaces, excluding legacy identities."""
 
         start_date = window.start.date().isoformat()
         end_date = (window.end_exclusive - timedelta(days=1)).date().isoformat()
         rows = connection.execute(
-            """
+            f"""
             WITH RECURSIVE days(period) AS (
                 VALUES (?)
                 UNION ALL
                 SELECT date(period, '+1 day') FROM days WHERE period < ?
             ), activity AS (
                 SELECT DISTINCT substr(occurred_at_utc, 1, 10) AS active_date,
-                                analytics_user_id
+                                {_DEVICE_ID_SQL} AS device_id
                 FROM events
                 WHERE event_name = 'product_active'
                   AND event_version = 1
@@ -534,7 +563,7 @@ class DashboardQueries:
                   AND outcome IS NULL
                   AND sample_rate = 1
                   AND notice_version = ?
-                  AND analytics_user_id IS NOT NULL
+                  AND ({_DEVICE_ID_SQL}) IS NOT NULL
                   AND json_extract(payload_json, '$.surface') IN ('desktop', 'web', 'tui', 'cli')
                   AND occurred_at_utc >= date(?, '-29 days') || 'T00:00:00.000Z'
                   AND occurred_at_utc < ?
@@ -542,8 +571,8 @@ class DashboardQueries:
             SELECT days.period,
                    date(days.period, '-29 days') AS mau_start_date,
                    COUNT(DISTINCT CASE WHEN activity.active_date = days.period
-                         THEN activity.analytics_user_id END) AS dau,
-                   COUNT(DISTINCT activity.analytics_user_id) AS mau
+                         THEN activity.device_id END) AS dau,
+                   COUNT(DISTINCT activity.device_id) AS mau
             FROM days
             LEFT JOIN activity
               ON activity.active_date >= date(days.period, '-29 days')
@@ -587,8 +616,9 @@ class DashboardQueries:
         """
 
         row = connection.execute(
-            """
-            SELECT COUNT(*) AS usage_count
+            f"""
+            SELECT COUNT(*) AS usage_count,
+                   COUNT(DISTINCT {_DEVICE_ID_SQL}) AS unique_devices
             FROM events
             WHERE event_name = ?
               AND event_version = 1
@@ -605,9 +635,10 @@ class DashboardQueries:
             ),
         ).fetchone()
         daily_rows = connection.execute(
-            """
+            f"""
             SELECT substr(occurred_at_utc, 1, 10) AS period,
-                   COUNT(*) AS uses
+                   COUNT(*) AS uses,
+                   COUNT(DISTINCT {_DEVICE_ID_SQL}) AS unique_devices
             FROM events
             WHERE event_name = ?
               AND event_version = 1
@@ -626,6 +657,9 @@ class DashboardQueries:
             ),
         ).fetchall()
         by_day = {str(item["period"]): int(item["uses"]) for item in daily_rows}
+        devices_by_day = {
+            str(item["period"]): int(item["unique_devices"]) for item in daily_rows
+        }
         day_count = (window.end_exclusive.date() - window.start.date()).days
         daily = [
             {
@@ -634,11 +668,15 @@ class DashboardQueries:
                     (window.start + timedelta(days=offset)).date().isoformat(),
                     0,
                 ),
+                "uniqueDevices": devices_by_day.get(
+                    (window.start + timedelta(days=offset)).date().isoformat(), 0
+                ),
             }
             for offset in range(day_count)
         ]
         return {
             "totalUses": int(row["usage_count"] if row is not None else 0),
+            "uniqueDevices": int(row["unique_devices"] if row is not None else 0),
             "dailyTrend": daily,
             "note": note,
         }
@@ -648,19 +686,19 @@ class DashboardQueries:
         connection: sqlite3.Connection,
         window: UtcCohortWindow,
     ) -> dict[str, Any]:
-        """Return consented observable terminal users, never event counts or IDs."""
+        """Return unique observed terminal devices, never raw identifiers."""
 
         totals = connection.execute(
-            """
+            f"""
             WITH users AS (
-                SELECT analytics_user_id,
+                SELECT {_DEVICE_ID_SQL} AS device_id,
                        MAX(json_extract(payload_json, '$.surface') = 'tui') AS used_tui,
                        MAX(json_extract(payload_json, '$.surface') = 'cli') AS used_cli
                 FROM events
                 WHERE event_name = 'client_launch'
-                  AND analytics_user_id IS NOT NULL
+                  AND ({_DEVICE_ID_SQL}) IS NOT NULL
                   AND occurred_at_utc >= ? AND occurred_at_utc < ?
-                GROUP BY analytics_user_id
+                GROUP BY device_id
             )
             SELECT COALESCE(SUM(used_tui), 0) AS tui_users,
                    COALESCE(SUM(used_cli), 0) AS cli_users,
@@ -687,12 +725,12 @@ class DashboardQueries:
             daily.append(self._public_client_usage_trend_row(day, row))
 
         entrypoint_rows = connection.execute(
-            """
+            f"""
             SELECT json_extract(payload_json, '$.entrypoint') AS entrypoint,
-                   COUNT(DISTINCT analytics_user_id) AS users
+                   COUNT(DISTINCT {_DEVICE_ID_SQL}) AS users
             FROM events
             WHERE event_name = 'client_launch'
-              AND analytics_user_id IS NOT NULL
+              AND ({_DEVICE_ID_SQL}) IS NOT NULL
               AND occurred_at_utc >= ? AND occurred_at_utc < ?
               AND json_extract(payload_json, '$.entrypoint')
                     IN ('chat', 'agent', 'gateway_run')
@@ -703,8 +741,8 @@ class DashboardQueries:
         ).fetchall()
         return {
             "observablePopulationNote": (
-                "仅统计当前隐私声明下明确同意产品与增长分析、且客户端可观测的用户；"
-                "不代表全部实际 TUI/CLI 用户。"
+                "按设备标识去重，仅统计允许产品与增长分析且携带设备标识的客户端；"
+                "旧版无设备标识数据不计入设备数，不代表全部实际 TUI/CLI 设备。"
             ),
             "totals": {
                 "tuiUsers": int(totals["tui_users"]),
@@ -750,14 +788,14 @@ class DashboardQueries:
             SELECT {period_expression} AS period,
                    COUNT(DISTINCT CASE
                        WHEN json_extract(payload_json, '$.surface') = 'tui'
-                       THEN analytics_user_id END) AS tui_users,
+                       THEN {_DEVICE_ID_SQL} END) AS tui_users,
                    COUNT(DISTINCT CASE
                        WHEN json_extract(payload_json, '$.surface') = 'cli'
-                       THEN analytics_user_id END) AS cli_users,
-                   COUNT(DISTINCT analytics_user_id) AS terminal_users
+                       THEN {_DEVICE_ID_SQL} END) AS cli_users,
+                   COUNT(DISTINCT {_DEVICE_ID_SQL}) AS terminal_users
             FROM events
             WHERE event_name = 'client_launch'
-              AND analytics_user_id IS NOT NULL
+              AND ({_DEVICE_ID_SQL}) IS NOT NULL
               AND occurred_at_utc >= ? AND occurred_at_utc < ?
               AND json_extract(payload_json, '$.surface') IN ('tui', 'cli')
             GROUP BY {period_expression}
@@ -1147,8 +1185,13 @@ class DashboardQueries:
         id_column: str,
         stages: Sequence[_FunnelStage],
     ) -> dict[str, Any]:
-        if id_column not in {"acquisition_id", "analytics_user_id"}:
+        if id_column not in {"acquisition_id", "device_id"}:
             raise ValueError("unsupported funnel identifier")
+        identity_expression = _DEVICE_ID_SQL if id_column == "device_id" else id_column
+        candidate_identity = (
+            _DEVICE_ID_SQL.replace("payload_json", "candidate.payload_json")
+            if id_column == "device_id" else f"candidate.{id_column}"
+        )
         if not stages:
             raise ValueError("funnel requires stages")
 
@@ -1159,12 +1202,12 @@ class DashboardQueries:
         ctes.append(
             f"""
             first_stage AS (
-                SELECT {id_column} AS journey_key, MIN(occurred_at_utc) AS reached_at
+                SELECT {identity_expression} AS journey_key, MIN(occurred_at_utc) AS reached_at
                 FROM events
-                WHERE {id_column} IS NOT NULL
+                WHERE ({identity_expression}) IS NOT NULL
                   AND event_name = ?
                   {first_outcome}
-                GROUP BY {id_column}
+                GROUP BY journey_key
             )
             """
         )
@@ -1204,7 +1247,7 @@ class DashboardQueries:
                         MIN({reached_at}) AS reached_at
                     FROM stage_{previous} AS prior
                     LEFT JOIN events AS candidate
-                      ON candidate.{id_column} = prior.journey_key
+                      ON ({candidate_identity}) = prior.journey_key
                      AND prior.reached_at IS NOT NULL
                      AND candidate.event_name = ?
                      {outcome_clause}
@@ -1252,7 +1295,7 @@ class DashboardQueries:
             )
         return {
             "deduplicationUnit": (
-                "acquisition journey" if id_column == "acquisition_id" else "analytics user"
+                "acquisition journey" if id_column == "acquisition_id" else "device"
             ),
             "stages": public_stages,
             "transitions": transitions,

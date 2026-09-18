@@ -8,7 +8,7 @@ export const CURRENT_NOTICE_VERSION_BY_SCOPE: Readonly<Record<TelemetryScope, st
   })
 
 export const TELEMETRY_PROTOCOL_FINGERPRINT_SHA256 =
-  '9e5d0501e6614fdcd4cf78f8a177db94b739fad156a0409f330809e5b2a5719f'
+  'c05f4afd7bea0c9a3f110698aa2209994348479b45f105f9f80af2b4a2175d18'
 
 type ResultOutcome = 'success' | 'fail' | 'timeout' | 'cancel'
 
@@ -26,6 +26,7 @@ interface EventEnvelope {
   consent_scope: TelemetryScope
   notice_version: string
   sample_rate: number
+  device_id?: string
 }
 
 interface ReliabilityEnvelope extends EventEnvelope {
@@ -298,6 +299,12 @@ function assertExactKeys(record: Record<string, unknown>, expected: readonly str
 }
 
 function validateCommon(record: Record<string, unknown>): void {
+  if (Object.hasOwn(record, 'device_id')) {
+    assertCondition(
+      typeof record.device_id === 'string' && FINGERPRINT_RE.test(record.device_id),
+      'telemetry device id must be a lowercase SHA256 digest',
+    )
+  }
   assertCondition(record.event_version === 1, 'telemetry event version is unsupported')
   assertCondition(
     typeof record.event_id === 'string' && UUID4_RE.test(record.event_id),
@@ -519,7 +526,8 @@ export function validateDesktopEarlyTelemetryEvent(value: unknown): DesktopEarly
   const eventName = typeof record.event_name === 'string' ? record.event_name : ''
   const expectedKeys = EVENT_KEYS[eventName]
   assertCondition(expectedKeys !== undefined, 'telemetry event is not Electron-owned')
-  assertExactKeys(record, expectedKeys)
+  assertExactKeys(record, Object.hasOwn(record, 'device_id')
+    ? [...expectedKeys, 'device_id'] : expectedKeys)
   validateCommon(record)
 
   switch (eventName) {
