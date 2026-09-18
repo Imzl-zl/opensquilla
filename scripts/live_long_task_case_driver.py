@@ -96,6 +96,11 @@ _MAX_CASE_FILE_BYTES: Final = 64 * 1024
 _MAX_BROWSER_RESULT_BYTES: Final = 64 * 1024
 _HISTORY_SETTLE_TIMEOUT_SECONDS: Final = 5.0
 _HISTORY_SETTLE_EVENT_WAIT_SECONDS: Final = 0.05
+_STARTUP_PHASES: Final = frozenset({
+    "config", "ownership", "services", "profile_recovery", "app",
+    "runtime_state", "listener", "gateway_ready",
+})
+_STARTUP_LOG_TAIL_BYTES: Final = 64 * 1024
 _PERFORMANCE_FIXTURE: Final = {
     "historyMessages": 200,
     "reasoningDeltas": 20_000,
@@ -557,6 +562,7 @@ class GatewayProcess:
         self.proc: subprocess.Popen[bytes] | None = None
         self._stdout: Any = None
         self._stderr: Any = None
+        self._startup_log_offsets: dict[str, int] = {}
 
     @property
     def http_url(self) -> str:
@@ -607,6 +613,12 @@ class GatewayProcess:
             raise RuntimeError("Gateway is already running")
         self._stdout = (self.root / "gateway.stdout.log").open("ab")
         self._stderr = (self.root / "gateway.stderr.log").open("ab")
+        # Restarts append to the raw logs so cleanup can scan every attempt.
+        # Diagnostics must only describe the process launched by this start().
+        self._startup_log_offsets = {
+            "gateway.stdout.log": self._stdout.tell(),
+            "gateway.stderr.log": self._stderr.tell(),
+        }
         self.proc = subprocess.Popen(
             [
                 sys.executable,
@@ -625,19 +637,82 @@ class GatewayProcess:
             stdout=self._stdout,
             stderr=self._stderr,
         )
-        deadline = time.monotonic() + 45
+        started_at = time.monotonic()
+        deadline = started_at + 45
+        last_health_status: int | None = None
         while time.monotonic() < deadline:
-            if self.proc.poll() is not None:
-                raise DriverConfigurationError("Gateway exited during startup")
+            exit_code = self.proc.poll()
+            if exit_code is not None:
+                raise self._startup_failure(
+                    "Gateway exited during startup", started_at, exit_code, last_health_status,
+                )
             try:
                 with urllib.request.urlopen(f"{self.http_url}/health", timeout=1) as response:
+                    last_health_status = response.status
                     if response.status == 200:
                         return
+            except urllib.error.HTTPError as exc:
+                last_health_status = exc.code
             except (urllib.error.URLError, TimeoutError, OSError):
                 # The Gateway may still be binding; retry until the bounded deadline.
                 pass
             time.sleep(0.25)
-        raise DriverConfigurationError("Gateway did not become healthy")
+        raise self._startup_failure(
+            "Gateway did not become healthy", started_at, self.proc.poll(), last_health_status,
+        )
+
+    def _startup_failure(
+        self,
+        reason: str,
+        started_at: float,
+        exit_code: int | None,
+        last_health_status: int | None,
+    ) -> DriverConfigurationError:
+        # Raw live-case logs must still be scanned and deleted by cleanup().
+        # Retain only known startup states and bounded numeric evidence.
+        phases: dict[str, dict[str, int | str]] = {}
+        for name in ("gateway.stdout.log", "gateway.stderr.log"):
+            try:
+                with (self.root / name).open("rb") as stream:
+                    stream.seek(0, os.SEEK_END)
+                    stream.seek(max(
+                        self._startup_log_offsets.get(name, 0),
+                        stream.tell() - _STARTUP_LOG_TAIL_BYTES,
+                    ))
+                    tail = stream.read(_STARTUP_LOG_TAIL_BYTES)
+            except OSError:
+                continue
+            for line in tail.splitlines():
+                # PrivateLogFormatter prefixes its JSON with timestamp/level/logger.
+                _, prefix, payload = line.partition(b"] opensquilla.gateway.boot: ")
+                try:
+                    record = json.loads(payload if prefix else line)
+                except (ValueError, RecursionError):
+                    continue
+                if (
+                    not isinstance(record, dict)
+                    or record.get("event") != "gateway.startup_phase"
+                    or not isinstance(record.get("phase"), str)
+                    or record["phase"] not in _STARTUP_PHASES
+                    or record.get("status") != "ready"
+                ):
+                    continue
+                durations = {
+                    key: record.get(key) for key in ("duration_ms", "startup_elapsed_ms")
+                }
+                if any(type(value) is not int or not 0 <= value <= 3_600_000
+                       for value in durations.values()):
+                    continue
+                phases[record["phase"]] = {"status": "ready", **durations}
+        evidence = {
+            "elapsed_ms": min(3_600_000, max(0, int((time.monotonic() - started_at) * 1000))),
+            "exit_code": exit_code if type(exit_code) is int and -(2**31) <= exit_code < 2**32
+            else None,
+            "last_health_status": last_health_status
+            if type(last_health_status) is int and 100 <= last_health_status <= 599 else None,
+            "phases": phases,
+        }
+        return DriverConfigurationError(f"{reason}; startup={json.dumps(evidence, sort_keys=True)}")
 
     def stop(self, *, force: bool = False) -> None:
         proc = self.proc

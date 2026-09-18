@@ -140,6 +140,7 @@ function waitForMetadataRetry<T>(
 
 export function useChatSessionSubscription(options: UseChatSessionSubscriptionOptions) {
   const isHydrating = ref(false)
+  const metadataRecoveryError = ref<unknown>(null)
   const streamGeneration = ref<string | null>(null)
   const conversationRuntime = options.conversationRuntime
   let activeSubscriptionController: AbortController | null = null
@@ -209,6 +210,7 @@ export function useChatSessionSubscription(options: UseChatSessionSubscriptionOp
     metadata: SessionReadMetadata,
     activity: SessionReadActivity = 'unknown',
   ): SessionSubscriptionOutcome {
+    metadataRecoveryError.value = null
     if (metadataGeneration !== undefined) {
       options.onSessionMetadata?.(key, metadataGeneration, metadata)
     }
@@ -346,6 +348,7 @@ export function useChatSessionSubscription(options: UseChatSessionSubscriptionOp
         !isCurrentSubscription(lease, key, sequence, signal)
         || metadataHydration !== metadataHydrationSequence
       ) return
+      metadataRecoveryError.value = cause
       if (metadataGeneration !== undefined) {
         options.onSessionMetadataError?.(key, metadataGeneration)
       }
@@ -525,6 +528,7 @@ export function useChatSessionSubscription(options: UseChatSessionSubscriptionOp
         options.onSessionMetadataError?.(key, metadataGeneration)
       }
       if (isCurrent()) {
+        metadataRecoveryError.value = cause
         console.warn(
           'Session metadata recovery failed:',
           cause instanceof Error ? cause.message : cause,
@@ -546,6 +550,7 @@ export function useChatSessionSubscription(options: UseChatSessionSubscriptionOp
     activeSubscriptionController = null
     activeMetadataController?.abort()
     activeMetadataController = null
+    metadataRecoveryError.value = null
     isHydrating.value = false
   }
 
@@ -607,6 +612,7 @@ export function useChatSessionSubscription(options: UseChatSessionSubscriptionOp
 
   return {
     isHydrating,
+    metadataRecoveryError,
     streamGeneration,
     observeStreamGeneration,
     subscribeSession,

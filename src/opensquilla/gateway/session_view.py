@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from collections.abc import Iterator
 from typing import Any
 
 from opensquilla.chat.flattened_tool_markers import is_flattened_tool_result_dump
@@ -517,10 +518,9 @@ def _hangul_extends_cluster(previous: str, current: str) -> bool:
     )
 
 
-def _title_grapheme_clusters(text: str) -> list[str]:
-    """Group display-title text without splitting common user graphemes."""
+def _title_grapheme_clusters(text: str) -> Iterator[str]:
+    """Yield title graphemes so truncation need not scan the remaining history."""
 
-    clusters: list[str] = []
     cluster = ""
     join_next = False
     regional_indicators = 0
@@ -537,15 +537,14 @@ def _title_grapheme_clusters(text: str) -> list[str]:
             )
         )
         if cluster and not extends_cluster:
-            clusters.append(cluster)
+            yield cluster
             cluster = ""
             regional_indicators = 0
         cluster += char
         regional_indicators = regional_indicators + 1 if regional else 0
         join_next = char == "\u200d" or "VIRAMA" in unicodedata.name(char, "")
     if cluster:
-        clusters.append(cluster)
-    return clusters
+        yield cluster
 
 
 def _truncate_title_graphemes(text: str, max_chars: int) -> str:

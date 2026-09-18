@@ -3726,6 +3726,7 @@ async def test_compact_counts_tool_calls_when_token_count_is_underreported(manag
 
 def _fail_next_transcript_insert(monkeypatch: pytest.MonkeyPatch, storage: SessionStorage) -> None:
     original_execute = storage.conn.execute
+    original_executemany = storage.conn.executemany
     failed = False
 
     def execute(sql: str, params: Any = ()):
@@ -3740,6 +3741,15 @@ def _fail_next_transcript_insert(monkeypatch: pytest.MonkeyPatch, storage: Sessi
         return original_execute(sql, params)
 
     monkeypatch.setattr(storage.conn, "execute", execute)
+
+    def executemany(sql: str, params: Any):
+        nonlocal failed
+        if not failed and sql.lstrip().upper().startswith("INSERT INTO TRANSCRIPT_ENTRIES"):
+            failed = True
+            raise RuntimeError("rewrite insert failed")
+        return original_executemany(sql, params)
+
+    monkeypatch.setattr(storage.conn, "executemany", executemany)
 
 
 def _fail_next_summary_insert(monkeypatch: pytest.MonkeyPatch, storage: SessionStorage) -> None:
@@ -4846,7 +4856,8 @@ async def test_canonical_transcript_page_reads_one_snapshot_during_compaction(
 
     reader_storage = SessionStorage(str(db_path))
     await reader_storage.connect()
-    original_execute = reader_storage.conn.execute
+    assert reader_storage._transcript_reader is not None
+    original_execute = reader_storage._transcript_reader.execute
     compaction_injected = False
 
     class _CompactionAfterFetch:
@@ -4880,7 +4891,7 @@ async def test_canonical_transcript_page_reads_one_snapshot_during_compaction(
             return _CompactionAfterFetch(result)
         return result
 
-    monkeypatch.setattr(reader_storage.conn, "execute", execute)
+    monkeypatch.setattr(reader_storage._transcript_reader, "execute", execute)
     try:
         entries, has_more = await reader_storage.get_canonical_transcript_page(
             node.session_id,
@@ -4974,7 +4985,8 @@ async def test_cursor_validation_and_page_share_one_sqlite_snapshot(
 
     reader_storage = SessionStorage(str(db_path))
     await reader_storage.connect()
-    original_execute = reader_storage.conn.execute
+    assert reader_storage._transcript_reader is not None
+    original_execute = reader_storage._transcript_reader.execute
     deletion_injected = False
 
     async def delete_after_snapshot() -> None:
@@ -5007,7 +5019,7 @@ async def test_cursor_validation_and_page_share_one_sqlite_snapshot(
             return DeleteAfterFetch(result)
         return result
 
-    monkeypatch.setattr(reader_storage.conn, "execute", execute)
+    monkeypatch.setattr(reader_storage._transcript_reader, "execute", execute)
     try:
         entries, has_more = await reader_storage.get_canonical_transcript_page(
             node.session_id,

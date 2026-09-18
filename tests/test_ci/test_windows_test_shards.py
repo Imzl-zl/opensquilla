@@ -7,6 +7,7 @@ import os
 import runpy
 import subprocess
 import sys
+import threading
 import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -20,6 +21,7 @@ SHARD_MODULE: dict[str, Any] = runpy.run_path(
     SHARD_SCRIPT.as_posix(), run_name="windows_test_shards"
 )
 SHARD_NAMES: tuple[str, ...] = SHARD_MODULE["SHARD_NAMES"]
+WINDOWS_SHARD_NAMES: tuple[str, ...] = SHARD_MODULE["WINDOWS_SHARD_NAMES"]
 discover_test_files = SHARD_MODULE["discover_test_files"]
 files_for_shard = SHARD_MODULE["files_for_shard"]
 historical_test_weights = SHARD_MODULE["historical_test_weights"]
@@ -34,6 +36,11 @@ validated_files_for_shard = SHARD_MODULE["validated_files_for_shard"]
 requires_isolated_core_wheel = SHARD_MODULE["_requires_isolated_core_wheel"]
 combined_pytest_exit_code = SHARD_MODULE["_combined_pytest_exit_code"]
 pytest_file_selection_arg = SHARD_MODULE["_pytest_file_selection_arg"]
+windows_shard_for_test = SHARD_MODULE["windows_shard_for_test"]
+shard_family = SHARD_MODULE["shard_family"]
+partition_assignments = SHARD_MODULE["partition_assignments"]
+partition_snapshot_fingerprint = SHARD_MODULE["partition_snapshot_fingerprint"]
+validate_partition_payload = SHARD_MODULE["validate_partition_payload"]
 
 OFFLINE_MARKER_EXCLUSIONS = SHARD_MODULE["OFFLINE_MARKER_EXCLUSIONS"]
 RECENTLY_ADDED_ACTIVE_TESTS = {
@@ -404,15 +411,50 @@ def test_split_phase_exit_codes_allow_one_empty_successful_phase(
     )
 
 
-def test_only_fixture_consuming_shards_prebuild_the_core_wheel() -> None:
+@pytest.mark.parametrize("shard_names", [SHARD_NAMES, WINDOWS_SHARD_NAMES])
+def test_only_fixture_consuming_shards_prebuild_the_core_wheel(
+    shard_names: tuple[str, ...],
+) -> None:
     root = Path.cwd()
     consumers = {
-        shard
-        for shard in SHARD_NAMES
+        shard_family(shard)
+        for shard in shard_names
         if requires_isolated_core_wheel(root, files_for_shard(root, shard))
     }
 
     assert consumers == {"core", "desktop-installer-contracts"}
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "latin-1"])
+@pytest.mark.parametrize("consumes_wheel", [False, True])
+def test_core_wheel_prescan_honors_python_source_encodings(
+    tmp_path: Path, encoding: str, consumes_wheel: bool,
+) -> None:
+    path = tmp_path / "test_encoded.py"
+    cookie = "# coding: latin-1\n" if encoding == "latin-1" else ""
+    argument = "isolated_core_wheel" if consumes_wheel else ""
+    source = f"{cookie}# caf\u00e9\ndef test_encoded({argument}):\n    pass\n"
+    path.write_bytes(source.encode(encoding))
+
+    assert requires_isolated_core_wheel(tmp_path, (path.name,)) is consumes_wheel
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        b"\xef\xbb\xbfdef test_invalid(:\n    pass\n",
+        b"# coding: unknown-source-codec\ndef test_invalid():\n    pass\n",
+        b"\xef\xbb\xbf# coding: latin-1\ndef test_invalid():\n    pass\n",
+    ],
+)
+def test_core_wheel_prescan_keeps_invalid_python_sources_fail_closed(
+    tmp_path: Path, source: bytes,
+) -> None:
+    path = tmp_path / "test_invalid.py"
+    path.write_bytes(source)
+
+    with pytest.raises(SyntaxError):
+        requires_isolated_core_wheel(tmp_path, (path.name,))
 
 
 def _function_decorators(path: Path, function_name: str) -> set[str]:
@@ -426,6 +468,7 @@ def _function_decorators(path: Path, function_name: str) -> set[str]:
 @pytest.mark.parametrize(
     "test_file",
     [
+        "tests/test_ci/test_windows_signatures.py",
         "tests/test_sandbox/test_windows_shell_process_runtime.py",
         "tests/test_scripts/test_gateway_ux.py",
     ],
@@ -504,6 +547,109 @@ def test_runner_saturated_subprocess_contracts_are_marked_ci_serial() -> None:
         Path("tests/test_recovery/test_transaction.py"),
         "test_transaction_recovery_locks_parked_backup_before_restoring_target",
     )
+    assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/functional/test_gateway_silent_reply_process_e2e.py"),
+        "test_real_gateway_suppresses_goal_sentinel_everywhere",
+    )
+    assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/functional/test_gateway_silent_reply_process_e2e.py"),
+        "test_default_timing_sample_has_one_provider_call_and_no_goal",
+    )
+    assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/test_tools/test_shell_process_isolation.py"),
+        "test_exec_command_writes_optional_stdin",
+    )
+    assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/test_skills/test_hub_transaction_process_gates.py"),
+        "test_unleased_build_services_does_not_sweep_another_process_reservation",
+    )
+
+
+def test_real_skill_install_cancellation_is_marked_ci_serial() -> None:
+    assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/test_engine/test_skill_install_turn.py"),
+        "test_explicit_turn_deadline_cancels_install_and_preserves_receipt",
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows process and mapped-file lifecycle")
+@pytest.mark.ci_serial
+def test_gateway_cleanup_waits_for_writer_after_launcher_exit(tmp_path: Path) -> None:
+    harness = runpy.run_path("tests/functional/test_gateway_silent_reply_process_e2e.py")
+    writer = tmp_path / "writer.py"
+    writer.write_text(
+        "import datetime, json, mmap, os, pathlib, sys, time\n"
+        "root = pathlib.Path(sys.argv[1])\n"
+        "with (root / 'mapped.db').open('w+b') as stream:\n"
+        "    stream.truncate(32768)\n"
+        "    with mmap.mmap(stream.fileno(), 0) as mapping:\n"
+        "        mapping[:4] = b'live'\n"
+        "        (root / 'gateway.pid').write_text(json.dumps({\n"
+        "            'pid': os.getpid(),\n"
+        "            'start_ts': datetime.datetime.now(datetime.UTC).isoformat(),\n"
+        "        }), encoding='utf-8')\n"
+        "        (root / 'ready').touch()\n"
+        "        deadline = time.monotonic() + 15\n"
+        "        while not (root / 'release').exists():\n"
+        "            if time.monotonic() >= deadline:\n"
+        "                raise TimeoutError('parent did not release mapped file')\n"
+        "            time.sleep(0.01)\n",
+        encoding="utf-8",
+    )
+    launcher_code = (
+        "import pathlib, subprocess, sys, time\n"
+        "root = pathlib.Path(sys.argv[2])\n"
+        "child = subprocess.Popen([sys.executable, sys.argv[1], str(root)],\n"
+        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "while not (root / 'ready').exists():\n"
+        "    if child.poll() is not None:\n"
+        "        raise RuntimeError('writer exited before ready')\n"
+        "    time.sleep(0.01)\n"
+    )
+    # A direct interpreter gives the fixture a real launcher that can finish
+    # while its child still owns mappings, without depending on uv teardown timing.
+    launcher = subprocess.Popen(
+        [getattr(sys, "_base_executable", sys.executable), "-c", launcher_code,
+         str(writer), str(tmp_path)],
+    )
+    identity = None
+    release = tmp_path / "release"
+    timer = threading.Timer(0.2, release.touch)
+    try:
+        assert launcher.wait(timeout=10) == 0
+        identity = harness["_open_gateway_process_handle"](tmp_path)
+        assert identity is not None
+        kernel32, handle = identity
+        assert kernel32.WaitForSingleObject(handle, 0) == 258
+        with (tmp_path / "mapped.db").open("r+b") as stream, pytest.raises(OSError):
+            stream.truncate(0)
+        timer.start()
+        harness["_stop_process"](launcher, tmp_path)
+        assert kernel32.WaitForSingleObject(handle, 0) == 0
+        with (tmp_path / "mapped.db").open("r+b") as stream:
+            stream.truncate(0)
+    finally:
+        release.touch()
+        timer.cancel()
+        if launcher.poll() is None:
+            launcher.kill()
+            launcher.wait(timeout=10)
+        if identity is not None:
+            kernel32, handle = identity
+            try:
+                assert kernel32.WaitForSingleObject(handle, 10_000) == 0
+            finally:
+                kernel32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows process birth identity")
+def test_gateway_cleanup_ignores_reused_pid(tmp_path: Path) -> None:
+    harness = runpy.run_path("tests/functional/test_gateway_silent_reply_process_e2e.py")
+    (tmp_path / "gateway.pid").write_text(
+        json.dumps({"pid": os.getpid(), "start_ts": "1970-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    assert harness["_open_gateway_process_handle"](tmp_path) is None
 
 
 @pytest.mark.parametrize(
@@ -687,6 +833,105 @@ def test_windows_shards_are_balanced_by_historical_duration() -> None:
     estimated_seconds = [summary[shard][1] for shard in SHARD_NAMES]
     assert min(estimated_seconds) > 0
     assert max(estimated_seconds) / min(estimated_seconds) < 1.05
+
+
+def test_windows_execution_partitions_cover_every_file_once_within_its_family() -> None:
+    root = Path.cwd()
+    discovered = set(discover_test_files(root))
+    assignments = partition_assignments()
+    assert set(assignments) <= discovered
+    physical_files = {
+        shard: set(validated_files_for_shard(root, shard)) for shard in WINDOWS_SHARD_NAMES
+    }
+    assert len(physical_files) == 8
+    assert all(physical_files.values())
+    assert set().union(*physical_files.values()) == discovered
+    assert sum(map(len, physical_files.values())) == len(discovered)
+    for family in SHARD_NAMES:
+        assert physical_files[f"{family}-1"] | physical_files[f"{family}-2"] == set(
+            files_for_shard(root, family)
+        )
+    for path, physical in assignments.items():
+        assert shard_family(physical) == shard_for_test(path)
+        assert windows_shard_for_test(path) == physical
+
+
+def test_windows_partitions_stay_fixed_when_duration_weights_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assignments = dict(partition_assignments())
+    before = partition_snapshot_fingerprint()
+
+    def unexpected_weight_access() -> dict[str, float]:
+        raise AssertionError("partition scheduling must not consult duration weights")
+
+    monkeypatch.setitem(
+        windows_shard_for_test.__globals__, "historical_test_weights", unexpected_weight_access
+    )
+    assert {path: windows_shard_for_test(path) for path in assignments} == assignments
+    assert partition_snapshot_fingerprint() == before
+
+
+def test_windows_new_file_fallback_is_stable_and_keeps_environment_family() -> None:
+    paths = (
+        "tests/test_new_partition_fallback.py",
+        "tests/test_gateway/test_new_partition_fallback.py",
+        "tests/test_recovery/test_new_partition_fallback.py",
+        "tests/test_desktop/test_new_partition_fallback.py",
+    )
+    assert not set(paths).intersection(partition_assignments())
+    first = {path: windows_shard_for_test(path) for path in paths}
+    assert {path: windows_shard_for_test(path) for path in reversed(paths)} == first
+    for path, shard in first.items():
+        assert shard in WINDOWS_SHARD_NAMES
+        assert shard_family(shard) == shard_for_test(path)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("missing_partition", "every Windows execution shard"),
+        ("duplicate_file", "duplicate Windows partition"),
+        ("cross_family", "crosses responsibility families"),
+        ("path_escape", "invalid Windows partition test path"),
+        ("unsorted", "is not sorted"),
+    ],
+)
+def test_windows_partition_snapshot_rejects_invalid_coverage(case: str, message: str) -> None:
+    partitions: dict[str, list[str]] = {shard: [] for shard in WINDOWS_SHARD_NAMES}
+    if case == "missing_partition":
+        del partitions["core-2"]
+    elif case == "duplicate_file":
+        partitions["core-1"] = ["tests/test_partition_fixture.py"]
+        partitions["core-2"] = ["tests/test_partition_fixture.py"]
+    elif case == "cross_family":
+        partitions["core-1"] = ["tests/test_gateway/test_partition_fixture.py"]
+    elif case == "path_escape":
+        partitions["core-1"] = ["tests/../test_partition_fixture.py"]
+    elif case == "unsorted":
+        partitions["core-1"] = ["tests/test_partition_z.py", "tests/test_partition_a.py"]
+    with pytest.raises(ValueError, match=message):
+        validate_partition_payload({"schema_version": 1, "partitions": partitions})
+
+
+def test_windows_physical_metadata_binds_both_family_and_partition_snapshots(
+    tmp_path: Path,
+) -> None:
+    write_metadata = SHARD_MODULE["_write_run_metadata"]
+    path = tmp_path / "metadata.json"
+    write_metadata(path, "gateway-sqlite-2", (), parallel_workers=3)
+    physical = json.loads(path.read_text(encoding="utf-8"))
+    assert physical["shard"] == "gateway-sqlite-2"
+    assert physical["family"] == "gateway-sqlite"
+    assert physical["partition_sha256"] == partition_snapshot_fingerprint()
+    assert physical["assignment_sha256"] == assignment_snapshot_fingerprint()
+    assert physical["execution"]["parallel"]["workers"] == 3
+
+    write_metadata(path, "gateway-sqlite", (), parallel_workers=2)
+    family = json.loads(path.read_text(encoding="utf-8"))
+    assert family["assignment_sha256"] == physical["assignment_sha256"]
+    assert "partition_sha256" not in family
+    assert "family" not in family
 
 
 def test_windows_assignment_snapshot_governs_reviewed_rebalancing() -> None:
@@ -1280,3 +1525,102 @@ def test_windows_shard_runner_splits_parallel_and_serial_tests(tmp_path: Path) -
         "tests/test_serial.py",
     ]
     assert metadata_payload["execution"]["parallel"]["workers"] == 2
+
+
+def test_windows_physical_runner_selects_partition_and_preserves_both_phases(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\nmarkers = ["ci_serial: serial CI contract"]\n',
+        encoding="utf-8",
+    )
+    test_dir = tmp_path / "tests"
+    test_dir.mkdir()
+    selected_path = "tests/test_partition_probe.py"
+    selected_shard = windows_shard_for_test(selected_path)
+    (tmp_path / selected_path).write_text(
+        "import os\nimport pytest\n\n"
+        "def test_parallel():\n"
+        "    assert os.environ.get('PYTEST_XDIST_WORKER', '').startswith('gw')\n\n"
+        "@pytest.mark.ci_serial\n"
+        "def test_serial():\n"
+        "    assert 'PYTEST_XDIST_WORKER' not in os.environ\n",
+        encoding="utf-8-sig",
+    )
+    unselected_path = next(
+        f"tests/test_partition_other_{index}.py"
+        for index in range(100)
+        if windows_shard_for_test(f"tests/test_partition_other_{index}.py") != selected_shard
+    )
+    (tmp_path / unselected_path).write_text(
+        "def test_must_not_execute():\n    assert False, 'another physical partition'\n",
+        encoding="utf-8",
+    )
+    reports = tmp_path / "reports"
+    env = os.environ.copy()
+    for key in (
+        "PYTEST_XDIST_WORKER",
+        "PYTEST_XDIST_WORKER_COUNT",
+        "PYTEST_XDIST_TESTRUNUID",
+        "OPENSQUILLA_PYTEST_XDIST_SCOPE",
+    ):
+        env.pop(key, None)
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SHARD_SCRIPT.resolve()),
+            "run",
+            selected_shard,
+            "--root",
+            str(tmp_path),
+            "--junit",
+            str(reports / "junit.xml"),
+            "--summary",
+            str(reports / "summary.txt"),
+            "--metadata",
+            str(reports / "metadata.json"),
+            "--workers",
+            "1",
+            "--",
+            "-q",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    metadata = json.loads((reports / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["test_files"] == [selected_path]
+    assert metadata["partition_sha256"] == partition_snapshot_fingerprint()
+    assert metadata["family"] == "core"
+    junit = ET.parse(reports / "junit.xml").getroot()
+    assert {test.get("name") for test in junit.iter("testcase")} == {
+        "test_parallel",
+        "test_serial",
+    }
+    assert (reports / "junit.parallel.xml").is_file()
+    assert (reports / "junit.serial.xml").is_file()
+
+
+def test_windows_empty_physical_partition_fails_with_diagnostics(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    junit = tmp_path / "reports" / "junit.xml"
+    summary = tmp_path / "reports" / "summary.txt"
+    metadata = tmp_path / "reports" / "metadata.json"
+    result = SHARD_MODULE["_run"](
+        SimpleNamespace(
+            root=tmp_path,
+            shard="core-1",
+            junit=junit,
+            summary=summary,
+            metadata=metadata,
+            workers=4,
+            pytest_args=[],
+        )
+    )
+    assert result == 2
+    assert ET.parse(junit).getroot().get("errors") == "1"
+    assert "has no tests" in summary.read_text(encoding="utf-8")
+    assert json.loads(metadata.read_text(encoding="utf-8"))["test_files"] == []

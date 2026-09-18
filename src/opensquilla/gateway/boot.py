@@ -1406,7 +1406,7 @@ async def dispatch_task_runtime_turn(
     )
     from opensquilla.sandbox.policy_store import pin_sandbox_policy
 
-    pin_sandbox_policy(tool_context, config)
+    await asyncio.to_thread(pin_sandbox_policy, tool_context, config)
     tool_context.task_id = run.task_id
     run_metadata = getattr(run.envelope, "metadata", {})
     parent_session_key = run_metadata.get("parent_session_key")

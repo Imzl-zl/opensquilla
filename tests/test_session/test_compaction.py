@@ -2376,7 +2376,7 @@ async def test_call_compaction_llm_cancellation_does_not_retain_install_id(
 
 
 @pytest.mark.asyncio
-async def test_call_compaction_llm_redacts_install_id_from_failure_log(monkeypatch) -> None:
+async def test_call_compaction_llm_failure_log_excludes_exception_contents(monkeypatch) -> None:
     install_id = "i7"
     warnings: list[tuple[str, dict]] = []
 
@@ -2424,7 +2424,8 @@ async def test_call_compaction_llm_redacts_install_id_from_failure_log(monkeypat
                 "compaction_id": None,
                 "chunk_index": None,
                 "model": "deepseek-v4-flash",
-                "error": "upstream echoed ***",
+                "error_type": "RuntimeError",
+                "reason_code": "unexpected_error",
             },
         )
     ]

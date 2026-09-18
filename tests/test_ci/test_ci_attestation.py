@@ -607,6 +607,8 @@ def test_validate_candidate_rejects_non_green_or_mismatched_runs(tmp_path: Path)
         ("planner-digest", "planner digest"),
         ("execution-digest", "execution digest"),
         ("platform-matrix", "platform matrix"),
+        ("legacy-windows-matrix", "platform matrix"),
+        ("missing-contract-comparison", "platform matrix"),
     ),
 )
 def test_validate_candidate_rejects_independent_evidence_contract_mismatches(
@@ -642,6 +644,28 @@ def test_validate_candidate_rejects_independent_evidence_contract_mismatches(
     elif mismatch == "platform-matrix":
         assert tampered["platform_matrix"]
         tampered["platform_matrix"] = tampered["platform_matrix"][:-1]
+    elif mismatch == "legacy-windows-matrix":
+        cells = [
+            cell for cell in tampered["platform_matrix"]
+            if cell["suite"] != "windows-high-risk"
+        ]
+        cells.extend(
+            {"suite": "windows-high-risk", "os": "windows-latest", "shard": family}
+            for family in (
+                "core", "gateway-sqlite", "recovery-migration", "desktop-installer-contracts"
+            )
+        )
+        tampered["platform_matrix"] = sorted(
+            cells, key=lambda cell: (cell["suite"], cell["os"], cell["shard"])
+        )
+    elif mismatch == "missing-contract-comparison":
+        tampered["platform_matrix"] = [
+            cell for cell in tampered["platform_matrix"]
+            if not (
+                cell["suite"] == "frontend-validation"
+                and cell["shard"] == "contract-compare"
+            )
+        ]
     else:  # pragma: no cover - the parametrization is exhaustive
         raise AssertionError(f"unknown mismatch: {mismatch}")
 

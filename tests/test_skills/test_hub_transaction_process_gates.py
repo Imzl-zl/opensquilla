@@ -261,6 +261,9 @@ def test_gateway_profile_lease_blocks_offline_process_then_allows_install(
     assert not journal.exists()
 
 
+# The child builds and closes real Gateway services while another process holds
+# the lease. Keep its 30-second bound outside the saturated CI worker pool.
+@pytest.mark.ci_serial
 def test_unleased_build_services_does_not_sweep_another_process_reservation(
     tmp_path: Path,
 ) -> None:

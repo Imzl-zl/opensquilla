@@ -113,15 +113,15 @@ async def test_turn_committed_follows_transcript_and_task_sqlite_commits(
             agent_id="main",
         )
     )
-    real_update_agent_task = storage.update_agent_task
+    real_settle_agent_task = storage.settle_agent_task
 
     async def _gate_success_write(task_id: str, **fields: Any):
         if fields.get("status") == AgentTaskStatus.SUCCEEDED:
             success_write_entered.set()
             await release_success_write.wait()
-        return await real_update_agent_task(task_id, **fields)
+        return await real_settle_agent_task(task_id, **fields)
 
-    storage.update_agent_task = _gate_success_write  # type: ignore[method-assign]
+    storage.settle_agent_task = _gate_success_write  # type: ignore[method-assign]
 
     async def _emit(
         _session_key: str,
@@ -228,7 +228,7 @@ async def test_turn_committed_follows_transcript_and_task_sqlite_commits(
 
 
 @pytest.mark.asyncio
-async def test_double_terminal_write_failure_recovers_running_task_as_abandoned(
+async def test_terminal_write_outage_recovers_running_task_as_abandoned(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "turn-committed-double-write-failure.sqlite"
@@ -248,16 +248,16 @@ async def test_double_terminal_write_failure_recovers_running_task_as_abandoned(
             agent_id="main",
         )
     )
-    real_update_agent_task = storage.update_agent_task
+    real_settle_agent_task = storage.settle_agent_task
 
     async def _fail_terminal_writes(task_id: str, **fields: Any):
         nonlocal terminal_attempts
         if fields.get("status") == AgentTaskStatus.SUCCEEDED:
             terminal_attempts += 1
             raise sqlite3.OperationalError("database is locked")
-        return await real_update_agent_task(task_id, **fields)
+        return await real_settle_agent_task(task_id, **fields)
 
-    storage.update_agent_task = _fail_terminal_writes  # type: ignore[method-assign]
+    storage.settle_agent_task = _fail_terminal_writes  # type: ignore[method-assign]
 
     async def _emit(
         _session_key: str,
@@ -313,10 +313,11 @@ async def test_double_terminal_write_failure_recovers_running_task_as_abandoned(
         )
     finally:
         release_finalizer.set()
-        await runtime.shutdown(cancel=False, timeout=2.0)
+        shutdown_result = await runtime.shutdown(cancel=False, timeout=2.0)
         await storage.close()
 
-    assert terminal_attempts == 2
+    assert terminal_attempts >= 3
+    assert shutdown_result.clean is False
     assert in_memory_task.status == AgentTaskStatus.SUCCEEDED
     assert emitted_events.count("task.succeeded") == 1
     assert emitted_events.count(TURN_COMMITTED_EVENT) == 0

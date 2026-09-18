@@ -102,7 +102,7 @@ def test_required_artifact_downloads_share_a_bounded_hard_gate() -> None:
     }
     assert not guard.get("continue-on-error")
     assert "sleep" not in json.dumps(action)
-    for workflow, count in [("ci.yml", 5), ("windows-nsis-upgrade-regression.yml", 1)]:
+    for workflow, count in [("ci.yml", 7), ("windows-nsis-upgrade-regression.yml", 1)]:
         steps = [s for j in _workflow(workflow)["jobs"].values() for s in j.get("steps", [])]
         downloads = [s for s in steps
                      if s.get("uses") == "./.github/actions/download-required-artifact"]
@@ -143,13 +143,16 @@ def test_required_artifact_final_outcome_cannot_wash_failures_green(
 def test_contract_artifact_retention_matches_frontend_rerun_window() -> None:
     names = {
         "gateway-contract-hashes-linux", "gateway-contract-verification-hashes-linux",
+        "gateway-contract-hashes-windows", "gateway-contract-verification-hashes-windows",
         "opensquilla-webui-dist",
     }
     uploads = [s for j in _workflow("ci.yml")["jobs"].values() for s in j.get("steps", [])
                if s.get("uses") == "actions/upload-artifact@v4"
                and s.get("with", {}).get("name") in names]
-    assert len(uploads) == 3
+    assert len(uploads) == 5
     assert all(s["with"]["retention-days"] >= 31 and not s.get("continue-on-error")
+               for s in uploads)
+    assert all(s["with"]["if-no-files-found"] == "error" and s["with"]["overwrite"]
                for s in uploads)
 
 
@@ -1611,12 +1614,17 @@ def test_default_ci_uses_layered_job_conditions() -> None:
     ]
     assert "'frontend-validation'" in jobs["frontend-check"]["if"]
     assert "'wheel-webui-roundtrip'" in jobs["frontend-check"]["if"]
-    assert jobs["gateway-contract-windows"]["needs"] == [
+    assert jobs["gateway-contract-windows"]["needs"] == ["plan-ci"]
+    assert jobs["gateway-contract-compare"]["needs"] == [
         "plan-ci",
         "frontend-check",
         "gateway-contract-verification-linux",
+        "gateway-contract-windows",
     ]
     assert "'frontend-validation'" in jobs["gateway-contract-windows"]["if"]
+    assert "'frontend-validation'" in jobs["gateway-contract-compare"]["if"]
+    for producer in jobs["gateway-contract-compare"]["needs"]:
+        assert f"needs.{producer}.result == 'success'" in jobs["gateway-contract-compare"]["if"]
     assert "'tui'" in jobs["tui-check"]["if"]
     assert "'desktop-static'" in jobs["desktop-check"]["if"]
     assert "'python-targeted'" in jobs["ubuntu-quality"]["if"]
@@ -1639,6 +1647,7 @@ def test_default_ci_uses_layered_job_conditions() -> None:
     assert "desktop-recovery-e2e" in jobs["ci-result"]["needs"]
     assert "managed-toolchain-artifacts" in jobs["ci-result"]["needs"]
     assert "gateway-contract-windows" in jobs["ci-result"]["needs"]
+    assert "gateway-contract-compare" in jobs["ci-result"]["needs"]
     artifact_e2e = jobs["managed-toolchain-artifacts"]
     assert artifact_e2e["uses"] == "./.github/workflows/managed-toolchain-artifacts.yml"
     assert "'managed-toolchain'" in artifact_e2e["if"]
@@ -1649,6 +1658,8 @@ def test_gateway_contract_hashes_are_compared_between_linux_and_windows() -> Non
     linux_steps = jobs["frontend-check"]["steps"]
     windows = jobs["gateway-contract-windows"]
     windows_steps = windows["steps"]
+    comparison = jobs["gateway-contract-compare"]
+    compare_steps = comparison["steps"]
 
     linux_integration = next(
         step
@@ -1667,12 +1678,12 @@ def test_gateway_contract_hashes_are_compared_between_linux_and_windows() -> Non
     )
     download = next(
         step
-        for step in windows_steps
+        for step in compare_steps
         if step.get("name") == "Download Linux Gateway Contract hash manifest"
     )
     compare = next(
         step
-        for step in windows_steps
+        for step in compare_steps
         if step.get("name") == "Compare Linux and Windows Contract hashes"
     )
 
@@ -1694,8 +1705,44 @@ def test_gateway_contract_hashes_are_compared_between_linux_and_windows() -> Non
     assert "--hash-manifest" in linux_manifest["run"]
     assert upload["with"]["name"] == "gateway-contract-hashes-linux"
     assert download["with"]["name"] == upload["with"]["name"]
-    assert "--hash-manifest" in compare["run"]
-    assert "--compare-hash-manifests" in compare["run"]
+    windows_manifest = next(
+        step for step in windows_steps
+        if step.get("name") == "Write Windows Gateway Contract hash manifest"
+    )
+    assert "--hash-manifest" in windows_manifest["run"]
+    assert "$LASTEXITCODE" in windows_manifest["run"]
+    assert comparison["runs-on"] == "ubuntu-latest"
+    assert comparison["timeout-minutes"] == 5
+    assert compare["shell"] == "bash"
+    assert compare["run"].count("--compare-hash-manifests") == 2
+    manifests = {
+        "gateway-contract-hashes-linux": "gateway-contract-hashes.json",
+        "gateway-contract-hashes-windows": "gateway-contract-hashes-windows.json",
+        "gateway-contract-verification-hashes-linux": "gateway-contract-verification-hashes.json",
+        "gateway-contract-verification-hashes-windows": (
+            "gateway-contract-verification-hashes-windows.json"
+        ),
+    }
+    downloads = {
+        step["with"]["name"]: step["with"]["path"]
+        for step in compare_steps
+        if step.get("uses") == "./.github/actions/download-required-artifact"
+    }
+    assert set(downloads) == set(manifests)
+    uploads = {
+        step["with"]["name"]: step["with"]["path"]
+        for producer in (
+            "frontend-check", "gateway-contract-verification-linux", "gateway-contract-windows"
+        )
+        for step in jobs[producer]["steps"]
+        if step.get("uses") == "actions/upload-artifact@v4"
+    }
+    for artifact, filename in manifests.items():
+        assert uploads[artifact] == "${{ runner.temp }}/" + filename
+        assert downloads[artifact] == "${{ runner.temp }}/" + artifact
+        assert f'"${{RUNNER_TEMP}}/{artifact}/{filename}"' in compare["run"]
+    assert not any("npm ci" in step.get("run", "") or "uv sync" in step.get("run", "")
+                   for step in compare_steps)
 
 
 def test_contract_generation_reuses_two_fresh_parallel_renders_for_production() -> None:
@@ -1738,6 +1785,7 @@ def test_ci_result_gate_covers_every_conditional_job_without_legacy_flags() -> N
         "frontend-check",
         "gateway-contract-verification-linux",
         "gateway-contract-windows",
+        "gateway-contract-compare",
         "webui-chat-recovery",
         "tui-check",
         "desktop-check",
@@ -1760,6 +1808,9 @@ def test_ci_result_gate_covers_every_conditional_job_without_legacy_flags() -> N
     )
     assert gate_step["env"]["RESULT_CONTRACT_WINDOWS"] == (
         "${{ needs.gateway-contract-windows.result }}"
+    )
+    assert gate_step["env"]["RESULT_CONTRACT_COMPARE"] == (
+        "${{ needs.gateway-contract-compare.result }}"
     )
     assert gate_step["env"]["RESULT_UBUNTU_FULL"] == "${{ needs.ubuntu-full.result }}"
     assert gate_step["env"]["RESULT_MACOS_RECOVERY"] == (
@@ -1787,6 +1838,7 @@ def test_ci_result_gate_covers_every_conditional_job_without_legacy_flags() -> N
         "RESULT_FRONTEND",
         "RESULT_CONTRACT_WINDOWS",
         "RESULT_CONTRACT_VERIFICATION_LINUX",
+        "RESULT_CONTRACT_COMPARE",
         "RESULT_TUI",
         "RESULT_DESKTOP",
         "RESULT_UBUNTU",
@@ -2414,7 +2466,7 @@ def test_windows_high_risk_job_runs_parallel_reported_shards() -> None:
     checkout = next(step for step in steps if step.get("name") == "Check out repository")
     assert checkout["with"]["lfs"] is True
     bun_step = next(step for step in steps if step.get("name") == "Set up Bun")
-    assert bun_step["if"] == "${{ matrix.shard == 'core' }}"
+    assert bun_step["if"] == "${{ startsWith(matrix.shard, 'core-') }}"
     assert steps[0]["name"] == "Prepare diagnostic report"
     assert "OPENSQUILLA_STATE_DIR" not in steps[0]["run"]
     assert "PATH" not in steps[0]["run"]
@@ -2423,9 +2475,10 @@ def test_windows_high_risk_job_runs_parallel_reported_shards() -> None:
     assert '"${{ github.event_name }}" == "pull_request"' in test_step["run"]
     assert "--maxfail=3" in test_step["run"]
     assert "--maxfail=1" not in test_step["run"]
-    assert '"${{ matrix.shard }}" == "recovery-migration"' in test_step["run"]
-    assert '"${{ matrix.shard }}" == "gateway-sqlite"' in test_step["run"]
-    assert '"${{ matrix.shard }}" == "desktop-installer-contracts"' in test_step["run"]
+    assert 'family="${shard%-*}"' in test_step["run"]
+    assert '"${family}" == "recovery-migration"' in test_step["run"]
+    assert '"${family}" == "gateway-sqlite"' in test_step["run"]
+    assert '"${family}" == "desktop-installer-contracts"' in test_step["run"]
     assert 'worker_args+=(--workers=3)' in test_step["run"]
     assert "worker_args+=(--workers=2)" in test_step["run"]
     assert '"${worker_args[@]}"' in test_step["run"]
@@ -2479,7 +2532,7 @@ def test_recovery_windows_shard_uses_and_always_cleans_distinct_real_volumes() -
     cleanup_script = cleanup["run"]
 
     assert provision_index < test_index < cleanup_index
-    assert provision["if"] == "${{ matrix.shard == 'recovery-migration' }}"
+    assert provision["if"] == "${{ startsWith(matrix.shard, 'recovery-migration-') }}"
     assert provision["shell"] == "pwsh"
     assert "$env:RUNNER_TEMP" in provision_script
     assert "$volumeB = Join-Path -Path $env:LOCALAPPDATA" in provision_script
@@ -2490,7 +2543,7 @@ def test_recovery_windows_shard_uses_and_always_cleans_distinct_real_volumes() -
     assert "throw \"Windows test volume roots must use different drives\"" in provision_script
     assert "OPENSQUILLA_WINDOWS_TEST_VOLUME_A=$volumeA" in provision_script
     assert "OPENSQUILLA_WINDOWS_TEST_VOLUME_B=$volumeB" in provision_script
-    assert cleanup["if"] == "${{ always() && matrix.shard == 'recovery-migration' }}"
+    assert cleanup["if"] == "${{ always() && startsWith(matrix.shard, 'recovery-migration-') }}"
     assert cleanup["shell"] == "pwsh"
     assert "$env:OPENSQUILLA_WINDOWS_TEST_VOLUME_A" in cleanup_script
     assert "$env:OPENSQUILLA_WINDOWS_TEST_VOLUME_B" in cleanup_script
@@ -3002,8 +3055,9 @@ def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_
             "tests/test_tools/test_shell_runtime_preflight.py",
             "tests/test_sandbox/test_windows_shell_process_runtime.py",
         })
-        assert '"${{ matrix.shard }}" == "desktop-installer-contracts"' in preflight["run"]
-        assert '"${{ matrix.shard }}" == "gateway-sqlite"' in preflight["run"]
+        selector = '"${family}"' if job_name == "windows-full" else '"${{ matrix.shard }}"'
+        assert f'{selector} == "desktop-installer-contracts"' in preflight["run"]
+        assert f'{selector} == "gateway-sqlite"' in preflight["run"]
         assert '"${regression_args[@]}"' in preflight["run"]
         assert "-o faulthandler_timeout=60" in preflight["run"]
     if job_name == "windows-full":
@@ -3011,7 +3065,7 @@ def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_
             "tests/test_ci/test_windows_signatures.py",
             "tests/test_tools/test_shell_process_isolation.py",
         })
-        assert '"${{ matrix.shard }}" == "core"' in preflight["run"]
+        assert '"${family}" == "core"' in preflight["run"]
     assert set(re.findall(r"tests/[a-zA-Z0-9_/.]+\.py", preflight["run"])) == (
         expected_preflight_files
     )
@@ -3019,3 +3073,32 @@ def test_offline_environment_preflight_gates_platform_tests(job_name, test_step_
     assert "-o faulthandler_timeout=60" in main["run"]
     assert "--showlocals" not in preflight["run"]
     assert "--showlocals" not in main["run"]
+
+
+@pytest.mark.parametrize(("family", "expected_file"), [
+    ("core", "tests/test_ci/test_windows_signatures.py"),
+    ("gateway-sqlite", "tests/test_gateway/test_goal_registry_cleanup.py"),
+    ("recovery-migration", "tests/test_sandbox/test_windows_shell_process_runtime.py"),
+    ("desktop-installer-contracts", "tests/test_ci/test_architecture_import_contracts.py"),
+])
+def test_windows_preflight_selects_regressions_for_physical_partitions(family, expected_file):
+    steps = _workflow("ci.yml")["jobs"]["windows-full"]["steps"]
+    preflight = next(step for step in steps if step.get("name") == (
+        "Preflight offline test environment"
+    ))
+    selector = "regression_args=()" + preflight["run"].split("regression_args=()", 1)[1]
+    selector = selector.split("uv run pytest", 1)[0]
+    suites = json.loads(Path(".github/ci/suites.v1.json").read_text(encoding="utf-8"))
+    partitions = [
+        shard for shard in suites["full_python_matrix"]["windows"]
+        if shard.startswith(f"{family}-")
+    ]
+    assert partitions
+    for shard in partitions:
+        script = selector.replace("${{ matrix.shard }}", shard)
+        script += '\nprintf "%s\\n" "${regression_args[@]}"\n'
+        result = subprocess.run(
+            [_bash_executable(), "-c", script],
+            check=True, capture_output=True, text=True, timeout=10,
+        )
+        assert expected_file in result.stdout.splitlines(), shard

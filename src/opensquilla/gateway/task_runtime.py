@@ -82,6 +82,13 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
+_TERMINAL_DETAIL_KEYS = frozenset({
+    "activity_snapshot", "applied_steer_evidence", "cancellation", "turn_outcome",
+    "terminal_assistant_message_content", "terminal_assistant_message_id",
+    "usage_call_index", "no_prior_provider_dispatch", "replay_safe", "retry_after_ms",
+    "subagent_group_outcome", "runtime_partial_failure_disclosure_required",
+})
+
 # ---------------------------------------------------------------------------
 # Core metrics — names are LOCKED. Do not rename without updating
 # README "Observability: Core Metrics" and the corresponding CI grep.
@@ -804,6 +811,8 @@ class _RuntimeTask:
     queue_mode: str
     run_kind: str
     no_memory_capture: bool
+    record_snapshot: AgentTaskRecord | None = field(default=None, repr=False)
+    terminal_details_loaded: bool = False
     input_mode: str = "user"
     persist_input: bool = False
     history_has_persisted_user: bool = True
@@ -1450,6 +1459,9 @@ class TaskRuntime:
         self._closing = False
         self._shutdown_task: asyncio.Task[TaskRuntimeShutdownResult] | None = None
         self._terminal_fallback_records: dict[str, AgentTaskRecord] = {}
+        self._terminal_pending_updates: dict[str, dict[str, Any]] = {}
+        self._terminal_retry_task: asyncio.Task[None] | None = None
+        self._recent_terminal_records: deque[AgentTaskRecord] = deque(maxlen=128)
         self._pending_by_session: dict[str, list[_RuntimeTask]] = {}
         self._running_by_session: dict[str, _RuntimeTask] = {}
         self._reservations_by_session: dict[str, list[TaskReservation]] = {}
@@ -2394,6 +2406,7 @@ class TaskRuntime:
             record.details["accepted_run_mode"] = accepted_run_mode_payload
         runtime_task = _RuntimeTask(
             task_id=record.task_id,
+            record_snapshot=record.model_copy(deep=True),
             envelope=envelope,
             message=message,
             attachments=list(attachments or []),
@@ -3173,6 +3186,14 @@ class TaskRuntime:
             running_task_id=running_task_id,
             queued_task_ids=queued_task_ids,
             cancel_requested_task_ids=cancel_requested_task_ids,
+            terminal_tasks=tuple(
+                record.model_copy(deep=True)
+                for record in (
+                    *self._recent_terminal_records,
+                    *self._terminal_fallback_records.values(),
+                )
+                if record.session_key == key and record.task_id != excluding_task_id
+            ),
         )
 
     @staticmethod
@@ -3969,6 +3990,8 @@ class TaskRuntime:
                 auxiliaries = {
                     task for task in self._auxiliary_tasks_by_session.values()
                 }
+                if self._terminal_retry_task is not None and not self._terminal_retry_task.done():
+                    auxiliaries.add(self._terminal_retry_task)
             if not drivers and reservations == 0 and not auxiliaries:
                 return True
 
@@ -4002,6 +4025,8 @@ class TaskRuntime:
                 len(items) for items in self._reservations_by_session.values()
             )
             auxiliaries = len(self._auxiliary_tasks_by_session)
+            if self._terminal_pending_updates:
+                auxiliaries += 1
         return drivers, reservations, auxiliaries
 
     async def _shutdown_result(
@@ -4010,6 +4035,15 @@ class TaskRuntime:
         abandoned_task_count: int,
     ) -> TaskRuntimeShutdownResult:
         drivers, reservations, auxiliaries = await self._shutdown_counts()
+        retry_task = self._terminal_retry_task
+        if retry_task is not None and not retry_task.done():
+            retry_task.cancel()
+            await asyncio.gather(retry_task, return_exceptions=True)
+        if self._terminal_pending_updates:
+            log.warning(
+                "task_runtime.terminal_persistence_unresolved_at_shutdown",
+                task_count=len(self._terminal_pending_updates),
+            )
         return TaskRuntimeShutdownResult(
             clean=drivers == 0 and reservations == 0 and auxiliaries == 0,
             elapsed_ms=max(0, int((time.monotonic() - started) * 1000)),
@@ -4745,7 +4779,6 @@ class TaskRuntime:
             )
         finally:
             self._user_input_broker.cancel_task(task.task_id)
-            await self._settle_attached_plan_run(task)
             _cleanup_guest_profile(task)
 
     async def _freeze_collaboration_context(self, task: _RuntimeTask) -> None:
@@ -6269,11 +6302,14 @@ class TaskRuntime:
             task.status = AgentTaskStatus.RUNNING
             self._remove_pending(task)
             self._running_by_session[task.envelope.session_key] = task
+        started_at = _epoch_time_ms()
         await self._storage.update_agent_task(
             task.task_id,
             status=AgentTaskStatus.RUNNING,
-            started_at=_epoch_time_ms(),
+            started_at=started_at,
         )
+        if task.record_snapshot is not None:
+            task.record_snapshot.started_at = started_at
         await self._emit(
             task.envelope.session_key,
             "task.running",
@@ -6590,25 +6626,30 @@ class TaskRuntime:
         terminal_persisted = False
         promotion_result: _SteerPromotionResult | None = None
         try:
-            try:
-                await self._storage.update_agent_task(
-                    task.task_id,
-                    **terminal_update,
-                )
-                terminal_persisted = True
-            except Exception as exc:  # noqa: BLE001 - do not strand the UI in running.
-                log.warning(
-                    "task_runtime.terminal_persist_failed",
-                    task_id=task.task_id,
-                    session_key=task.envelope.session_key,
-                    status=status,
-                    error=str(exc),
-                )
-                await self._cache_terminal_fallback_record(
+            if task.terminal_details_loaded:
+                try:
+                    await self._persist_terminal_update(
+                        task.task_id, task.envelope.session_key, terminal_update,
+                    )
+                    terminal_persisted = True
+                except Exception as exc:  # noqa: BLE001 - do not strand the UI in running.
+                    log.warning(
+                        "task_runtime.terminal_persist_failed",
+                        task_id=task.task_id,
+                        session_key=task.envelope.session_key,
+                        status=status,
+                        error=str(exc),
+                    )
+            if not terminal_persisted:
+                self._cache_terminal_fallback_record(
                     task,
                     status=status,
                     terminal_update=terminal_update,
                 )
+            if terminal_persisted:
+                # Settle the plan before observers can admit another turn.
+                # A busy writer must still receive its fallback event first.
+                await self._settle_attached_plan_run(task)
             if terminal_persisted and promote_pending_steers:
                 # The terminal AgentTask row is now durable, but no public
                 # terminal/idle signal has escaped. Close every accepted steer
@@ -6715,8 +6756,8 @@ class TaskRuntime:
                     task.terminal_emitted = True
             finally:
                 if not terminal_persisted:
-                    # The first write already exhausted the storage layer's bounded
-                    # busy budget.  Publish the terminal event before making one
+                    # The first read or write exhausted the storage layer's bounded
+                    # busy budget. Publish the terminal event before making one
                     # more bounded, idempotent update of the same task row so a
                     # lock released by an observer cannot leave startup recovery
                     # looking at RUNNING.  This does not append transcript or usage
@@ -6736,6 +6777,9 @@ class TaskRuntime:
                         no_prior_provider_dispatch=no_prior_provider_dispatch,
                         replay_safe=replay_safe,
                     )
+                    if not terminal_persisted:
+                        self._schedule_terminal_retry(task, terminal_update)
+                    await self._settle_attached_plan_run(task)
             if (
                 status == AgentTaskStatus.SUCCEEDED
                 and terminal_reason == "completed"
@@ -7172,7 +7216,33 @@ class TaskRuntime:
         error_id: str | None = None,
     ) -> dict[str, Any]:
         outcome = _subagent_group_outcome_from_provenance(task.envelope.input_provenance)
-        existing = await self._storage.get_agent_task(task.task_id)
+        from opensquilla.session.storage import bounded_interactive_storage_reads
+
+        # Terminal feedback must remain available while another operation owns
+        # the shared storage gate. The compensation path uses this same bound.
+        existing = task.record_snapshot
+        task.terminal_details_loaded = False
+        loaded_current_details = False
+        try:
+            if callable(getattr(type(self._storage), "settle_agent_task", None)):
+                # The storage API merges our owned fields with the current
+                # details inside its transaction. No pre-write read is needed.
+                latest = existing
+                loaded_current_details = True
+            else:
+                with bounded_interactive_storage_reads():
+                    latest = await self._storage.get_agent_task(task.task_id)
+            if latest is not None:
+                existing = latest
+                task.record_snapshot = latest.model_copy(deep=True)
+                loaded_current_details = True
+        except Exception as exc:  # noqa: BLE001 - preserve in-memory terminal evidence.
+            log.warning(
+                "task_runtime.terminal_details_read_failed",
+                task_id=task.task_id,
+                session_key=task.envelope.session_key,
+                error=str(exc),
+            )
         current_details = getattr(existing, "details", None)
         details = dict(current_details) if isinstance(current_details, dict) else {}
         metadata = dict(details.get("metadata") or {})
@@ -7295,25 +7365,19 @@ class TaskRuntime:
             )
             if disclosure_required is True:
                 details["runtime_partial_failure_disclosure_required"] = True
+        task.terminal_details_loaded = loaded_current_details
         return {"details": details}
 
-    async def _cache_terminal_fallback_record(
+    def _cache_terminal_fallback_record(
         self,
         task: _RuntimeTask,
         *,
         status: AgentTaskStatus,
         terminal_update: dict[str, Any],
     ) -> None:
-        try:
-            existing = await self._storage.get_agent_task(task.task_id)
-        except Exception as exc:  # noqa: BLE001 - fallback must not fail terminalization.
-            log.warning(
-                "task_runtime.terminal_fallback_read_failed",
-                task_id=task.task_id,
-                session_key=task.envelope.session_key,
-                error=str(exc),
-            )
-            existing = None
+        # Do not re-enter the storage gate after a failed terminal write. This
+        # fallback is required before the public event and must be memory-only.
+        existing = task.record_snapshot
         if existing is not None:
             record = existing.model_copy(deep=True)
         else:
@@ -7385,8 +7449,14 @@ class TaskRuntime:
                 session_key=task.envelope.session_key,
                 error=str(exc),
             )
+        if not task.terminal_details_loaded:
+            # An admission snapshot is sufficient for public fallback feedback,
+            # but cannot replace details written by later audit/steer activity.
+            return False
         try:
-            await self._storage.update_agent_task(task.task_id, **terminal_update)
+            await self._persist_terminal_update(
+                task.task_id, task.envelope.session_key, terminal_update,
+            )
         except Exception as exc:  # noqa: BLE001 - the in-memory terminal stays usable.
             log.warning(
                 "task_runtime.terminal_persist_compensation_failed",
@@ -7395,13 +7465,92 @@ class TaskRuntime:
                 error=str(exc),
             )
             return False
-        self._terminal_fallback_records.pop(task.task_id, None)
+        self._remember_compensated_terminal(task.task_id)
         log.info(
             "task_runtime.terminal_persist_compensated",
             task_id=task.task_id,
             session_key=task.envelope.session_key,
         )
         return True
+
+    async def _persist_terminal_update(
+        self, task_id: str, session_key: str, update: dict[str, Any],
+    ) -> None:
+        if not callable(getattr(type(self._storage), "settle_agent_task", None)):
+            await self._storage.update_agent_task(task_id, **update)
+            return
+        details = update.get("details") or {}
+        remove_keys = ["cancellation_requested"]
+        if "applied_steer_evidence" not in details:
+            remove_keys.append("applied_steer_evidence")
+        await self._storage.settle_agent_task(
+            task_id,
+            session_key=session_key,
+            details_patch={
+                key: value for key, value in details.items() if key in _TERMINAL_DETAIL_KEYS
+            },
+            remove_detail_keys=remove_keys,
+            plan_result=(details.get("metadata") or {}).get("plan_result"),
+            **{key: value for key, value in update.items() if key != "details"},
+        )
+
+    def _remember_compensated_terminal(self, task_id: str) -> None:
+        record = self._terminal_fallback_records.pop(task_id, None)
+        if record is not None:
+            # Covers a hydrate that read the old ledger immediately before
+            # compensation committed. Status()/list() still use the fresh DB.
+            self._recent_terminal_records.append(record)
+
+    def _schedule_terminal_retry(self, task: _RuntimeTask, update: dict[str, Any]) -> None:
+        if not callable(getattr(type(self._storage), "settle_agent_task", None)):
+            return
+        self._terminal_pending_updates[task.task_id] = dict(update)
+        if self._terminal_retry_task is None or self._terminal_retry_task.done():
+            self._terminal_retry_task = asyncio.create_task(self._retry_terminal_updates())
+
+    async def _retry_terminal_updates(self) -> None:
+        """Drain terminal writes without holding a session lane or execution slot."""
+        from opensquilla.session.storage import AgentTaskTerminalConflictError
+
+        delay = 0.05
+        attempt = 0
+        try:
+            while self._terminal_pending_updates:
+                await asyncio.sleep(delay)
+                attempt += 1
+                for task_id, update in list(self._terminal_pending_updates.items()):
+                    record = self._terminal_fallback_records.get(task_id)
+                    if record is None:
+                        self._terminal_pending_updates.pop(task_id, None)
+                        continue
+                    try:
+                        await self._persist_terminal_update(task_id, record.session_key, update)
+                    except AgentTaskTerminalConflictError as exc:
+                        # Goal fail-closed compensation may have settled this
+                        # task already. Retire the stale retry and projection.
+                        self._terminal_pending_updates.pop(task_id, None)
+                        self._terminal_fallback_records[task_id] = exc.record
+                        self._remember_compensated_terminal(task_id)
+                        continue
+                    except KeyError:
+                        # Explicit session deletion may remove the task while
+                        # this retry waits. Never recreate deleted runtime data.
+                        self._terminal_pending_updates.pop(task_id, None)
+                        self._terminal_fallback_records.pop(task_id, None)
+                        continue
+                    except Exception as exc:
+                        if attempt & (attempt - 1) == 0:
+                            log.warning(
+                                "task_runtime.terminal_persist_retry_failed",
+                                task_id=task_id, attempt=attempt, error_class=type(exc).__name__,
+                            )
+                        continue
+                    self._terminal_pending_updates.pop(task_id, None)
+                    self._remember_compensated_terminal(task_id)
+                    log.info("task_runtime.terminal_persist_recovered", task_id=task_id)
+                delay = min(2.0, delay * 2)
+        finally:
+            self._signal_driver_state_changed()
 
 
 def _subagent_group_outcome_from_provenance(
