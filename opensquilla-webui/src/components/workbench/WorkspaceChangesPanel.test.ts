@@ -497,6 +497,25 @@ describe('WorkspaceChangesPanel', () => {
     mounted.unmount()
   })
 
+  it('keeps the trailing column to one cluster so actions can replace it', async () => {
+    const mounted = mountPanel(reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [entry({ path: 'src/a.ts', addedLines: 5, removedLines: 2 })],
+      })),
+    }))
+    await settle()
+
+    const row = mounted.element.querySelector('.wb-changes__row')
+    // The counts and the state chip belong to one cluster, and the actions are
+    // theirs to swap with: drawing them over the counts is what left the row
+    // unreadable on hover.
+    const status = row?.querySelector('.wb-changes__row-status')
+    expect(status?.querySelector('.wb-changes__stats')).not.toBeNull()
+    expect(row?.querySelector('.wb-changes__row-actions')).not.toBeNull()
+    expect(status?.querySelector('[data-testid="changes-index-action"]')).toBeNull()
+    mounted.unmount()
+  })
+
   it('offers one icon size for every icon-only control', async () => {
     const mounted = mountPanel(reader())
     await settle()

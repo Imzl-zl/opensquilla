@@ -196,14 +196,18 @@
               <span v-if="pathParts(entry.path).dir" class="wb-changes__path-dir">{{ pathParts(entry.path).dir }}</span>
               <span class="wb-changes__path-base">{{ pathParts(entry.path).base }}</span>
             </span>
-            <span v-if="entryStats(entry)" class="wb-changes__stats">
-              <span class="wb-changes__added">+{{ entry.addedLines }}</span>
-              <span class="wb-changes__removed">-{{ entry.removedLines }}</span>
+            <!-- One cluster for everything the row says about its state, so the
+                 actions can replace it instead of landing on top of it. -->
+            <span class="wb-changes__row-status">
+              <span v-if="entryStats(entry)" class="wb-changes__stats">
+                <span class="wb-changes__added">+{{ entry.addedLines }}</span>
+                <span class="wb-changes__removed">-{{ entry.removedLines }}</span>
+              </span>
+              <span v-if="entry.staged && entry.unstaged" class="wb-changes__both">
+                {{ t('workbench.changes.bothHalves') }}
+              </span>
+              <Icon v-else-if="entry.staged" name="check" :size="12" class="wb-changes__check" />
             </span>
-            <span v-if="entry.staged && entry.unstaged" class="wb-changes__both">
-              {{ t('workbench.changes.bothHalves') }}
-            </span>
-            <Icon v-else-if="entry.staged" name="check" :size="12" class="wb-changes__check" />
           </button>
           <!-- One icon per action, the way a source-control list does it, so a
                row stays a single line however many actions it grows. -->
@@ -1209,9 +1213,10 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 
 .wb-changes__row-action {
   /* An action, not a label: the muted tier is for metadata, so the glyph keeps
-     the normal foreground and only its chip changes on hover. */
+     the normal foreground. No chip by default — the row already swapped its
+     counts out, so a filled box would be a second thing to look at. */
   color: var(--text);
-  background: var(--bg-elevated);
+  background: none;
   border-color: transparent;
 }
 
@@ -1222,6 +1227,7 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 }
 
 .wb-changes__row-action:hover:not(:disabled) {
+  background: var(--bg-surface);
   border-color: var(--border);
 }
 
@@ -1278,11 +1284,28 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   color: var(--text);
 }
 
+/* The trailing column holds one cluster at a time: the line counts and state
+   at rest, the actions once the row is hovered or selected. Swapping (rather
+   than drawing the actions over the counts) is what keeps it readable — the
+   counts are hidden, not showing through the gaps between the icons. */
+.wb-changes__row-status {
+  display: flex;
+  flex: none;
+  gap: 0.375rem;
+  align-items: center;
+  margin-left: auto;
+}
+
+.wb-changes__row:hover .wb-changes__row-status,
+.wb-changes__row:focus-within .wb-changes__row-status,
+.wb-changes__row.is-selected .wb-changes__row-status {
+  visibility: hidden;
+}
+
 .wb-changes__stats {
   display: flex;
   flex: none;
   gap: 0.25rem;
-  margin-left: auto;
   font-family: var(--font-mono);
   font-size: 0.6875rem;
 }
