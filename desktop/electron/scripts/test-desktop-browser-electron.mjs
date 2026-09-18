@@ -333,16 +333,51 @@ try {
   assert.equal((await app.evaluate(async ({}, id) =>
     globalThis.browserFixture.holdReload(id), hiddenState.id)).ready, false)
   const adoptedWhilePending = await app.evaluate(async ({}, id) => {
-    const { manager, releaseReload } = globalThis.browserFixture
+    const { manager, releaseReload, waitForLifecycle } = globalThis.browserFixture
     const record = manager.surfaces.get(id)
+    const contents = record.view.webContents
+    const generation = record.annotationDocumentGeneration
     const result = manager.setSurfaceRect({ surfaceId: id, x: 100, y: 80, width: 650, height: 500, visible: true })
     if (!result.ok) throw new Error(result.message)
     const failure = await releaseReload()
-    const viewport = await record.view.webContents.executeJavaScript('({width:innerWidth,height:innerHeight})')
+    const expected = { width: 650, height: 500 }
+    const assertCurrent = () => {
+      if (manager.surfaces.get(id) !== record || contents.isDestroyed()
+        || record.annotationDocumentGeneration !== generation || !record.browserDocumentReady) {
+        throw new Error('Adopted browser document changed while waiting for its renderer viewport')
+      }
+    }
+    // Native setBounds is synchronous; delivery of that size to the renderer is
+    // not. Keep the existing lifecycle budget and wait for the real viewport,
+    // without emulation or accepting a native-bounds regression as the target.
+    const deadline = Date.now() + 3000
+    let viewport
+    let cancelled = false
+    let pollTimer
+    try {
+      await waitForLifecycle((async () => {
+        while (!cancelled) {
+          assertCurrent()
+          viewport = await contents.executeJavaScript('({width:innerWidth,height:innerHeight})')
+          assertCurrent()
+          if (cancelled || Date.now() >= deadline) throw new Error('Renderer resize deadline expired')
+          if (viewport.width === expected.width && viewport.height === expected.height) return
+          await new Promise(resolve => { pollTimer = setTimeout(resolve, 20) })
+        }
+      })(), 'adopted renderer resize')
+    } catch (error) {
+      throw new Error(`Adopted browser renderer resize failed: ${JSON.stringify({
+        expected, viewport, bounds: record.view.getBounds(), generation,
+      })}`, { cause: error })
+    } finally {
+      cancelled = true
+      clearTimeout(pollTimer)
+    }
     return { failure, ready: record.browserDocumentReady, viewport, bounds: record.view.getBounds() }
   }, hiddenState.id)
   assert.equal(adoptedWhilePending.failure, null)
   assert.equal(adoptedWhilePending.ready, true)
+  assert.deepEqual(adoptedWhilePending.bounds, { x: 100, y: 80, width: 650, height: 500 })
   assert.deepEqual(adoptedWhilePending.viewport, {
     width: adoptedWhilePending.bounds.width, height: adoptedWhilePending.bounds.height,
   })
