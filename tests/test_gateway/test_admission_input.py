@@ -97,14 +97,24 @@ def test_page_context_identity_uses_normalized_user_content():
     assert command.request_fingerprint == request_fingerprint({**params, "pageContext": expected})
 
 
-async def test_changed_large_paste_conflicts_with_existing_receipt_before_projection(tmp_path):
+@pytest.mark.parametrize("change", ["message", "selectedSkills"])
+async def test_changed_input_conflicts_with_existing_receipt_before_projection(tmp_path, change):
     params = {
         "key": "agent:main:synthetic",
         "message": "A" * LARGE_PASTE_CHARS,
         "clientRequestId": "request-synthetic",
     }
+    if change == "selectedSkills":
+        params["selectedSkills"] = [
+            {"name": "synthetic-table", "instanceId": "instance-one", "digest": "digest-one"}
+        ]
     original = decode_admit_turn(params)
-    changed = decode_admit_turn({**params, "message": "B" * LARGE_PASTE_CHARS})
+    changed_fields = {"message": "B" * LARGE_PASTE_CHARS} if change == "message" else {
+        "selectedSkills": [
+            {"name": "synthetic-table", "instanceId": "instance-two", "digest": "digest-two"}
+        ]
+    }
+    changed = decode_admit_turn({**params, **changed_fields})
     acceptance = TurnAcceptanceResult(
         TurnIngressReceipt(
             source_scope=original.source_scope,

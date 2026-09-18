@@ -5,6 +5,7 @@ import type {
   ProposalsSettings,
   RegistryResult,
   Skill,
+  SkillCandidate,
   SkillDiagnostic,
   SkillLifecycle,
   SkillSourceResolution,
@@ -92,6 +93,25 @@ export interface SkillInstallStatus {
 }
 
 export interface SkillCatalog {
+  subscribeInvalidation?(listener: () => void): () => void
+  supportsCandidates(): boolean
+  listCandidates(options?: {
+    readonly sessionKey?: string
+    readonly signal?: AbortSignal
+  }): Promise<{ readonly generation: number; readonly candidates: readonly SkillCandidate[] }>
+  supportsSetEnabled(): boolean
+  setEnabled(request: {
+    readonly name: string
+    readonly enabled: boolean
+    readonly signal?: AbortSignal
+  }): Promise<{
+    readonly name: string
+    readonly enabled: boolean
+    readonly persisted: boolean
+    readonly refreshed: boolean
+    readonly generation?: number
+    readonly message?: string
+  }>
   supportsInstallStatus?(): boolean
   installStatus?(operationId: string, options?: { readonly signal?: AbortSignal }): Promise<SkillInstallStatus>
   list(options?: { readonly signal?: AbortSignal }): Promise<readonly Skill[]>

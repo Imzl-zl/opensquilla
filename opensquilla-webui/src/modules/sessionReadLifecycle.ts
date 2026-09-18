@@ -111,6 +111,7 @@ export interface SessionReadMessage {
   readonly timeline: readonly unknown[]
   readonly attachments: readonly SessionReadJsonObject[]
   readonly promptAnnotations: readonly unknown[]
+  readonly selectedSkills?: import('@/types/selectedSkills').SelectedSkillRef[]
   readonly pageContext?: ChatPageContext
   readonly provenance: SessionReadMessageProvenance
   readonly turnContext: SessionReadTurnContext | null

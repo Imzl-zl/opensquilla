@@ -148,6 +148,7 @@ export interface ChatPendingItem {
   draftIds?: string[]
   /** Upgrade recovery requires the user to select the page again before sending. */
   retiredAnnotationInput?: boolean
+  selectedSkills?: import('./selectedSkills').SelectedSkillRef[]
   pageContext?: import('./pageContext').ChatPageContext
   attachments: Attachment[]
   intent: string | null
@@ -722,6 +723,7 @@ export interface ChatMessage {
   planRevisions?: import('./plans').PlanRevisionSnapshot[]
   timeline?: ChatTimelineSegment[]
   attachments?: DisplayAttachment[]
+  selectedSkills?: import('./selectedSkills').SelectedSkillRef[]
   promptAnnotations?: PromptAnnotationSnapshot[]
   provenanceKind?: string
   provenanceSourceSessionKey?: string
@@ -809,6 +811,7 @@ export interface ChatRenderedMessage {
   id?: string
   clientId?: string
   sourceIndex?: number
+  skillLoads?: import('./skillLoads').SkillLoadReceipt[]
   role: string
   displayRole: string
   roleLabel: string
@@ -835,6 +838,7 @@ export interface ChatRenderedMessage {
   turnOutcome?: ChatTurnOutcome
   hasAttachments?: boolean
   attachments?: DisplayAttachment[]
+  selectedSkills?: import('./selectedSkills').SelectedSkillRef[]
   promptAnnotations?: PromptAnnotationSnapshot[]
   /** Explicit placement for successful sessions_spawn cards. An empty array
    *  suppresses the source card after it is rehomed below the parent reply. */

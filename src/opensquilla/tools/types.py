@@ -309,6 +309,13 @@ class ToolContext:
 
     usage_root_turn_id: str | None = None
 
+    # Authenticated per-turn selection; never inferred from model tool arguments.
+    selected_skills: tuple[dict[str, str], ...] = field(default=(), repr=False)
+    verified_skill_ids: set[str] = field(default_factory=set, repr=False)
+    skill_load_emitter: Callable[[dict[str, Any]], Awaitable[None]] | None = field(
+        default=None, repr=False,
+    )
+
 
 def is_goal_owned_main_default_turn(ctx: ToolContext | None) -> bool:
     """Return whether ``ctx`` carries authority for a top-level Goal turn.

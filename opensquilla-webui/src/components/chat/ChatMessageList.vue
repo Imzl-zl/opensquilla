@@ -128,6 +128,11 @@
           @resume="$emit('resumeSandbox')"
           @retry="forwardSystemRetry"
         />
+        <SkillLoadStatus
+          v-if="messages[entry.index].displayRole !== 'assistant'"
+          standalone
+          :receipts="messages[entry.index]?.skillLoads || []"
+        />
       </div>
     </template>
     <div
@@ -141,6 +146,7 @@
 </template>
 
 <script setup lang="ts">
+import SkillLoadStatus from './SkillLoadStatus.vue'
 import {
   computed,
   nextTick,

@@ -22,6 +22,7 @@ import type { ConversationCursorSignal } from '@/modules/conversationRuntime'
 import { steerUnavailableReason } from '@/utils/chat/steerAvailability'
 import { useChatTaskOwnership, type ChatTaskOwnershipApi } from './useChatTaskOwnership'
 import { useChatPlans } from './useChatPlans'
+import type { SkillLoadReceipt } from '@/types/skillLoads'
 
 function createHarness(options: {
   messages?: ChatMessage[]
@@ -47,6 +48,7 @@ function createHarness(options: {
   withRecoveryFence?: boolean
   taskOwnership?: ChatTaskOwnershipApi
   onLiveToolResult?: (payload: ConversationToolContent) => void
+  onSkillLoad?: (receipt: SkillLoadReceipt, turnId: string) => void
 } = {}) {
   const messages = ref<ChatMessage[]>(options.messages ?? [])
   const sessionKey = ref('agent:main:test')
@@ -138,6 +140,7 @@ function createHarness(options: {
     usageModel: ref(''),
     stream,
     onLiveToolResult: options.onLiveToolResult,
+    onSkillLoad: options.onSkillLoad,
     normalizeRunStatus: (status: string) => status,
     sessionRunStatus: options.sessionRunStatus || (() => ({ status: 'idle', label: 'Idle', task: null })),
     applySessionRunState,
@@ -218,6 +221,47 @@ function createHarness(options: {
     stop: () => { detach(); scope.stop() },
   }
 }
+
+describe('Skill load event delivery', () => {
+  const receipt = {
+    name: 'report', instanceId: 'personal:report', digest: 'synthetic-digest',
+    source: 'user', status: 'loaded', turnId: 'turn-one',
+  }
+  it('buffers actual nested receipts until acceptance and ignores stale task/epoch/replay', () => {
+    const onSkillLoad = vi.fn()
+    const h = createHarness({ onSkillLoad })
+    h.activeStreamTaskId.value = PENDING_STREAM_TASK_ID
+    const payload = { key: h.sessionKey.value, task_id: 'turn-one', turn_id: 'turn-one',
+      epoch: 0, stream_seq: 1, content: receipt }
+    try {
+      h.api.handlers.onWireEventFixture('session.event.skill_load', payload)
+      expect(onSkillLoad).not.toHaveBeenCalled()
+      h.api.bindActiveStreamTask('turn-one')
+      expect(onSkillLoad).toHaveBeenCalledExactlyOnceWith(receipt, 'turn-one')
+      h.api.handlers.onWireEventFixture('session.event.skill_load', payload)
+      h.api.handlers.onWireEventFixture('session.event.skill_load', { ...payload, task_id: 'other', stream_seq: 2 })
+      h.api.handlers.onWireEventFixture('session.event.skill_load', { ...payload, epoch: -1, stream_seq: 3 })
+      expect(onSkillLoad).toHaveBeenCalledTimes(1)
+    } finally { h.stop() }
+  })
+  it.each(['done', 'error'])('keeps receipts in local history when %s ends the stream', terminal => {
+    const h = createHarness({ endStreaming: messages => {
+      if (terminal === 'done') messages.push({ role: 'assistant', text: 'Finished.', ts: null })
+    } })
+    h.activeStreamTaskId.value = 'turn-one'
+    const payload = { key: h.sessionKey.value, task_id: 'turn-one', turn_id: 'turn-one', epoch: 0 }
+    try {
+      const content = { ...receipt, status: terminal === 'done' ? 'loaded' : 'failed' }
+      h.api.handlers.onWireEventFixture('session.event.skill_load', { ...payload, stream_seq: 1, content })
+      h.api.handlers.onWireEventFixture(`session.event.${terminal}`, {
+        ...payload, stream_seq: 2, text: 'Finished.', message: 'Skill unavailable.', code: 'agent_error',
+      })
+      const message = h.messages.value.find(row => row.role === (terminal === 'done' ? 'assistant' : 'error'))
+      expect(message?.tool_calls).toContainEqual({ type: 'skill_load', ...content })
+      expect(h.activeStreamTaskId.value).toBe(FINISHED_STREAM_TASK_ID)
+    } finally { h.stop() }
+  })
+})
 
 describe('live tool result actions', () => {
   it.each(['task.timeout', 'session.event.error'])('settles %s after history restored its authoritative timeout', event => {

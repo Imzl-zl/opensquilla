@@ -3237,6 +3237,15 @@
       "add": "下载"
     },
     "skillDetail": {
+      "allowUse": "允许使用",
+      "allowUseHelp": "此开关适用于所有同名技能，不会安装依赖。",
+      "enable": "允许使用",
+      "disable": "禁止使用",
+      "saving": "保存中…",
+      "enabledSaved": "已允许使用此技能。",
+      "disabledSaved": "已禁止使用此技能。",
+      "refreshPending": "设置已保存，但运行时刷新失败，请重启 Gateway 后使用。",
+      "disabledContent": "已禁止使用；允许使用后可查看技能内容。",
       "dialogLabel": "技能详情：{name}",
       "triggers": "触发条件",
       "composition": "构成（{kind}，{count} 个子技能）",
@@ -3634,6 +3643,94 @@
     }
   },
   "chat": {
+    "skillPalette": {
+      "title": "命令与技能",
+      "command": "命令",
+      "skill": "技能",
+      "meta": "工作流",
+      "empty": "没有匹配的命令或技能",
+      "loading": "正在加载技能…",
+      "autoHint": "滚动浏览或输入名称搜索 · 默认自动匹配技能",
+      "upgrade": "升级 Gateway 后即可为本条消息指定技能。",
+      "loadFailed": "技能加载失败，关闭并重新打开菜单可重试。",
+      "disabled": "已禁用 · 管理",
+      "needsSetup": "需要准备 · 管理",
+      "manualOnly": "仅手动使用",
+      "thisMessage": "本条消息",
+      "remove": "从本条消息移除 {name}",
+      "queuedHint": "本条消息将在当前任务结束后发送。",
+      "limit": "每条消息最多选择 16 个技能。",
+      "metaTextOnly": "此工作流接收文字需求，请将附件和已选技能保留在单独的消息中。",
+      "commandAtStart": "请在消息开头使用此命令。",
+      "usage": "已用量：{tokens} tokens",
+      "usageFailed": "暂时无法读取用量，请重试。",
+      "workflowTitle": "启动 {name}",
+      "workflowRequest": "希望此工作流完成什么？",
+      "loaded": "已加载",
+      "failed": "加载失败",
+      "loadingSkill": "加载中",
+      "user": "用户指定",
+      "auto": "自动选择",
+      "selected": "已选择",
+      "unsupported": "请升级 Gateway 后再发送含已选技能的消息。",
+      "continue": "继续",
+      "commandWithSkills": "已选择的技能仅用于普通消息；请移除技能标签后执行命令。",
+      "commandDescriptions": {
+        "new": "新建聊天",
+        "compact": "压缩当前对话上下文",
+        "goal": "设置持续执行的目标",
+        "meta": "选择工作流",
+        "plan": "规划当前任务",
+        "reset": "重置当前会话",
+        "usage": "查看用量"
+      },
+      "items": {
+        "xlsx": {
+          "name": "Excel 表格",
+          "description": "创建、编辑与分析电子表格"
+        },
+        "docx": {
+          "name": "Word 文档",
+          "description": "创建与编辑文档"
+        },
+        "pptx": {
+          "name": "PowerPoint 演示",
+          "description": "制作与修改幻灯片"
+        },
+        "pdf": {
+          "name": "PDF 工具",
+          "description": "读取、合并与编辑 PDF"
+        },
+        "github": {
+          "name": "GitHub 仓库",
+          "description": "处理问题与代码合并请求"
+        },
+        "html": {
+          "name": "网页制作",
+          "description": "创建与编辑 HTML 页面"
+        },
+        "webpage": {
+          "name": "网站搭建",
+          "description": "从需求生成完整网站"
+        },
+        "kidsProject": {
+          "name": "儿童创意项目",
+          "description": "规划适龄的创意活动"
+        },
+        "shortDrama": {
+          "name": "短剧制作",
+          "description": "从创意到完整视频"
+        },
+        "skillCreator": {
+          "name": "工作流创建",
+          "description": "将多个技能组合为工作流"
+        },
+        "paperWriting": {
+          "name": "论文写作",
+          "description": "研究、撰写与编排论文"
+        }
+      }
+    },
     "sessionCreated": {
       "title": "聊天已创建",
       "open": "打开聊天",
@@ -4269,8 +4366,8 @@
       "disabled": "Coding mode 已关闭。",
       "usage": "使用 /coding 切换，或使用 /coding on、/coding off、/coding status。",
       "updateFailed": "无法更新 Coding mode。",
-      "commandEnable": "开启 Coding mode。",
-      "commandDisable": "关闭 Coding mode。",
+      "commandEnable": "开启编程模式",
+      "commandDisable": "关闭编程模式",
       "activeLabel": "Coding 已开启",
       "disableLabel": "关闭 Coding mode"
     },
