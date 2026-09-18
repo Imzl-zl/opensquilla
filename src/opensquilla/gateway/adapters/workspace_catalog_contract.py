@@ -22,6 +22,7 @@ WORKSPACE_CATALOG_CONTRACT_METHODS: Final = (
     "workspaces.git.stage",
     "workspaces.git.discard",
     "workspaces.git.commit",
+    "workspaces.git.commitMessage.draft",
     "workspaces.git.push",
     "workspaces.git.undoCommit",
     "workspaces.open",

@@ -22,14 +22,14 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
     specs = runner.discover_contracts()
     targets = runner.load_production_targets(specs)
 
-    assert len(targets) == 204
+    assert len(targets) == 205
     assert Counter(role for roles in targets.values() for role in roles) == {
-        "result": 194,
-        "params": 25,
+        "result": 195,
+        "params": 26,
         "payload": 9,
         "frame": 1,
     }
-    assert sum(len(spec.targets) for spec in specs) == 898
+    assert sum(len(spec.targets) for spec in specs) == 902
     assert targets[("method", "sessions.executionLog.read")] == ("params", "result")
     assert targets[("method", "sessions.list")] == ("result",)
     assert targets[("method", "skills.install.status")] == ("result",)
@@ -45,6 +45,10 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
     assert targets[("method", "workspaces.git.stage")] == ("params", "result")
     assert targets[("method", "workspaces.git.discard")] == ("params", "result")
     assert targets[("method", "workspaces.git.commit")] == ("params", "result")
+    assert targets[("method", "workspaces.git.commitMessage.draft")] == (
+        "params",
+        "result",
+    )
     assert targets[("method", "workspaces.git.push")] == ("params", "result")
     assert targets[("method", "workspaces.git.undoCommit")] == ("params", "result")
     assert targets[("method", "transport.flow.update")] == ("params", "result")

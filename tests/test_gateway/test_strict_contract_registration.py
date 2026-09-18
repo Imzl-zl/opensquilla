@@ -68,6 +68,7 @@ EXPECTED_WORKSPACE_METHODS = (
     "workspaces.git.stage",
     "workspaces.git.discard",
     "workspaces.git.commit",
+    "workspaces.git.commitMessage.draft",
     "workspaces.git.push",
     "workspaces.git.undoCommit",
     "workspaces.open",
@@ -223,6 +224,10 @@ _VALID_REGISTRATION_RESULTS: dict[str, dict[str, Any]] = {
     "workspaces.git.commit": {
         "sha": "0" * 40,
         "subject": "synthetic",
+    },
+    "workspaces.git.commitMessage.draft": {
+        "subject": "synthetic",
+        "body": "",
     },
     "workspaces.git.push": {
         "upstream": "origin/main",

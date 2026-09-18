@@ -81,6 +81,7 @@ function reader(overrides: Partial<WorkspaceChangesReader> = {}): WorkspaceChang
       affectedPaths: [...request.paths],
     })),
     discardPaths: vi.fn(async request => [...request.paths]),
+    draftCommitMessage: vi.fn(async () => ({ subject: 'the drafted subject', body: '' })),
     commitIndex: vi.fn(async request => ({
       sha: 'a'.repeat(40),
       subject: request.message.split('\n')[0],
@@ -841,6 +842,127 @@ describe('WorkspaceChangesPanel', () => {
     expect(message?.value).toBe('')
     expect(mounted.element.querySelector('[data-testid="changes-notice"]')?.textContent)
       .toContain('Committed aaaaaaa tighten the thing')
+    mounted.unmount()
+  })
+
+  it('fills the commit field with the drafted message', async () => {
+    const port = reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [entry({ path: 'src/a.ts', changeType: 'added', staged: true, unstaged: false })],
+      })),
+      draftCommitMessage: vi.fn(async () => ({
+        subject: 'Add the retry budget',
+        body: 'Cap the attempts so a stalled host fails fast.',
+      })),
+    })
+    const mounted = mountPanel(port)
+    await settle()
+
+    const draft = mounted.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-draft-message"]',
+    )
+    expect(draft?.disabled).toBe(false)
+    draft?.click()
+    await settle()
+
+    expect(port.draftCommitMessage).toHaveBeenCalledWith({ workspaceId: 'workspace-1' })
+    const message = mounted.element.querySelector<HTMLTextAreaElement>(
+      '[data-testid="changes-commit-message"]',
+    )
+    // A draft is a proposal the operator can edit, and it is committable as-is
+    // because the field keeps the subject and the body apart.
+    expect(message?.value).toBe(
+      'Add the retry budget\n\nCap the attempts so a stalled host fails fast.',
+    )
+    expect(mounted.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-commit"]',
+    )?.disabled).toBe(false)
+    mounted.unmount()
+  })
+
+  it('keeps the draft action unavailable while nothing is staged', async () => {
+    const mounted = mountPanel(reader())
+    await settle()
+
+    const draft = mounted.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-draft-message"]',
+    )
+    expect(draft?.disabled).toBe(true)
+    draft?.click()
+    await settle()
+
+    expect(mounted.element.querySelector('[data-testid="changes-index-error"]')).toBeNull()
+    mounted.unmount()
+  })
+
+  it('reports a failed draft in the existing error slot', async () => {
+    const port = reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [entry({ path: 'src/a.ts', changeType: 'added', staged: true, unstaged: false })],
+      })),
+      draftCommitMessage: vi.fn(async () => {
+        throw new Error('No model and credentials are available for commit message generation.')
+      }),
+    })
+    const mounted = mountPanel(port)
+    await settle()
+
+    mounted.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-draft-message"]',
+    )?.click()
+    await settle()
+
+    const alert = mounted.element.querySelector('[data-testid="changes-index-error"]')
+    expect(alert?.getAttribute('role')).toBe('alert')
+    expect(alert?.textContent).toContain('No model and credentials')
+    // A failed draft leaves the field alone rather than filling it with a gap.
+    expect(mounted.element.querySelector<HTMLTextAreaElement>(
+      '[data-testid="changes-commit-message"]',
+    )?.value).toBe('')
+    mounted.unmount()
+  })
+
+  it('drops a draft whose index moved while the model was writing', async () => {
+    // Drafting writes nothing, so the commit action stays available while the
+    // call is in flight. The answer can therefore arrive for an index a commit
+    // has already replaced, and filling the field with it would offer the
+    // operator a message about work that is already committed.
+    let releaseDraft: (draft: { subject: string; body: string }) => void = () => {}
+    const port = reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [entry({ path: 'src/a.ts', changeType: 'added', staged: true, unstaged: false })],
+      })),
+      draftCommitMessage: vi.fn(() => new Promise<{ subject: string; body: string }>(
+        resolve => { releaseDraft = resolve },
+      )),
+    })
+    const mounted = mountPanel(port)
+    await settle()
+
+    const message = mounted.element.querySelector<HTMLTextAreaElement>(
+      '[data-testid="changes-commit-message"]',
+    )
+    if (message) {
+      message.value = 'the message I typed'
+      message.dispatchEvent(new Event('input'))
+    }
+    await nextTick()
+
+    mounted.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-draft-message"]',
+    )?.click()
+    await settle()
+
+    mounted.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-commit"]',
+    )?.click()
+    await settle()
+    expect(port.commitIndex).toHaveBeenCalled()
+
+    releaseDraft({ subject: 'a message about the previous index', body: '' })
+    await settle()
+
+    expect(message?.value).toBe('')
     mounted.unmount()
   })
 

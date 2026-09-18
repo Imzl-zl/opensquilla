@@ -1355,6 +1355,14 @@
     },
     {
       "kind": "method",
+      "wireName": "workspaces.git.commitMessage.draft",
+      "roles": [
+        "params",
+        "result"
+      ]
+    },
+    {
+      "kind": "method",
       "wireName": "workspaces.git.diff",
       "roles": [
         "result"

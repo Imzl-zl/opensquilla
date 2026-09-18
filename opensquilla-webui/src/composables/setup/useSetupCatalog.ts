@@ -411,6 +411,9 @@ interface ConfigData {
   naming?: {
     enabled?: boolean
   }
+  commit_message?: {
+    instructions?: string | null
+  }
   search_provider?: string
   search_api_key_env?: string
   search_max_results?: number
@@ -2796,6 +2799,10 @@ function setAutoSessionTitles(enabled: boolean) {
   behaviorForm.setAutoSessionTitles(enabled)
 }
 
+function setCommitMessageInstructions(value: string) {
+  behaviorForm.setCommitMessageInstructions(value)
+}
+
 function setDisableNetworkObservability(enabled: boolean) {
   disableNetworkObservability.value = enabled
 }
@@ -4436,6 +4443,7 @@ async function copyConfigPath() {
     saveProvider,
     saveProviderAndActivate,
     saveBehavior,
+    setCommitMessageInstructions,
     savePrivacy,
     saveMemoryAutoCapture,
     saveRouter,

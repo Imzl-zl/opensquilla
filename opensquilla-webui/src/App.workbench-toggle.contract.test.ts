@@ -37,17 +37,36 @@ describe('App workbench dock toggle contract', () => {
   })
 
   it('opens the review surface when the dock is empty, and otherwise toggles it', () => {
-    const start = appSource.indexOf('function toggleWorkbench()')
-    const end = appSource.indexOf('\n}', start)
-    expect(end).toBeGreaterThan(start)
-    const body = appSource.slice(start, end)
+    const predicateStart = appSource.indexOf('function openReviewInEmptyDock()')
+    const toggleStart = appSource.indexOf('function toggleWorkbench()')
+    expect(predicateStart).toBeGreaterThan(-1)
+    expect(toggleStart).toBeGreaterThan(predicateStart)
+    const predicate = appSource.slice(
+      predicateStart,
+      appSource.indexOf('\n}', predicateStart),
+    )
+    const toggle = appSource.slice(toggleStart, appSource.indexOf('\n}', toggleStart))
 
     // An empty dock opens the surface it exists for here rather than a blank
     // area, and an empty dock remains the fallback when there is no project.
-    expect(body).toContain('workbenchStore.items.length === 0')
-    expect(body).toContain('reviewableProject.value')
-    expect(body).toContain('requestWorkspaceChangesOpen(reviewableProject.value)')
-    expect(body).toContain('workbenchStore.setExpanded(!workbenchStore.expanded)')
+    expect(predicate).toContain('workbenchStore.items.length > 0')
+    expect(predicate).toContain('reviewableProject.value')
+    expect(predicate).toContain('requestWorkspaceChangesOpen(project)')
+    expect(toggle).toContain('openReviewInEmptyDock()')
+    expect(toggle).toContain('workbenchStore.setExpanded(!workbenchStore.expanded)')
+  })
+
+  it('reviews a project that arrives after the dock was already opened', () => {
+    // The common order is the opposite of the toggle's: the dock is opened
+    // first, then the task is pointed at a repository. With the rule living
+    // only inside the toggle, that order left an open dock claiming there was
+    // nothing to review while the project sat selected in the composer.
+    const start = appSource.indexOf('watch(reviewableProject,')
+    expect(start).toBeGreaterThan(-1)
+    const body = appSource.slice(start, appSource.indexOf('})', start))
+
+    expect(body).toContain('workbenchStore.expanded')
+    expect(body).toContain('openReviewInEmptyDock()')
   })
 
   it('reviews only the project the current task is on', () => {

@@ -77,16 +77,36 @@
          source-control surface arranges it: state first, then what you say
          about it. -->
     <div v-if="changes?.available" class="wb-changes__commit">
-      <input
+      <!-- A commit message is a subject and an optional body, so the field is
+           a textarea the way every source-control input is; Enter still
+           commits and Shift+Enter starts the body. -->
+      <textarea
+        ref="commitInputRef"
         v-model="commitMessage"
-        type="text"
+        rows="1"
         class="wb-changes__commit-input"
         :placeholder="t('workbench.changes.commitPlaceholder')"
         :aria-label="t('workbench.changes.commitPlaceholder')"
         :disabled="indexBusy || !hasStaged"
         data-testid="changes-commit-message"
-        @keydown.enter.prevent="commitIndex()"
+        @keydown.enter.exact.prevent="commitIndex()"
+      ></textarea>
+      <!-- Where a source-control surface puts "write this for me": in the
+           message row, next to the commit action. -->
+      <button
+        type="button"
+        class="btn btn--icon"
+        :disabled="indexBusy || !hasStaged || draftingMessage"
+        :aria-busy="draftingMessage"
+        :aria-label="t('workbench.changes.draftCommitMessage')"
+        :title="draftingMessage
+          ? t('workbench.changes.draftingCommitMessage')
+          : t('workbench.changes.draftCommitMessage')"
+        data-testid="changes-draft-message"
+        @click="draftCommitMessage()"
       >
+        <Icon name="sparkle" :size="12" />
+      </button>
       <button
         type="button"
         class="btn btn--icon"
@@ -374,7 +394,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, ref, watch } from 'vue'
+import { computed, inject, nextTick, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import { useConfirm } from '@/composables/useConfirm'
@@ -466,6 +486,13 @@ const errorMessage = ref('')
 const indexBusy = ref(false)
 const indexError = ref('')
 const commitMessage = ref('')
+/** Kept apart from `indexBusy`: drafting touches nothing, so it must not
+ * disable the index actions the operator may already be mid-way through. */
+const draftingMessage = ref(false)
+/** Bumped whenever the index a draft describes may have moved, so an answer for
+ * the previous index is dropped instead of filling the field with it. */
+let draftRequestId = 0
+const commitInputRef = ref<HTMLTextAreaElement | null>(null)
 /** One slot for the last write's outcome, so a success is as visible as a
  * failure instead of leaving the list as the only evidence. */
 const notice = ref('')
@@ -716,6 +743,10 @@ async function reload(preserveSelection = false) {
     return
   }
   const token = ++requestToken
+  // The index may be about to change (a commit, a stage, another workspace), so
+  // a draft still in flight describes a state that is going away.
+  draftRequestId += 1
+  draftingMessage.value = false
   loading.value = true
   if (!preserveSelection) {
     selectedKey.value = ''
@@ -860,6 +891,67 @@ const hasStaged = computed(() => Boolean(
 const canCommit = computed(() => (
   hasStaged.value && commitMessage.value.trim().length > 0
 ))
+
+/**
+ * Grow the commit field to the message it holds.
+ *
+ * A commit message is a subject plus an optional body, and a field that shows
+ * one line of it with a scrollbar stub on the rounded edge is not readable.
+ * The height follows the content up to the stylesheet's cap, past which the
+ * field scrolls with the bar hidden.
+ */
+function fitCommitInput() {
+  const input = commitInputRef.value
+  // Zero means the field is not laid out yet (or not measurable), and writing
+  // that back would collapse it.
+  if (!input || input.scrollHeight === 0) return
+  // `scrollHeight` measures the content box while the field is border-box, so
+  // the border has to be added back or the last line is clipped by its width.
+  const style = getComputedStyle(input)
+  const border = (parseFloat(style.borderTopWidth) || 0)
+    + (parseFloat(style.borderBottomWidth) || 0)
+  input.style.height = 'auto'
+  input.style.height = `${input.scrollHeight + border}px`
+}
+
+// Typing, a drafted message, and the clear after a commit all change the
+// content, and the ref watcher covers the field appearing or being replaced.
+watch(commitMessage, () => { void nextTick(fitCommitInput) })
+watch(commitInputRef, () => { void nextTick(fitCommitInput) })
+
+/**
+ * Fill the commit field with a drafted message.
+ *
+ * The draft replaces what is in the field: it is a proposal, and the
+ * operator's next keystroke is the edit. Whether it says anything beyond the
+ * diff comes from the application setting, never from a control here. A
+ * failure goes to the panel's existing error slot rather than a new one.
+ */
+async function draftCommitMessage() {
+  const activeReader = reader
+  if (!activeReader || indexBusy.value || draftingMessage.value || !hasStaged.value) return
+  const requestId = ++draftRequestId
+  draftingMessage.value = true
+  indexError.value = ''
+  notice.value = ''
+  try {
+    const draft = await activeReader.draftCommitMessage({
+      workspaceId: props.workspaceId,
+    })
+    // The model takes as long as it takes, and the index can move while it
+    // writes: a message describing the previous staged patch must not land in
+    // a field whose commit would now mean something else.
+    if (requestId !== draftRequestId) return
+    commitMessage.value = draft.body ? `${draft.subject}\n\n${draft.body}` : draft.subject
+  } catch (error) {
+    if (requestId !== draftRequestId) return
+    indexError.value = error instanceof Error
+      ? error.message
+      : t('workbench.changes.draftCommitMessageFailed')
+  } finally {
+    if (requestId === draftRequestId) draftingMessage.value = false
+  }
+}
 
 async function commitIndex() {
   const activeReader = reader
@@ -1245,7 +1337,11 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
   display: flex;
   flex: none;
   gap: 0.375rem;
-  align-items: center;
+  /* Both actions sit on the bottom edge, the way a composer keeps its send
+     button under the text. On one row they are one cluster: splitting them
+     across the box's top and bottom corners read as two unrelated controls,
+     and centring them left both floating beside a tall message. */
+  align-items: flex-end;
 }
 
 /* Layout only. The field's surface, border, radius and focus treatment come from
@@ -1255,6 +1351,20 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 .wb-changes__commit-input {
   min-width: 0;
   flex: 1;
+  /* Layout only: the height follows the message (see `fitCommitInput`) up to
+     this cap, past which the field scrolls. A hand-drag handle would fight
+     the content-driven height, so the field does not offer one. */
+  max-height: 9rem;
+  resize: none;
+  overflow: auto;
+  /* Overflow still scrolls; only the bar is hidden, the way the workbench tab
+     row hides its own — a 6px thumb inside the rounded field edge reads as a
+     defect rather than a control. */
+  scrollbar-width: none;
+}
+
+.wb-changes__commit-input::-webkit-scrollbar {
+  display: none;
 }
 
 .wb-changes__commit-input:disabled {

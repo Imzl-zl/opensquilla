@@ -1431,6 +1431,12 @@
     },
     {
       "lifecycle": "stable",
+      "name": "workspaces.git.commitMessage.draft",
+      "schema": "workspaces/workspaces-git-commit-message.schema.json",
+      "schemaSha256": "22858bdaa536eb88a0437f4060a2e16fb117e53cc35f2f3a5d762265aeabcc8d"
+    },
+    {
+      "lifecycle": "stable",
       "name": "workspaces.git.diff",
       "schema": "workspaces/workspaces-git-diff.schema.json",
       "schemaSha256": "5e16cbd5cf5bb04f87caedabe5bab612f03e0823bcaef8c504f277771601d724"
@@ -1505,10 +1511,10 @@
   "protocol": "opensquilla-websocket-json",
   "source": {
     "eventFamilyCount": 10,
-    "generatorSha256": "f4761f5abd5f108478814d4576c6676f3d397d4ee54713ab55a5d75865ff24a0",
-    "methodCount": 222,
-    "schemaCount": 232,
-    "schemaTreeSha256": "dcc2da881c9902e8ac8666a74d60b040108e5589c9d9d02bd54c0cf2aa54a966"
+    "generatorSha256": "40315bd91e651be8c05da1c7a96e2912e148817e6da054407f64ff6393c9ebe1",
+    "methodCount": 223,
+    "schemaCount": 233,
+    "schemaTreeSha256": "fbcd75cf845ec3c4f707cce76e217c35a7166aba8fe29583a6331b8f9a3a9a1a"
   },
   "wireVersion": 4
 }

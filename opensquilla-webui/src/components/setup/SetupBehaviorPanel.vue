@@ -7,6 +7,7 @@ const { t } = useI18n()
 interface BehaviorPanelContract {
   autoSessionTitles: boolean
   autoSessionTitlesDirty: boolean
+  commitMessageInstructions: string
   statusText: string
 }
 
@@ -17,6 +18,7 @@ defineProps<{
 
 const emit = defineEmits<{
   updateAutoSessionTitles: [enabled: boolean]
+  updateCommitMessageInstructions: [value: string]
 }>()
 </script>
 
@@ -40,9 +42,38 @@ const emit = defineEmits<{
         />
       </div>
     </label>
+    <!-- The other auto-written text in the app: the commit message the
+         workspace review panel drafts. Its rule is a setting here rather than
+         a field in the panel, so one place owns what a message should say. -->
+    <label class="control-row control-row--stack">
+      <div class="control-row__label-block">
+        <span class="control-row__label">{{ t('setup.behavior.commitMessageRuleLabel') }}</span>
+        <span class="control-row__desc">{{ t('setup.behavior.commitMessageRuleDesc') }}</span>
+      </div>
+      <div class="control-row__control">
+        <textarea
+          class="control-input commit-message-rule"
+          rows="3"
+          data-testid="setup-commit-message-rule"
+          :value="panel.commitMessageInstructions"
+          :placeholder="t('setup.behavior.commitMessageRulePlaceholder')"
+          :aria-label="t('setup.behavior.commitMessageRuleLabel')"
+          @input="emit(
+            'updateCommitMessageInstructions',
+            ($event.target as HTMLTextAreaElement).value,
+          )"
+        ></textarea>
+      </div>
+    </label>
   </section>
 </template>
 
 <style scoped>
 .control-section--embedded { display: contents; }
+
+/* Layout only: the surface and focus treatment come from the shared field
+   rules, so this matches every other field in the app. */
+.commit-message-rule {
+  resize: vertical;
+}
 </style>

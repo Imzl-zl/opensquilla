@@ -194,6 +194,32 @@ describe('createV4WorkspaceChanges', () => {
     })).rejects.toThrow('workspaces.git.stage returned an invalid response')
   })
 
+  it('sends a draft request and returns the validated draft', async () => {
+    const { request } = transport({ subject: 'Add the retry budget', body: 'Why it changed.' })
+    const changes = createV4WorkspaceChanges({ request })
+
+    await expect(changes.draftCommitMessage({ workspaceId: 'workspace-1' })).resolves.toEqual({
+      subject: 'Add the retry budget',
+      body: 'Why it changed.',
+    })
+
+    // Only the workspace is sent: the rule that shapes the message is an
+    // application setting, not a field this panel owns.
+    expect(request).toHaveBeenCalledWith(
+      'workspaces.git.commitMessage.draft',
+      { workspaceId: 'workspace-1' },
+      undefined,
+    )
+  })
+
+  it('rejects a draft that is missing its body field', async () => {
+    const { request } = transport({ subject: 'Add the retry budget' })
+    const changes = createV4WorkspaceChanges({ request })
+
+    await expect(changes.draftCommitMessage({ workspaceId: 'workspace-1' }))
+      .rejects.toThrow('workspaces.git.commitMessage.draft returned an invalid response')
+  })
+
   it('forwards the abort signal as a rejecting call option', async () => {
     const { request } = transport(statusResult())
     const changes = createV4WorkspaceChanges({ request })

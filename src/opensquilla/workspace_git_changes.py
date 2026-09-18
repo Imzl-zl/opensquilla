@@ -882,6 +882,70 @@ def read_workspace_diff(
     )
 
 
+def read_staged_index_diff(
+    workspace_path: str,
+    *,
+    timeout: float = DIFF_TIMEOUT_SECONDS,
+    max_bytes: int = DEFAULT_MAX_DIFF_BYTES,
+    environment: Mapping[str, str] | None = None,
+) -> WorkspaceDiff:
+    """Return the whole staged patch, refusing an empty index.
+
+    ``commit_index`` refuses to commit an empty index; this read refuses to
+    describe one, because a message generated for an empty patch would be
+    about nothing. The two share the same precondition code so a caller sees
+    one reason, not two.
+
+    Unlike a per-file read, the result names no path: it covers whatever the
+    index holds, which is exactly what a commit message has to describe.
+    """
+
+    # Hardened like every other read on this surface: the emptiness probe is
+    # still a read of a repository whose own configuration is untrusted, and
+    # an unhardened `git diff` runs a repo-configured helper (``core.fsmonitor``)
+    # and may write the index back. The write path deliberately skips this; a
+    # read must not inherit that exemption.
+    staged = run_git(
+        harden_read_only_git_args(("diff", "--cached", "--quiet")),
+        cwd=workspace_path,
+        timeout=timeout,
+        environment=environment,
+    )
+    if staged.state is GitRunState.OK:
+        raise WorkspaceGitPreconditionError(
+            "nothing_staged",
+            "Nothing is staged, so there is nothing to describe.",
+        )
+    if staged.returncode != 1:
+        raise WorkspaceGitUnavailableError(
+            _write_availability_reason(staged),
+            result=staged,
+        )
+    result = run_git(
+        harden_read_only_git_args(
+            ("diff", "--cached", "--no-color", "--unified=3")
+        ),
+        cwd=workspace_path,
+        timeout=timeout,
+        environment=environment,
+    )
+    if result.state is not GitRunState.OK:
+        raise WorkspaceGitUnavailableError(
+            _write_availability_reason(result),
+            result=result,
+        )
+    text = result.stdout_text
+    binary = _BINARY_DIFF_RE.search(text) is not None
+    truncated = len(text) > max_bytes
+    return WorkspaceDiff(
+        path="",
+        staged=True,
+        text=text[:max_bytes] if truncated else text,
+        truncated=truncated,
+        binary=binary,
+    )
+
+
 __all__ = [
     "AvailabilityReason",
     "ChangeType",
@@ -899,6 +963,7 @@ __all__ = [
     "normalize_repo_path",
     "parse_numstat",
     "parse_porcelain_status",
+    "read_staged_index_diff",
     "read_workspace_changes",
     "read_workspace_diff",
     "stage_paths",

@@ -813,6 +813,13 @@ const workbenchToggleTitle = computed(() => {
   return workbenchToggleHint.value ? `${label} (${workbenchToggleHint.value})` : label
 })
 
+// Declared here rather than beside the chat layout that also reads it: anything
+// that watches this value reads it once while the watcher is created, so it has
+// to exist before its first consumer, not merely before the first change.
+const activeProjectDraftId = computed(() =>
+  $route.path === '/chat/new' ? String($route.query.project || '') : '',
+)
+
 /**
  * The project the dock should review when it has nothing open yet.
  *
@@ -829,20 +836,39 @@ const reviewableProject = computed(() => {
   return { workspaceId: workspace.id, workspaceName: workspace.name }
 })
 
+/**
+ * Open the task's project review in a dock that holds nothing, and report
+ * whether it did.
+ *
+ * The rule is the dock's promise — it reviews the project the task is on — and
+ * it has two entry points: the operator opening an empty dock, and the task's
+ * project being chosen while the dock is already open. Living in one predicate
+ * is what keeps those two from disagreeing; when it lived inside the toggle
+ * alone, opening the dock before choosing a project left it claiming there was
+ * nothing to review, with the project selected in the composer beside it.
+ */
+function openReviewInEmptyDock(): boolean {
+  if (workbenchStore.items.length > 0) return false
+  const project = reviewableProject.value
+  if (!project) return false
+  requestWorkspaceChangesOpen(project)
+  return true
+}
+
 function toggleWorkbench() {
   // Opening an empty dock opens the surface the dock exists for here — the
   // current project's changes — instead of showing a blank area. The empty
   // state is only what you get when there is no project to review.
-  if (
-    !workbenchStore.expanded
-    && workbenchStore.items.length === 0
-    && reviewableProject.value
-  ) {
-    requestWorkspaceChangesOpen(reviewableProject.value)
-    return
-  }
+  if (!workbenchStore.expanded && openReviewInEmptyDock()) return
   workbenchStore.setExpanded(!workbenchStore.expanded)
 }
+
+// The same rule for a project that arrives second, which is the common order:
+// the dock is open first, then the task is pointed at a repository.
+watch(reviewableProject, () => {
+  if (!workbenchStore.expanded) return
+  openReviewInEmptyDock()
+})
 
 const themeIconName = computed(() => {
   if (appStore.theme === 'system') return 'monitor'
@@ -930,9 +956,6 @@ const systemHeaderLayout = useSystemHeaderLayout({
   active: isChatRoute,
   pressureCount: systemHeaderPressureCount,
 })
-const activeProjectDraftId = computed(() =>
-  $route.path === '/chat/new' ? String($route.query.project || '') : '',
-)
 const activeProjectDraftKey = computed(() => {
   const workspaceId = activeProjectDraftId.value
   if (!workspaceId) return ''

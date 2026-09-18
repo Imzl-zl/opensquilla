@@ -98,6 +98,16 @@ export interface WorkspacePush {
   readonly output: string
 }
 
+/**
+ * A drafted commit message, split the way Git reads it. It is a proposal for
+ * the operator to edit: nothing is committed by drafting one.
+ */
+export interface WorkspaceCommitMessageDraft {
+  readonly subject: string
+  /** Empty when the model returned a subject alone. */
+  readonly body: string
+}
+
 export interface WorkspaceChangesReader {
   readChanges(
     workspaceId: string,
@@ -116,6 +126,15 @@ export interface WorkspaceChangesReader {
     request: WorkspacePathListRequest,
     options?: { signal?: AbortSignal },
   ): Promise<readonly string[]>
+  /**
+   * Drafts a commit message from the staged index. Read-only on the repository:
+   * the result is text, and what the message should say beyond the diff comes
+   * from the application setting rather than from a field in this panel.
+   */
+  draftCommitMessage(
+    request: { workspaceId: string },
+    options?: { signal?: AbortSignal },
+  ): Promise<WorkspaceCommitMessageDraft>
   /** Commits the index. Nothing is staged implicitly. */
   commitIndex(
     request: { workspaceId: string; message: string },

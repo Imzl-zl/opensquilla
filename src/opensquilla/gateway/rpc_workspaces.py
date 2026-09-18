@@ -32,6 +32,10 @@ from opensquilla.project_workspaces import (
 )
 from opensquilla.session.models import ProjectWorkspace
 from opensquilla.session.storage import ProjectSessionSnapshotMismatchError
+from opensquilla.workspace_commit_message import (
+    WorkspaceCommitMessageError,
+    draft_workspace_commit_message,
+)
 from opensquilla.workspace_git_changes import (
     WorkspaceGitPreconditionError,
     WorkspaceGitUnavailableError,
@@ -41,6 +45,7 @@ from opensquilla.workspace_git_changes import (
     is_untracked_path,
     normalize_repo_path,
     push_current_branch,
+    read_staged_index_diff,
     read_workspace_changes,
     read_workspace_diff,
     stage_paths,
@@ -550,6 +555,49 @@ async def _handle_workspaces_git_commit(
     return {"sha": sha, "subject": subject}
 
 
+async def _handle_workspaces_git_commit_message_draft(
+    params: dict | None,
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    """Draft a commit message for the staged index.
+
+    Declared ``operator.read`` because it is a read of the workspace plus a
+    text answer: it changes no file, stages nothing, and commits nothing. The
+    patch it describes comes from the trusted canonical workspace path, never
+    from the request, and the model is the already-connected one.
+    """
+
+    _require_owner(ctx)
+    workspace_id = _workspace_id(_params(params))
+    workspace_path = await _git_workspace_path(ctx, workspace_id)
+    # Mapped here rather than through `_run_git_write`: that helper reports a
+    # refused Git process as GIT_FAILED, which is the right code for a write that
+    # did not happen and is not declared for this read.
+    try:
+        staged = await asyncio.to_thread(read_staged_index_diff, workspace_path)
+    except WorkspaceGitPreconditionError as exc:
+        raise RpcHandlerError(_PRECONDITION_ERROR_CODES[exc.code], exc.message) from exc
+    except WorkspaceGitUnavailableError as exc:
+        raise RpcHandlerError(
+            "UNAVAILABLE",
+            f"Git is unavailable for this workspace ({exc.reason}).",
+        ) from exc
+    try:
+        # `truncated` travels with the patch: a description of a patch the
+        # transport already cut must not present its file list as complete.
+        draft = await draft_workspace_commit_message(
+            ctx,
+            staged.text,
+            diff_truncated=staged.truncated,
+        )
+    except WorkspaceCommitMessageError as exc:
+        # A failed draft is its own outcome: the workspace is present and Git
+        # answered, so reporting UNAVAILABLE would send the operator looking
+        # for a problem that is not there.
+        raise RpcHandlerError("COMMIT_MESSAGE_FAILED", exc.message) from exc
+    return {"subject": draft.subject, "body": draft.body}
+
+
 async def _handle_workspaces_git_push(
     params: dict | None,
     ctx: RpcContext,
@@ -604,6 +652,7 @@ _WORKSPACE_CATALOG_CONTRACT_IMPLEMENTATIONS = {
     "workspaces.git.stage": _handle_workspaces_git_stage,
     "workspaces.git.discard": _handle_workspaces_git_discard,
     "workspaces.git.commit": _handle_workspaces_git_commit,
+    "workspaces.git.commitMessage.draft": _handle_workspaces_git_commit_message_draft,
     "workspaces.git.push": _handle_workspaces_git_push,
     "workspaces.git.undoCommit": _handle_workspaces_git_undo_commit,
     "workspaces.open": _handle_workspaces_open,

@@ -40,6 +40,15 @@ import {
   validateWorkspacesGitCommitResult,
 } from '@/contracts/generated/v4/workspacesGitCommitValidators.mjs'
 import {
+  WORKSPACES_GIT_COMMIT_MESSAGE_DRAFT_METHOD,
+  type WorkspacesGitCommitMessageDraftParams,
+  type WorkspacesGitCommitMessageDraftResult,
+} from '@/contracts/generated/v4/workspacesGitCommitMessage'
+import {
+  validateWorkspacesGitCommitMessageDraftParams,
+  validateWorkspacesGitCommitMessageDraftResult,
+} from '@/contracts/generated/v4/workspacesGitCommitMessageValidators.mjs'
+import {
   WORKSPACES_GIT_PUSH_METHOD,
   type WorkspacesGitPushParams,
   type WorkspacesGitPushResult,
@@ -61,6 +70,7 @@ import type {
   WorkspaceChanges,
   WorkspaceChangesReader,
   WorkspaceCommit,
+  WorkspaceCommitMessageDraft,
   WorkspaceIndexChange,
   WorkspacePush,
 } from '@/modules/workspaceChanges'
@@ -192,6 +202,24 @@ export function createV4WorkspaceChanges(
         WORKSPACES_GIT_DISCARD_METHOD,
       )
       return result.discardedPaths
+    },
+
+    async draftCommitMessage(request, options): Promise<WorkspaceCommitMessageDraft> {
+      const params = requireParams<WorkspacesGitCommitMessageDraftParams>(
+        { workspaceId: request.workspaceId },
+        validateWorkspacesGitCommitMessageDraftParams,
+        WORKSPACES_GIT_COMMIT_MESSAGE_DRAFT_METHOD,
+      )
+      const result = requireResult<WorkspacesGitCommitMessageDraftResult>(
+        await transport.request(
+          WORKSPACES_GIT_COMMIT_MESSAGE_DRAFT_METHOD,
+          params as unknown as Record<string, unknown>,
+          optionsFor(options?.signal),
+        ),
+        validateWorkspacesGitCommitMessageDraftResult,
+        WORKSPACES_GIT_COMMIT_MESSAGE_DRAFT_METHOD,
+      )
+      return { subject: result.subject, body: result.body }
     },
 
     async commitIndex(request, options): Promise<WorkspaceCommit> {

@@ -47,6 +47,7 @@ RESPONSE_VALIDATED_METHODS = (
     "workspaces.git.stage",
     "workspaces.git.discard",
     "workspaces.git.commit",
+    "workspaces.git.commitMessage.draft",
     "workspaces.git.push",
     "workspaces.git.undoCommit",
     "workspaces.open",
@@ -105,6 +106,15 @@ EXPECTED_ACCURATE_ERROR_CODES = {
         "INVALID_PARAMS",
         "NOTHING_STAGED",
         "GIT_FAILED",
+        "UNAVAILABLE",
+        "INTERNAL_ERROR",
+    ),
+    "workspaces.git.commitMessage.draft": (
+        "OWNER_REQUIRED",
+        "WORKSPACE_NOT_FOUND",
+        "INVALID_PARAMS",
+        "NOTHING_STAGED",
+        "COMMIT_MESSAGE_FAILED",
         "UNAVAILABLE",
         "INTERNAL_ERROR",
     ),
@@ -286,9 +296,9 @@ def _specs_by_wire_name():
 def test_contract_inventory_freezes_all_webui_reachable_wire_names() -> None:
     specs = discover_contracts()
 
-    assert len(specs) == 232
+    assert len(specs) == 233
     assert Counter(spec.contract_type for spec in specs) == {
-        "method": 222,
+        "method": 223,
         "event": 10,
     }
     assert EXPECTED_METHOD_METADATA.keys() <= {spec.wire_name for spec in specs}
@@ -304,6 +314,7 @@ def test_contract_inventory_freezes_all_webui_reachable_wire_names() -> None:
         "workspaces.git.stage",
         "workspaces.git.discard",
         "workspaces.git.commit",
+        "workspaces.git.commitMessage.draft",
         "workspaces.git.push",
         "workspaces.git.undoCommit",
     } <= {spec.wire_name for spec in specs}
@@ -323,6 +334,21 @@ def test_remaining_method_metadata_matches_existing_gateway_policy() -> None:
             "kind": "method-availability",
             "name": wire_name,
         }
+
+
+def test_commit_message_draft_takes_only_the_workspace_it_acts_on() -> None:
+    """The draft declares no per-call rule, and the removal is the point.
+
+    A rule for one draft was specified, implemented and never called: the rule
+    is an application setting (`commit_message.instructions`, patchable through
+    `config.patch.safe`), and an unused optional parameter is surface the wire
+    does not need. Re-adding it later is an additive change; keeping it now is
+    a promise with no caller.
+    """
+
+    params = GATEWAY_METHOD_CONTRACTS["workspaces.git.commitMessage.draft"].params_model
+
+    assert set(params.model_fields) == {"workspaceId"}
 
 
 def test_response_validated_handler_contracts_declare_fail_closed_error() -> None:
