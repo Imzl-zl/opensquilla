@@ -13022,17 +13022,22 @@ class TurnRunner:
             estimate_entry_model_replay_tokens,
         )
 
-        total_tokens = checkpoint_tokens + sum(
-            estimate_entry_model_replay_tokens(e) for e in transcript
-        )
-        total_chars = checkpoint_chars + estimate_entries_model_replay_chars(transcript)
         durable_prefix_end = len(transcript) - protected_suffix_count
-        durable_history_tokens = checkpoint_tokens + sum(
-            estimate_entry_model_replay_tokens(entry) for entry in transcript[:durable_prefix_end]
-        )
-        durable_history_chars = checkpoint_chars + estimate_entries_model_replay_chars(
-            transcript[:durable_prefix_end]
-        )
+
+        def measure_replay() -> tuple[list[int], int, int]:
+            return (
+                [estimate_entry_model_replay_tokens(entry) for entry in transcript],
+                estimate_entries_model_replay_chars(transcript),
+                estimate_entries_model_replay_chars(transcript[:durable_prefix_end]),
+            )
+
+        # Long histories must not block unrelated SQLite completions on the
+        # event loop. Reuse one measurement for the full and protected prefix.
+        entry_tokens, replay_chars, prefix_chars = await asyncio.to_thread(measure_replay)
+        total_tokens = checkpoint_tokens + sum(entry_tokens)
+        total_chars = checkpoint_chars + replay_chars
+        durable_history_tokens = checkpoint_tokens + sum(entry_tokens[:durable_prefix_end])
+        durable_history_chars = checkpoint_chars + prefix_chars
         ratio = self._preflight_compact_ratio()
         threshold = int(history_window_tokens * ratio)
         char_threshold = (
@@ -13074,12 +13079,14 @@ class TurnRunner:
             bound_user_message_id=bound_user_message_id,
         )
         protected_request_tokens = (
-            estimate_entry_model_replay_tokens(transcript[active_user_index])
+            entry_tokens[active_user_index]
             if active_user_index is not None
             else 0
         )
         protected_request_chars = (
-            estimate_entry_model_replay_chars(transcript[active_user_index])
+            await asyncio.to_thread(
+                estimate_entry_model_replay_chars, transcript[active_user_index],
+            )
             if active_user_index is not None
             else 0
         )

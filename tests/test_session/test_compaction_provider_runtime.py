@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from opensquilla import token_estimation
 from opensquilla.engine.usage_accounting import (
+    UsageAccountingBusyError,
     UsageAccountingScope,
+    UsageAccountingUnavailableError,
     UsageExecutionContext,
     bind_usage_accounting_scope,
 )
+from opensquilla.observability.log_privacy import log_metadata
 from opensquilla.provider.failures import ProviderFailureKind
 from opensquilla.provider.protocol import ProviderConnectionConfig, ProviderMetadata
 from opensquilla.provider.selector import ProviderConfig, build_provider_from_config
@@ -1386,3 +1391,180 @@ async def test_suffix_declines_broken_final_projection_without_sending(
     )
     assert result is None
     assert provider.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('events', 'reason_code'), [
+    ([DoneEvent()], 'empty_summary'),
+    ([TextDeltaEvent(text='partial'), DoneEvent(stop_reason='length')], 'incomplete_summary'),
+    ([TextDeltaEvent(text='partial')], 'missing_completion_event'),
+    ([ToolUseStartEvent(tool_use_id='call-1', tool_name='lookup')], 'unexpected_tool_call'),
+    ([TextDeltaEvent(text='large body ' * 200)], 'summary_body_exceeds_budget'),
+    ([TextDeltaEvent(text='short'), DoneEvent(output_tokens=17)], 'generation_exceeds_budget'),
+    ([ReasoningDeltaEvent(text='long reasoning ' * 200)], 'generation_exceeds_budget'),
+])
+async def test_summary_rejections_log_content_free_reason_codes(
+    events: list[Any], reason_code: str,
+) -> None:
+    provider = _Provider(lambda: _Stream(events))
+    plan = CompactionExecutionPlan(candidates=(CompactionExecutionTarget(
+        provider=provider, provider_id='openrouter', model='provider/model',
+        max_output_tokens=16,
+    ),))
+
+    with capture_logs() as logs:
+        result = await call_compaction_provider('private source material', '', plan)
+
+    assert result is None
+    failure, = [entry for entry in logs if entry['event'] == 'compaction.llm_call_failed']
+    assert failure['reason_code'] == reason_code
+    assert failure['error_type'] == '_CompactionProviderError'
+    assert 'error' not in failure
+    assert 'private source material' not in repr(logs)
+    assert log_metadata(failure)['reason_code'] == reason_code
+    assert provider.streams[0].closed
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_classification_survives_private_logging() -> None:
+    private_detail = 'private provider prose with a synthetic secret'
+    provider = _Provider(lambda: _Stream([
+        ErrorEvent(code='400', message=f'MODEL_NOT_AVAILABLE: {private_detail}'),
+    ]))
+    plan = CompactionExecutionPlan(candidates=(CompactionExecutionTarget(
+        provider=provider, provider_id='tokenrhythm', model='provider/model',
+    ),))
+
+    with capture_logs() as logs:
+        result = await call_compaction_provider('private source material', '', plan)
+
+    assert result is None
+    failure, = [entry for entry in logs if entry['event'] == 'compaction.llm_call_failed']
+    assert failure['reason_code'] == 'provider_error'
+    assert failure['failure_kind'] == 'model_not_found'
+    assert failure['status_code'] == 400
+    projected = log_metadata(failure)
+    assert projected['failure_kind'] == 'model_not_found'
+    assert projected['status_code'] == 400
+    assert private_detail not in repr(logs)
+    assert 'MODEL_NOT_AVAILABLE' not in repr(logs)
+    assert 'error' not in failure
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(('error_class', 'reason_code'), [
+    (UsageAccountingBusyError, 'usage_accounting_busy'),
+    (UsageAccountingUnavailableError, 'usage_accounting_unavailable'),
+])
+async def test_compaction_ledger_rejection_is_distinct_from_provider_failure(
+    error_class: type[UsageAccountingUnavailableError], reason_code: str,
+) -> None:
+    class RejectingSink(_Sink):
+        async def start(self, call: Any) -> None:
+            raise error_class('private ledger diagnostic')
+
+    provider = _Provider(_successful_stream)
+    plan = CompactionExecutionPlan(candidates=(CompactionExecutionTarget(
+        provider=provider, provider_id='openrouter', model='provider/model',
+    ),))
+    with capture_logs() as logs, bind_usage_accounting_scope(_usage_scope(RejectingSink())):
+        result = await call_compaction_provider('private source material', '', plan)
+
+    assert result is None
+    assert not provider.calls
+    failure, = [entry for entry in logs if entry['event'] == 'compaction.llm_call_failed']
+    assert failure['reason_code'] == reason_code
+    assert failure['error_type'] == error_class.__name__
+    assert 'failure_kind' not in failure
+    assert 'private ledger diagnostic' not in repr(logs)
+    assert log_metadata(failure)['reason_code'] == reason_code
+
+
+@pytest.mark.asyncio
+async def test_compaction_timeout_logs_a_distinct_reason() -> None:
+    provider = _Provider(_BlockingStream)
+    plan = CompactionExecutionPlan(candidates=(CompactionExecutionTarget(
+        provider=provider, provider_id='openrouter', model='provider/model',
+    ),))
+    with capture_logs() as logs:
+        result = await call_compaction_provider('private source material', '', plan, timeout=0.01)
+
+    assert result is None
+    failure, = [entry for entry in logs if entry['event'] == 'compaction.llm_call_failed']
+    assert failure['reason_code'] == 'request_timeout'
+    assert failure['error_type'] == 'TimeoutError'
+    assert provider.streams[0].closed
+
+
+@pytest.mark.asyncio
+async def test_slow_request_budget_keeps_loop_responsive_and_dispatch_on_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensquilla.session import compaction
+
+    loop = asyncio.get_running_loop()
+    event_loop_thread = threading.get_ident()
+    budget_started = asyncio.Event()
+    release_budget = threading.Event()
+    original_budget = compaction._compaction_generation_budget
+    dispatch_threads: list[int] = []
+
+    def slow_budget(*args: Any) -> int:
+        loop.call_soon_threadsafe(budget_started.set)
+        assert release_budget.wait(timeout=2), 'request budget blocked the event loop'
+        return original_budget(*args)
+
+    class LoopProvider(_Provider):
+        def chat(self, messages, tools=None, config=None):
+            dispatch_threads.append(threading.get_ident())
+            return super().chat(messages, tools=tools, config=config)
+
+    class LoopSink(_Sink):
+        async def start(self, call: Any) -> None:
+            dispatch_threads.append(threading.get_ident())
+            await super().start(call)
+
+    monkeypatch.setattr(compaction, '_compaction_generation_budget', slow_budget)
+    provider = LoopProvider(_successful_stream)
+    plan = CompactionExecutionPlan(candidates=(CompactionExecutionTarget(
+        provider=provider, provider_id='openrouter', model='provider/model',
+    ),))
+    with bind_usage_accounting_scope(_usage_scope(LoopSink())):
+        task = asyncio.create_task(call_compaction_provider('source material', '', plan))
+        try:
+            await asyncio.wait_for(budget_started.wait(), timeout=1)
+            assert not task.done()
+        finally:
+            release_budget.set()
+        result = await asyncio.wait_for(task, timeout=2)
+
+    assert result == 'portable summary'
+    assert dispatch_threads == [event_loop_thread, event_loop_thread]
+
+
+async def test_stream_budget_estimation_leaves_event_loop_responsive(monkeypatch):
+    from opensquilla.session import compaction
+
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+    original = compaction._estimate_tokens
+
+    def estimate(text):
+        if text == "portable summary":
+            loop.call_soon_threadsafe(started.set)
+            assert release.wait(2), "stream budget blocked the event loop"
+        return original(text)
+
+    monkeypatch.setattr(compaction, "_estimate_tokens", estimate)
+    provider = _Provider(_successful_stream)
+    plan = CompactionExecutionPlan(candidates=(CompactionExecutionTarget(
+        provider=provider, provider_id="openrouter", model="provider/model",
+    ),))
+    task = asyncio.create_task(call_compaction_provider("synthetic source", "", plan))
+    try:
+        await asyncio.wait_for(started.wait(), 1)
+        assert not task.done()
+    finally:
+        release.set()
+    assert await task == "portable summary"

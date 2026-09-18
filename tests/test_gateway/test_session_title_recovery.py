@@ -14,6 +14,7 @@ from opensquilla.gateway.auth import Principal
 from opensquilla.gateway.config import GatewayConfig
 from opensquilla.gateway.rpc import RpcContext, get_dispatcher
 from opensquilla.gateway.session_view import (
+    _truncate_title_graphemes,
     build_session_view_item,
     derive_transcript_title,
     has_refused_chat_title,
@@ -27,6 +28,19 @@ _REFUSALS = (
     "I'm unable to provide assistance with this reque",
     "抱歉，我无法协助处理该请求",
 )
+
+
+@pytest.mark.parametrize("prefix", ["A" * 31, "👩‍💻e\u0301🇨🇳각"])
+def test_title_truncation_stops_reading_after_visible_graphemes(prefix):
+    class BoundedText(str):
+        def __iter__(self):
+            for index, char in enumerate(super().__iter__()):
+                if index > len(prefix) + 4:
+                    raise AssertionError("title formatting traversed the hidden history")
+                yield char
+
+    text = BoundedText(prefix + "Z" * 100_000)
+    assert _truncate_title_graphemes(text, len(prefix) + 3) == prefix + "..."
 
 
 def _context(manager: SessionManager) -> RpcContext:

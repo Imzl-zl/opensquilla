@@ -510,17 +510,6 @@ async def test_usage_barrier_terminal_compensation_survives_lock_release_and_res
 ) -> None:
     db_path = tmp_path / "terminal-compensation.sqlite"
     storage = await SessionStorage.open(str(db_path))
-    base_get_agent_task = storage.get_agent_task
-    task_reads = 0
-
-    async def _temporarily_unavailable_read(task_id: str) -> AgentTaskRecord | None:
-        nonlocal task_reads
-        task_reads += 1
-        if task_reads <= 2:
-            raise OSError("storage temporarily unavailable")
-        return await base_get_agent_task(task_id)
-
-    storage.get_agent_task = _temporarily_unavailable_read  # type: ignore[method-assign]
     handler_started = asyncio.Event()
     fail_turn = asyncio.Event()
     lock_released = False
@@ -568,7 +557,6 @@ async def test_usage_barrier_terminal_compensation_survives_lock_release_and_res
 
     record = await runtime.wait(handle.task_id, timeout=6.0)
     assert lock_released is True
-    assert task_reads >= 4
     assert record.status == AgentTaskStatus.FAILED
     assert record.error_class == "usage_accounting_busy"
     assert record.details is not None

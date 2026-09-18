@@ -3401,8 +3401,8 @@ class SessionManager:
                 rejection = "invalid_summary"
         if rejection is None:
             try:
-                if not consumer_admission_accepts(
-                    consumer_admission,
+                if not await asyncio.to_thread(
+                    consumer_admission_accepts, consumer_admission,
                     compaction_replay_summary(result),
                     result.kept_entries,
                 ):
@@ -3557,7 +3557,8 @@ class SessionManager:
             canonical_entries_for_manifest = (
                 await self._storage.get_canonical_transcript(current_node.session_id)
             )
-            manifest_state = _merge_attachment_manifest_state(
+            manifest_state = await asyncio.to_thread(
+                _merge_attachment_manifest_state,
                 node=current_node,
                 entries=canonical_entries_for_manifest,
                 context_states=current_context_states,
@@ -3936,7 +3937,8 @@ class SessionManager:
             await self._storage.get_canonical_transcript(node.session_id)
         )
         existing_states = await self._storage.get_context_states(session_key)
-        manifest_state = _merge_attachment_manifest_state(
+        manifest_state = await asyncio.to_thread(
+            _merge_attachment_manifest_state,
             node=node,
             entries=canonical_entries_for_manifest,
             context_states=existing_states,
