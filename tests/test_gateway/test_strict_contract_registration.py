@@ -69,6 +69,7 @@ EXPECTED_WORKSPACE_METHODS = (
     "workspaces.git.discard",
     "workspaces.git.commit",
     "workspaces.git.push",
+    "workspaces.git.undoCommit",
     "workspaces.open",
     "workspaces.update",
     "workspaces.pin",
@@ -226,6 +227,10 @@ _VALID_REGISTRATION_RESULTS: dict[str, dict[str, Any]] = {
     "workspaces.git.push": {
         "upstream": "origin/main",
         "output": "Everything up-to-date",
+    },
+    "workspaces.git.undoCommit": {
+        "sha": "0" * 40,
+        "subject": "synthetic",
     },
     "workspaces.git.diff": {
         "path": "file.txt",

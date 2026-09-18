@@ -151,6 +151,7 @@ METHOD_SCOPES: dict[str, str] = {
     "workspaces.git.discard": WRITE_SCOPE,  # Restores worktree content from the index.
     "workspaces.git.commit": WRITE_SCOPE,  # Commits the index.
     "workspaces.git.push": WRITE_SCOPE,  # Publishes the current branch upstream.
+    "workspaces.git.undoCommit": WRITE_SCOPE,  # Soft-resets the branch tip one commit.
     "sessions.messages.snapshot": READ_SCOPE,
     "sessions.messages.snapshot.read": READ_SCOPE,
     "transport.flow.update": READ_SCOPE,

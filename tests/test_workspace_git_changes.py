@@ -33,6 +33,7 @@ from opensquilla.workspace_git_changes import (
     read_workspace_changes,
     read_workspace_diff,
     stage_paths,
+    undo_last_commit,
 )
 
 # Captured from `git status --porcelain=v2 --branch --untracked-files=all -z`
@@ -756,6 +757,73 @@ def test_push_publishes_to_the_tracked_upstream(
     # The remote now has the commit, so the local branch is no longer ahead.
     changes = read_workspace_changes(str(repository), environment=git_environment)
     assert (changes.ahead, changes.behind) == (0, 0)
+
+
+def test_undo_last_commit_keeps_the_content_staged(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    """A soft reset: the commit goes, the work stays, in the index."""
+
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    (repository / "tracked.txt").write_text("first\n", encoding="utf-8")
+    _commit_all(repository, git_environment, "first")
+    first = _git(("rev-parse", "HEAD"), cwd=repository, environment=git_environment).strip()
+    (repository / "tracked.txt").write_text("second\n", encoding="utf-8")
+    _commit_all(repository, git_environment, "second commit")
+
+    sha, subject = undo_last_commit(
+        str(repository), upstream=None, ahead=0, environment=git_environment
+    )
+
+    assert subject == "second commit"
+    assert len(sha) == 40
+    assert _git(("rev-parse", "HEAD"), cwd=repository, environment=git_environment).strip() == first
+    # The undone work is staged, not lost, and the worktree still has it.
+    assert (repository / "tracked.txt").read_text(encoding="utf-8") == "second\n"
+    changes = read_workspace_changes(str(repository), environment=git_environment)
+    assert [(entry.path, entry.staged, entry.unstaged) for entry in changes.entries] == [
+        ("tracked.txt", True, False)
+    ]
+
+
+def test_undo_refuses_a_commit_the_upstream_already_has(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    """Rewriting published history needs a force push, so it is refused."""
+
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    (repository / "tracked.txt").write_text("one\n", encoding="utf-8")
+    _commit_all(repository, git_environment)
+
+    with pytest.raises(WorkspaceGitPreconditionError) as raised:
+        undo_last_commit(
+            str(repository),
+            upstream="origin/main",
+            ahead=0,
+            environment=git_environment,
+        )
+
+    assert raised.value.code == "commit_published"
+
+
+def test_undo_refuses_the_root_commit(
+    tmp_path: Path,
+    git_environment: dict[str, str],
+) -> None:
+    repository = tmp_path / "project"
+    _init_repository(repository, git_environment)
+    _commit_all(repository, git_environment)
+
+    with pytest.raises(WorkspaceGitPreconditionError) as raised:
+        undo_last_commit(
+            str(repository), upstream=None, ahead=0, environment=git_environment
+        )
+
+    assert raised.value.code == "no_parent"
 
 
 def test_stage_paths_reports_gits_own_output_on_failure(

@@ -29,6 +29,36 @@
         >
           <Icon name="wrapText" :size="12" />
         </button>
+        <!-- History actions belong to the branch, not to one section, so they sit
+             in this row with the branch name and its divergence. -->
+        <button
+          type="button"
+          class="wb-changes__icon-button"
+          :disabled="indexBusy || !canUndoCommit"
+          :aria-busy="indexBusy"
+          :aria-label="t('workbench.changes.undoCommit')"
+          :title="canUndoCommit
+            ? t('workbench.changes.undoCommit')
+            : t('workbench.changes.undoCommitUnavailable', { upstream: changes?.upstream || '' })"
+          data-testid="changes-undo-commit"
+          @click="undoCommit()"
+        >
+          <Icon name="undo" :size="12" />
+        </button>
+        <button
+          type="button"
+          class="wb-changes__icon-button"
+          :disabled="indexBusy || !changes?.upstream"
+          :aria-busy="indexBusy"
+          :aria-label="t('workbench.changes.push')"
+          :title="changes?.upstream
+            ? t('workbench.changes.push')
+            : t('workbench.changes.pushUnavailable')"
+          data-testid="changes-push"
+          @click="pushBranch()"
+        >
+          <Icon name="arrowUp" :size="12" />
+        </button>
         <button
           type="button"
           class="wb-changes__icon-button"
@@ -68,20 +98,6 @@
         @click="commitIndex()"
       >
         <Icon name="check" :size="12" />
-      </button>
-      <button
-        type="button"
-        class="wb-changes__icon-button"
-        :disabled="indexBusy || !changes.upstream"
-        :aria-busy="indexBusy"
-        :aria-label="t('workbench.changes.push')"
-        :title="changes.upstream
-          ? t('workbench.changes.push')
-          : t('workbench.changes.pushUnavailable')"
-        data-testid="changes-push"
-        @click="pushBranch()"
-      >
-        <Icon name="arrowUp" :size="12" />
       </button>
     </div>
 
@@ -152,19 +168,37 @@
             </button>
             <!-- The whole-set action belongs to the group it applies to, so there
                  is no separate "stage everything" concept to explain. -->
-            <button
-              type="button"
-              class="wb-changes__icon-button wb-changes__group-action"
-              :disabled="indexBusy"
-              :aria-busy="indexBusy"
-              :aria-label="t(`workbench.changes.${group.indexAction}All`)"
-              :title="t(`workbench.changes.${group.indexAction}All`)"
-              data-testid="changes-group-index-action"
-              :data-index-action="group.indexAction"
-              @click="applyGroupIndexChange(group)"
-            >
-              <Icon :name="group.indexAction === 'stage' ? 'plus' : 'minus'" :size="12" />
-            </button>
+            <!-- Section actions reveal on hover the way a source-control list does
+                 it, so a header is quiet until you point at it. -->
+            <span class="wb-changes__group-actions">
+              <button
+                v-if="canDiscardGroup(group)"
+                type="button"
+                class="wb-changes__icon-button"
+                :disabled="indexBusy"
+                :aria-busy="indexBusy"
+                :aria-label="t('workbench.changes.discardAll')"
+                :title="t('workbench.changes.discardAll')"
+                data-testid="changes-group-discard-action"
+                :data-group="group.key"
+                @click="discardGroup(group)"
+              >
+                <Icon name="undo" :size="12" />
+              </button>
+              <button
+                type="button"
+                class="wb-changes__icon-button"
+                :disabled="indexBusy"
+                :aria-busy="indexBusy"
+                :aria-label="t(`workbench.changes.${group.indexAction}All`)"
+                :title="t(`workbench.changes.${group.indexAction}All`)"
+                data-testid="changes-group-index-action"
+                :data-index-action="group.indexAction"
+                @click="applyGroupIndexChange(group)"
+              >
+                <Icon :name="group.indexAction === 'stage' ? 'plus' : 'minus'" :size="12" />
+              </button>
+            </span>
           </h4>
           <div v-show="!collapsed.has(group.key)" :id="`wb-changes-group-${group.key}`">
           <!-- The row is a container so the selectable area and the index action
@@ -857,6 +891,86 @@ async function commitIndex() {
   }
 }
 
+/**
+ * Whether undoing the tip is worth offering.
+ *
+ * A branch with no upstream has never been pushed, so its tip is local; a
+ * branch that is ahead has commits the upstream does not. Only a tip the
+ * upstream already has is out of bounds, because undoing it would need a force
+ * push, and the Gateway refuses that case regardless of what this says.
+ */
+const canUndoCommit = computed(() => {
+  const value = changes.value
+  if (!value?.available) return false
+  if (!value.upstream) return true
+  return value.ahead > 0
+})
+
+async function undoCommit() {
+  const activeReader = reader
+  if (!activeReader || indexBusy.value || !canUndoCommit.value) return
+  indexBusy.value = true
+  indexError.value = ''
+  notice.value = ''
+  try {
+    const undone = await activeReader.undoCommit({ workspaceId: props.workspaceId })
+    selectedKey.value = ''
+    diff.value = null
+    await reload()
+    notice.value = t('workbench.changes.undone', {
+      sha: undone.sha.slice(0, 7),
+      subject: undone.subject,
+    })
+  } catch (error) {
+    indexError.value = error instanceof Error
+      ? error.message
+      : t('workbench.changes.indexFailed')
+  } finally {
+    indexBusy.value = false
+  }
+}
+
+/** A section offers discard only when it holds something discardable: every
+ * untracked row would have to be deleted instead, so a section of them gets no
+ * button at all rather than one that does nothing. */
+function canDiscardGroup(group: WorkspaceChangeGroup): boolean {
+  return group.entries.some(entry => entry.changeType !== 'untracked')
+}
+
+/** Discard every worktree edit in one section, after asking. */
+async function discardGroup(group: WorkspaceChangeGroup) {
+  const activeReader = reader
+  const paths = group.entries
+    .filter(entry => entry.changeType !== 'untracked')
+    .map(entry => entry.path)
+  if (!activeReader || indexBusy.value || paths.length === 0) return
+  const confirmed = await confirm({
+    title: t('workbench.changes.discardAllTitle'),
+    body: t('workbench.changes.discardAllBody', { count: paths.length }),
+    primaryLabel: t('workbench.changes.discardAll'),
+  })
+  if (!confirmed) return
+  indexBusy.value = true
+  indexError.value = ''
+  notice.value = ''
+  try {
+    const discarded = await activeReader.discardPaths({
+      workspaceId: props.workspaceId,
+      paths,
+    })
+    selectedKey.value = ''
+    diff.value = null
+    await reload()
+    notice.value = t('workbench.changes.discarded', { count: discarded.length })
+  } catch (error) {
+    indexError.value = error instanceof Error
+      ? error.message
+      : t('workbench.changes.indexFailed')
+  } finally {
+    indexBusy.value = false
+  }
+}
+
 async function pushBranch() {
   const activeReader = reader
   if (!activeReader || indexBusy.value) return
@@ -1020,11 +1134,30 @@ watch(() => props.workspaceId, () => { void reload() }, { immediate: true })
 }
 
 /* The group header keeps the heading type but lets a control sit on its line. */
-.wb-changes__group-action {
+/* Section actions are quiet until the header is pointed at or focused, the way
+   a source-control list keeps its headers readable. */
+.wb-changes__group-actions {
+  display: flex;
   flex: none;
+  gap: 0.125rem;
   margin-left: 0.375rem;
+  opacity: 0;
+}
+
+.wb-changes__group-head:hover .wb-changes__group-actions,
+.wb-changes__group-head:focus-within .wb-changes__group-actions {
+  opacity: 1;
+}
+
+.wb-changes__group-actions .wb-changes__icon-button {
   color: var(--text);
-  text-transform: none;
+  background: none;
+  border-color: transparent;
+}
+
+.wb-changes__group-actions .wb-changes__icon-button:hover:not(:disabled) {
+  background: var(--bg-surface);
+  border-color: var(--border);
 }
 
 .wb-changes__note {

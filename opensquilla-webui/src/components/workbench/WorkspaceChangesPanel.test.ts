@@ -86,6 +86,7 @@ function reader(overrides: Partial<WorkspaceChangesReader> = {}): WorkspaceChang
       subject: request.message.split('\n')[0],
     })),
     pushBranch: vi.fn(async () => ({ upstream: 'origin/main', output: 'up to date' })),
+    undoCommit: vi.fn(async () => ({ sha: 'b'.repeat(40), subject: 'the last one' })),
     ...overrides,
   }
 }
@@ -918,6 +919,109 @@ describe('WorkspaceChangesPanel', () => {
     expect(rowFor('src/a.ts')?.querySelector('[data-testid="changes-discard-action"]'))
       .not.toBeNull()
     expect(rowFor('src/new.ts')?.querySelector('[data-testid="changes-discard-action"]'))
+      .toBeNull()
+    mounted.unmount()
+  })
+
+  it('offers undo only while the tip is not published', async () => {
+    // Never pushed: the tip is local, so undoing it is safe.
+    const local = mountPanel(reader())
+    await settle()
+    expect(local.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-undo-commit"]',
+    )?.disabled).toBe(false)
+    local.unmount()
+
+    // Ahead of the upstream: the tip is not published yet either.
+    const ahead = mountPanel(reader({
+      readChanges: vi.fn(async () => changes({ upstream: 'origin/main', ahead: 2 })),
+    }))
+    await settle()
+    expect(ahead.element.querySelector<HTMLButtonElement>('[data-testid="changes-undo-commit"]')
+      ?.disabled).toBe(false)
+    ahead.unmount()
+
+    // In sync with the upstream: undoing would rewrite published history.
+    const published = mountPanel(reader({
+      readChanges: vi.fn(async () => changes({ upstream: 'origin/main', ahead: 0 })),
+    }))
+    await settle()
+    const button = published.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-undo-commit"]',
+    )
+    expect(button?.disabled).toBe(true)
+    expect(button?.getAttribute('title')).toContain('origin/main')
+    published.unmount()
+  })
+
+  it('undos the tip commit and says which one moved', async () => {
+    const port = reader({
+      readChanges: vi.fn(async () => changes({ ahead: 1, upstream: 'origin/main' })),
+    })
+    const mounted = mountPanel(port)
+    await settle()
+
+    mounted.element.querySelector<HTMLButtonElement>('[data-testid="changes-undo-commit"]')?.click()
+    await settle()
+
+    expect(port.undoCommit).toHaveBeenCalledWith({ workspaceId: 'workspace-1' })
+    expect(mounted.element.querySelector('[data-testid="changes-notice"]')?.textContent)
+      .toContain('Undid bbbbbbb the last one')
+    mounted.unmount()
+  })
+
+  it('keeps push next to the branch rather than in the commit row', async () => {
+    const mounted = mountPanel(reader({
+      readChanges: vi.fn(async () => changes({ upstream: 'origin/main' })),
+    }))
+    await settle()
+
+    // The branch-level action belongs to the branch row, with the counts it
+    // acts on; the commit row is only about the message.
+    expect(mounted.element.querySelector('.wb-changes__bar [data-testid="changes-push"]'))
+      .not.toBeNull()
+    expect(mounted.element.querySelector('.wb-changes__commit [data-testid="changes-push"]'))
+      .toBeNull()
+    mounted.unmount()
+  })
+
+  it('asks before discarding a whole section', async () => {
+    const port = reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [
+          entry({ path: 'src/a.ts', staged: false, unstaged: true }),
+          entry({ path: 'src/b.ts', staged: false, unstaged: true }),
+          entry({ path: 'src/new.ts', changeType: 'untracked' }),
+        ],
+        totalCount: 3,
+      })),
+    })
+    const mounted = mountPanel(port)
+    await settle()
+
+    mounted.element.querySelector<HTMLButtonElement>(
+      '[data-testid="changes-group-discard-action"]',
+    )?.click()
+    await settle()
+
+    expect(confirmMock).toHaveBeenCalled()
+    // Untracked rows are excluded: discarding one would delete the file.
+    expect(port.discardPaths).toHaveBeenCalledWith({
+      workspaceId: 'workspace-1',
+      paths: ['src/a.ts', 'src/b.ts'],
+    })
+    mounted.unmount()
+  })
+
+  it('offers no section discard where every row is untracked', async () => {
+    const mounted = mountPanel(reader({
+      readChanges: vi.fn(async () => changes({
+        entries: [entry({ path: 'src/new.ts', changeType: 'untracked' })],
+      })),
+    }))
+    await settle()
+
+    expect(mounted.element.querySelector('[data-testid="changes-group-discard-action"]'))
       .toBeNull()
     mounted.unmount()
   })

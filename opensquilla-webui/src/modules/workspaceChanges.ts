@@ -126,6 +126,15 @@ export interface WorkspaceChangesReader {
     request: { workspaceId: string },
     options?: { signal?: AbortSignal },
   ): Promise<WorkspacePush>
+  /**
+   * Moves the branch back one commit, leaving its content staged. The Gateway
+   * refuses a tip the upstream already has, so callers only have to decide
+   * whether to offer it, not whether it is safe.
+   */
+  undoCommit(
+    request: { workspaceId: string },
+    options?: { signal?: AbortSignal },
+  ): Promise<WorkspaceCommit>
 }
 
 export const WORKSPACE_CHANGES_KEY: InjectionKey<WorkspaceChangesReader> = Symbol('WorkspaceChanges')

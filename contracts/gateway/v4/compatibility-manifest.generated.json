@@ -1461,6 +1461,12 @@
     },
     {
       "lifecycle": "stable",
+      "name": "workspaces.git.undoCommit",
+      "schema": "workspaces/workspaces-git-undo-commit.schema.json",
+      "schemaSha256": "8b22967ef6fc72b7cb05a527a9ecddac069c9170c771f3da3aa0eb521e07d912"
+    },
+    {
+      "lifecycle": "stable",
       "name": "workspaces.history.delete",
       "schema": "workspaces/workspaces-history-delete.schema.json",
       "schemaSha256": "8f934b8a6c04c5b386aa63c368831f5a3294c6e2238c1c9f3cdebaaeee09d4cf"
@@ -1499,10 +1505,10 @@
   "protocol": "opensquilla-websocket-json",
   "source": {
     "eventFamilyCount": 10,
-    "generatorSha256": "b2b70d0eb134a54f58833c4cbd11a0f33ef76ed4d685e5f66a9114ebcdfe091b",
-    "methodCount": 221,
-    "schemaCount": 231,
-    "schemaTreeSha256": "cb6f4ba319b8f199275bc2286b34ef705616a48f6b745b10ad7b787a892be199"
+    "generatorSha256": "f4761f5abd5f108478814d4576c6676f3d397d4ee54713ab55a5d75865ff24a0",
+    "methodCount": 222,
+    "schemaCount": 232,
+    "schemaTreeSha256": "dcc2da881c9902e8ac8666a74d60b040108e5589c9d9d02bd54c0cf2aa54a966"
   },
   "wireVersion": 4
 }

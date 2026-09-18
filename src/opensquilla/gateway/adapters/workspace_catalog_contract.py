@@ -23,6 +23,7 @@ WORKSPACE_CATALOG_CONTRACT_METHODS: Final = (
     "workspaces.git.discard",
     "workspaces.git.commit",
     "workspaces.git.push",
+    "workspaces.git.undoCommit",
     "workspaces.open",
     "workspaces.update",
     "workspaces.pin",

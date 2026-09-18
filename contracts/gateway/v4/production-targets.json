@@ -1393,6 +1393,14 @@
     },
     {
       "kind": "method",
+      "wireName": "workspaces.git.undoCommit",
+      "roles": [
+        "params",
+        "result"
+      ]
+    },
+    {
+      "kind": "method",
       "wireName": "workspaces.history.delete",
       "roles": [
         "result"

@@ -48,6 +48,7 @@ RESPONSE_VALIDATED_METHODS = (
     "workspaces.git.discard",
     "workspaces.git.commit",
     "workspaces.git.push",
+    "workspaces.git.undoCommit",
     "workspaces.open",
     "workspaces.update",
     "workspaces.pin",
@@ -112,6 +113,16 @@ EXPECTED_ACCURATE_ERROR_CODES = {
         "WORKSPACE_NOT_FOUND",
         "INVALID_PARAMS",
         "NO_UPSTREAM",
+        "GIT_FAILED",
+        "UNAVAILABLE",
+        "INTERNAL_ERROR",
+    ),
+    "workspaces.git.undoCommit": (
+        "OWNER_REQUIRED",
+        "WORKSPACE_NOT_FOUND",
+        "INVALID_PARAMS",
+        "COMMIT_PUBLISHED",
+        "NOTHING_TO_UNDO",
         "GIT_FAILED",
         "UNAVAILABLE",
         "INTERNAL_ERROR",
@@ -275,9 +286,9 @@ def _specs_by_wire_name():
 def test_contract_inventory_freezes_all_webui_reachable_wire_names() -> None:
     specs = discover_contracts()
 
-    assert len(specs) == 231
+    assert len(specs) == 232
     assert Counter(spec.contract_type for spec in specs) == {
-        "method": 221,
+        "method": 222,
         "event": 10,
     }
     assert EXPECTED_METHOD_METADATA.keys() <= {spec.wire_name for spec in specs}
@@ -294,6 +305,7 @@ def test_contract_inventory_freezes_all_webui_reachable_wire_names() -> None:
         "workspaces.git.discard",
         "workspaces.git.commit",
         "workspaces.git.push",
+        "workspaces.git.undoCommit",
     } <= {spec.wire_name for spec in specs}
 
 

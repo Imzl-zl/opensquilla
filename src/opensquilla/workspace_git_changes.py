@@ -70,6 +70,8 @@ PreconditionCode = Literal[
     "untracked_path",
     "nothing_staged",
     "no_upstream",
+    "commit_published",
+    "no_parent",
 ]
 
 _WINDOWS_ABSOLUTE = re.compile(r"^[A-Za-z]:")
@@ -400,6 +402,70 @@ def push_current_branch(
             result=result,
         )
     return result.stdout_text.strip() or result.stderr_text.strip()
+
+
+def undo_last_commit(
+    workspace_path: str,
+    *,
+    upstream: str | None,
+    ahead: int,
+    timeout: float = WRITE_TIMEOUT_SECONDS,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
+    """Move the branch tip back one commit and return the undone ``(sha, subject)``.
+
+    A ``--soft`` reset, so the commit's content stays staged and nothing is
+    lost: this is "undo the commit", not "undo the work".
+
+    Two refusals, both about not rewriting something the operator cannot get
+    back:
+
+    * a tip already on the upstream is published history. Undoing it locally
+      would need a force push to reconcile, so it is refused instead.
+    * the root commit has no parent to reset to.
+    """
+
+    if upstream and ahead <= 0:
+        raise WorkspaceGitPreconditionError(
+            "commit_published",
+            f"{upstream} already has this commit, so undoing it locally would "
+            "rewrite published history.",
+        )
+    parent = run_git(
+        ("rev-parse", "--verify", "--quiet", "HEAD~1"),
+        cwd=workspace_path,
+        timeout=timeout,
+        environment=environment,
+    )
+    if parent.state is not GitRunState.OK:
+        raise WorkspaceGitPreconditionError(
+            "no_parent",
+            "The first commit has no parent, so there is nothing to reset to.",
+        )
+    head = run_git(
+        ("log", "-1", "--pretty=%H%x00%s"),
+        cwd=workspace_path,
+        timeout=timeout,
+        environment=environment,
+    )
+    if head.state is not GitRunState.OK:
+        raise WorkspaceGitUnavailableError(
+            _write_availability_reason(head),
+            result=head,
+        )
+    sha, _, subject = head.stdout_text.strip().partition("\x00")
+    result = run_git(
+        ("reset", "--soft", "HEAD~1"),
+        cwd=workspace_path,
+        timeout=timeout,
+        environment=environment,
+    )
+    if result.state is not GitRunState.OK:
+        raise WorkspaceGitUnavailableError(
+            _write_availability_reason(result),
+            result=result,
+        )
+    return sha, subject
 
 
 def normalize_repo_path(value: object) -> str:
@@ -839,6 +905,7 @@ __all__ = [
     "commit_index",
     "discard_paths",
     "push_current_branch",
+    "undo_last_commit",
     "PreconditionCode",
     "PUSH_TIMEOUT_SECONDS",
     "WorkspaceGitPreconditionError",

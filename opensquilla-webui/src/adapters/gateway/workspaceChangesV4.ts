@@ -48,6 +48,15 @@ import {
   validateWorkspacesGitPushParams,
   validateWorkspacesGitPushResult,
 } from '@/contracts/generated/v4/workspacesGitPushValidators.mjs'
+import {
+  WORKSPACES_GIT_UNDO_COMMIT_METHOD,
+  type WorkspacesGitUndoCommitParams,
+  type WorkspacesGitUndoCommitResult,
+} from '@/contracts/generated/v4/workspacesGitUndoCommit'
+import {
+  validateWorkspacesGitUndoCommitParams,
+  validateWorkspacesGitUndoCommitResult,
+} from '@/contracts/generated/v4/workspacesGitUndoCommitValidators.mjs'
 import type {
   WorkspaceChanges,
   WorkspaceChangesReader,
@@ -219,6 +228,24 @@ export function createV4WorkspaceChanges(
         WORKSPACES_GIT_PUSH_METHOD,
       )
       return { upstream: result.upstream, output: result.output }
+    },
+
+    async undoCommit(request, options): Promise<WorkspaceCommit> {
+      const params = requireParams<WorkspacesGitUndoCommitParams>(
+        { workspaceId: request.workspaceId },
+        validateWorkspacesGitUndoCommitParams,
+        WORKSPACES_GIT_UNDO_COMMIT_METHOD,
+      )
+      const result = requireResult<WorkspacesGitUndoCommitResult>(
+        await transport.request(
+          WORKSPACES_GIT_UNDO_COMMIT_METHOD,
+          params as unknown as Record<string, unknown>,
+          optionsFor(options?.signal),
+        ),
+        validateWorkspacesGitUndoCommitResult,
+        WORKSPACES_GIT_UNDO_COMMIT_METHOD,
+      )
+      return { sha: result.sha, subject: result.subject }
     },
   }
 }

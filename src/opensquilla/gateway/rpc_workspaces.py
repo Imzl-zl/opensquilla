@@ -44,6 +44,7 @@ from opensquilla.workspace_git_changes import (
     read_workspace_changes,
     read_workspace_diff,
     stage_paths,
+    undo_last_commit,
 )
 
 _d = get_dispatcher()
@@ -56,6 +57,8 @@ _PRECONDITION_ERROR_CODES = {
     "untracked_path": "UNTRACKED_PATH",
     "nothing_staged": "NOTHING_STAGED",
     "no_upstream": "NO_UPSTREAM",
+    "commit_published": "COMMIT_PUBLISHED",
+    "no_parent": "NOTHING_TO_UNDO",
 }
 
 
@@ -570,6 +573,30 @@ async def _handle_workspaces_git_push(
     return {"upstream": str(changes.upstream), "output": output}
 
 
+async def _handle_workspaces_git_undo_commit(
+    params: dict | None,
+    ctx: RpcContext,
+) -> dict[str, Any]:
+    """Undo the tip commit, refusing one that the upstream already has.
+
+    The upstream and the ahead count come from the status read here rather than
+    from the request, so a caller cannot talk the guard out of the way.
+    """
+
+    _require_owner(ctx)
+    workspace_id = _workspace_id(params)
+    workspace_path = await _git_workspace_path(ctx, workspace_id)
+    changes = await asyncio.to_thread(read_workspace_changes, workspace_path)
+    sha, subject = await _run_git_write(
+        lambda: undo_last_commit(
+            workspace_path,
+            upstream=changes.upstream,
+            ahead=changes.ahead,
+        )
+    )
+    return {"sha": sha, "subject": subject}
+
+
 _WORKSPACE_CATALOG_CONTRACT_IMPLEMENTATIONS = {
     "workspaces.list": _handle_workspaces_list,
     "workspaces.git.status": _handle_workspaces_git_status,
@@ -578,6 +605,7 @@ _WORKSPACE_CATALOG_CONTRACT_IMPLEMENTATIONS = {
     "workspaces.git.discard": _handle_workspaces_git_discard,
     "workspaces.git.commit": _handle_workspaces_git_commit,
     "workspaces.git.push": _handle_workspaces_git_push,
+    "workspaces.git.undoCommit": _handle_workspaces_git_undo_commit,
     "workspaces.open": _handle_workspaces_open,
     "workspaces.update": _handle_workspaces_update,
     "workspaces.pin": _handle_workspaces_pin,

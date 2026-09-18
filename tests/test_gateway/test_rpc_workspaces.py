@@ -26,6 +26,7 @@ from opensquilla.gateway.rpc_workspaces import (
     _handle_workspaces_git_push,
     _handle_workspaces_git_stage,
     _handle_workspaces_git_status,
+    _handle_workspaces_git_undo_commit,
     _handle_workspaces_list,
     _handle_workspaces_open,
 )
@@ -107,6 +108,7 @@ def _owner_ctx_without_storage() -> RpcContext:
         ("_handle_workspaces_git_discard", {}, "INVALID_PARAMS"),
         ("_handle_workspaces_git_commit", {}, "INVALID_PARAMS"),
         ("_handle_workspaces_git_push", {}, "INVALID_PARAMS"),
+        ("_handle_workspaces_git_undo_commit", {}, "INVALID_PARAMS"),
         ("_handle_workspaces_pin", {}, "INVALID_PARAMS"),
         ("_handle_workspaces_remove", {}, "INVALID_PARAMS"),
         ("_handle_workspaces_history_delete", {}, "INVALID_PARAMS"),
@@ -146,6 +148,7 @@ async def test_workspace_contract_error_metadata_has_real_handler_fixture(
             {"workspaceId": "workspace", "message": "message"},
         ),
         ("_handle_workspaces_git_push", {"workspaceId": "workspace"}),
+        ("_handle_workspaces_git_undo_commit", {"workspaceId": "workspace"}),
         ("_handle_workspaces_pin", {"workspaceId": "workspace", "pinned": True}),
         ("_handle_workspaces_remove", {"workspaceId": "workspace"}),
         ("_handle_workspaces_history_delete", {"workspaceId": "workspace"}),
@@ -1882,6 +1885,7 @@ async def _open_trusted_workspace(
         (_handle_workspaces_git_discard, {"workspaceId": "missing", "paths": ["a.txt"]}),
         (_handle_workspaces_git_commit, {"workspaceId": "missing", "message": "m"}),
         (_handle_workspaces_git_push, {"workspaceId": "missing"}),
+        (_handle_workspaces_git_undo_commit, {"workspaceId": "missing"}),
     ),
 )
 async def test_git_reads_require_a_local_owner(
@@ -1922,6 +1926,7 @@ async def test_git_reads_require_a_local_owner(
         (_handle_workspaces_git_commit, {"workspaceId": "ws"}),
         (_handle_workspaces_git_commit, {"workspaceId": "ws", "message": "   "}),
         (_handle_workspaces_git_push, {"workspaceId": "  "}),
+        (_handle_workspaces_git_undo_commit, {}),
     ),
 )
 async def test_git_reads_reject_invalid_params(
@@ -2388,3 +2393,50 @@ async def test_git_push_requires_an_upstream_and_publishes_to_it(
     assert pushed["upstream"] == "origin/main"
     status = await _handle_workspaces_git_status({"workspaceId": workspace_id}, ctx)
     assert (status["ahead"], status["behind"]) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_git_undo_commit_refuses_a_published_tip_and_undoes_a_local_one(
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+    tmp_path: Path,
+    git_workspace_env: None,
+) -> None:
+    """The guard is read from status, so a caller cannot talk it out of the way."""
+
+    from opensquilla.gateway.rpc import RpcHandlerError
+
+    ctx, _ = workspace_ctx
+    project = tmp_path / "repo"
+    _init_git_repository(project)
+    (project / "file.txt").write_text("one\n", encoding="utf-8")
+    _commit_in(project)
+    (project / "file.txt").write_text("two\n", encoding="utf-8")
+    _commit_in(project, "second")
+    workspace_id = await _open_trusted_workspace(ctx, project)
+
+    undone = await _handle_workspaces_git_undo_commit({"workspaceId": workspace_id}, ctx)
+
+    assert undone["subject"] == "second"
+    assert len(undone["sha"]) == 40
+    # The work is staged now, so the panel offers a commit again.
+    status = await _handle_workspaces_git_status({"workspaceId": workspace_id}, ctx)
+    assert [(entry["path"], entry["staged"]) for entry in status["entries"]] == [
+        ("file.txt", True)
+    ]
+
+    # Publish the tip, then the same call must refuse to rewrite it.
+    origin = tmp_path / "origin.git"
+    origin.mkdir()
+    _git_in(origin, ("-c", "init.templateDir=", "init", "--bare", "-q"))
+    _git_in(project, ("remote", "add", "origin", str(origin)))
+    _git_in(project, ("push", "-u", "origin", "main"))
+    await _handle_workspaces_git_commit(
+        {"workspaceId": workspace_id, "message": "published"},
+        ctx,
+    )
+    await _handle_workspaces_git_push({"workspaceId": workspace_id}, ctx)
+
+    with pytest.raises(RpcHandlerError) as raised:
+        await _handle_workspaces_git_undo_commit({"workspaceId": workspace_id}, ctx)
+
+    assert raised.value.code == "COMMIT_PUBLISHED"

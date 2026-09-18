@@ -22,14 +22,14 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
     specs = runner.discover_contracts()
     targets = runner.load_production_targets(specs)
 
-    assert len(targets) == 203
+    assert len(targets) == 204
     assert Counter(role for roles in targets.values() for role in roles) == {
-        "result": 193,
-        "params": 24,
+        "result": 194,
+        "params": 25,
         "payload": 9,
         "frame": 1,
     }
-    assert sum(len(spec.targets) for spec in specs) == 894
+    assert sum(len(spec.targets) for spec in specs) == 898
     assert targets[("method", "sessions.executionLog.read")] == ("params", "result")
     assert targets[("method", "sessions.list")] == ("result",)
     assert targets[("method", "skills.install.status")] == ("result",)
@@ -46,6 +46,7 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
     assert targets[("method", "workspaces.git.discard")] == ("params", "result")
     assert targets[("method", "workspaces.git.commit")] == ("params", "result")
     assert targets[("method", "workspaces.git.push")] == ("params", "result")
+    assert targets[("method", "workspaces.git.undoCommit")] == ("params", "result")
     assert targets[("method", "transport.flow.update")] == ("params", "result")
     assert targets[("method", "onboarding.llmProfile.upsertAndActivate")] == (
         "params", "result",
