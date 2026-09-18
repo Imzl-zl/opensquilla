@@ -1984,3 +1984,33 @@ async def test_force_refresh_joins_running_auth_only_source_flight(
     release_auth.set()
     await asyncio.gather(ordinary, forced)
     assert calls == {"published": 1, "declared": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_saved_auth_rejection_revokes_entitlement_lkg(monkeypatch, tmp_path, status):
+    import httpx
+
+    calls = []
+    _patch_fetches(monkeypatch, calls)
+    config = _config(tmp_path)
+    coordinator = TokenRhythmCatalogCoordinator(ModelCatalog(), clock=FakeClock())
+    await coordinator.hydrate(config)
+    await coordinator.refresh_active(config, force=True)
+    assert coordinator.cached(config)
+
+    async def reject(*_args, **_kwargs):
+        request = httpx.Request("GET", "https://tokenrhythm.studio/v1/models")
+        response = httpx.Response(status, request=request)
+        raise httpx.HTTPStatusError("Unauthorized", request=request, response=response)
+
+    monkeypatch.setattr(
+        "opensquilla.gateway.model_catalog_refresh.fetch_tokenrhythm_declared", reject,
+    )
+    await coordinator.refresh_active(config, force=True)
+    assert coordinator.cached(config) == []
+    await coordinator.close()
+    restored = TokenRhythmCatalogCoordinator(ModelCatalog(), clock=FakeClock())
+    await restored.hydrate(config)
+    assert restored.cached(config) == []
+    await restored.close()

@@ -399,7 +399,7 @@ async def test_models_configured_scope_adds_ready_profile_defaults_without_disco
     assert configured.payload["models"][1]["metadata"] == {
         "catalogScope": "configured_default",
     }
-    assert [e["provider"] for e in configured.payload["errors"]] == ["openrouter", "deepseek"]
+    assert [e["provider"] for e in configured.payload["errors"]] == ["deepseek"]
     assert "synthetic" not in str(configured.payload)
 
 
@@ -425,7 +425,7 @@ async def test_models_configured_scope_deduplicates_and_preserves_active_deploym
     assert [(m["provider"], m["id"]) for m in result.payload["models"]] == [
         ("openai", "configured"),
     ]
-    assert result.payload["errors"][0]["provider"] == "openrouter"
+    assert result.payload["errors"] == []
 
 
 @pytest.mark.asyncio
@@ -450,3 +450,122 @@ async def test_models_catalog_rejects_unknown_scope():
         "r", "models.list", {"scope": "everything"}, RpcContext(conn_id="test"),
     )
     assert result.error is not None
+
+
+@pytest.mark.asyncio
+async def test_models_configured_scope_uses_complete_saved_provider_discovery(monkeypatch):
+    from opensquilla.gateway.config import LlmProviderProfile
+    from opensquilla.onboarding.probe import ProviderModelsDiscoverResult
+    from opensquilla.provider.selector import ProviderConfig
+
+    monkeypatch.setattr("opensquilla.provider.deployment.environment_value", lambda _name: "")
+    cfg = GatewayConfig()
+    cfg.llm_profiles = {
+        "tokenrhythm": LlmProviderProfile(model="glm-5.1", api_key="synthetic-tokenrhythm"),
+        "openrouter": LlmProviderProfile(model="glm-5.1", api_key="synthetic-openrouter"),
+        "deepseek": LlmProviderProfile(model="private-model", api_key="synthetic-deepseek"),
+    }
+    calls = []
+
+    async def discover(**kwargs):
+        calls.append(kwargs)
+        provider = kwargs["provider_id"]
+        if provider in {"ollama", "deepseek"}:
+            return ProviderModelsDiscoverResult(ok=True, provider_id=provider)
+        ids = ["glm-5.1", "minimax-m2.7"] if provider == "tokenrhythm" else ["glm-5.1"]
+        return ProviderModelsDiscoverResult(
+            ok=True, provider_id=provider, source="live", models=[{
+                "id": model, "name": model, "contextWindow": 200000,
+                "maxOutputTokens": 8000, "capabilities": ["chat", "tools"],
+            } for model in ids],
+        )
+
+    monkeypatch.setattr(
+        "opensquilla.onboarding.probe.discover_selectable_provider_models", discover,
+    )
+    selector = _DetailedModelSelector()
+    selector.current_config = ProviderConfig(provider="ollama", model="test-model-good")
+    result = await get_dispatcher().dispatch(
+        "r", "models.list", {"scope": "configured"},
+        RpcContext(conn_id="test", config=cfg, provider_selector=selector),
+    )
+    assert result.error is None
+    assert {(m["provider"], m["id"]) for m in result.payload["models"]} == {
+        ("ollama", "test-model-good"), ("tokenrhythm", "glm-5.1"),
+        ("tokenrhythm", "minimax-m2.7"), ("openrouter", "glm-5.1"),
+        ("deepseek", "private-model"),
+    }
+    assert result.payload["errors"] == []
+    assert all(call["persist_catalog"] and call["catalog_config"] is cfg for call in calls)
+    assert all(call["allow_default_api_key_env"] is False for call in calls)
+    assert "synthetic" not in str(result.payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [
+    "auth_invalid", "transport_transient", "cold_transient", "empty",
+])
+async def test_models_configured_scope_never_restores_unauthorized_static_rows(
+    monkeypatch, failure,
+):
+    from opensquilla.gateway.config import LlmProviderProfile
+    from opensquilla.onboarding.probe import ProviderModelsDiscoverResult
+    from opensquilla.provider.selector import ProviderConfig
+
+    monkeypatch.setattr("opensquilla.provider.deployment.environment_value", lambda _name: "")
+    cfg = GatewayConfig()
+    cfg.llm_profiles = {
+        "tokenrhythm": LlmProviderProfile(model="minimax-m2.7", api_key="synthetic-tokenrhythm"),
+        "openai": LlmProviderProfile(model="private-model", api_key="synthetic-openai"),
+    }
+
+    async def discover(**kwargs):
+        provider = kwargs["provider_id"]
+        if provider != "tokenrhythm":
+            return ProviderModelsDiscoverResult(ok=True, provider_id=provider)
+        rows = [{"id": "glm-5.1", "name": "GLM", "contextWindow": 200000,
+                 "maxOutputTokens": 8000, "capabilities": ["chat"]}]
+        return ProviderModelsDiscoverResult(
+            ok=failure == "empty", provider_id=provider,
+            failure_kind=(
+                "" if failure == "empty"
+                else "transport_transient" if failure == "cold_transient" else failure
+            ),
+            source="live" if failure == "transport_transient" else "none",
+            models=rows if failure == "transport_transient" else [],
+        )
+
+    monkeypatch.setattr(
+        "opensquilla.onboarding.probe.discover_selectable_provider_models", discover,
+    )
+    selector = _DetailedModelSelector()
+    selector.current_config = ProviderConfig(provider="ollama", model="test-model-good")
+    result = await get_dispatcher().dispatch(
+        "r", "models.list", {"scope": "configured"},
+        RpcContext(conn_id="test", config=cfg, provider_selector=selector),
+    )
+    assert result.error is None
+    identities = {(m["provider"], m["id"]) for m in result.payload["models"]}
+    assert (("tokenrhythm", "minimax-m2.7") in identities) == (failure == "cold_transient")
+    assert (("tokenrhythm", "glm-5.1") in identities) == (failure == "transport_transient")
+    assert ("openai", "private-model") in identities
+
+
+@pytest.mark.asyncio
+async def test_models_configured_scope_does_not_call_parallel_runtime_listing(monkeypatch):
+    from opensquilla.provider.selector import ProviderConfig
+
+    class SavedSelector:
+        current_config = ProviderConfig(provider="openai", model="private-id", api_key="synthetic")
+
+        async def list_models_detailed(self):
+            raise AssertionError("configured picker must share settings discovery only")
+
+    result = await get_dispatcher().dispatch(
+        "r", "models.list", {"scope": "configured"},
+        RpcContext(conn_id="test", config=GatewayConfig(), provider_selector=SavedSelector()),
+    )
+    assert result.error is None
+    assert [(m["provider"], m["id"]) for m in result.payload["models"]] == [
+        ("openai", "private-id"),
+    ]

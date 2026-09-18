@@ -1754,6 +1754,19 @@ class TokenRhythmCatalogCoordinator:
                             )
                         )
                 elif outcome.declared_error is not None:
+                    if (
+                        persist_entitlement
+                        and _error_failure_kind(outcome.declared_error)
+                        == ProviderFailureKind.AUTH_INVALID.value
+                    ):
+                        # A known rejected credential is not a transient outage.
+                        # Revoke only this saved authority; draft probes must not
+                        # erase the active account's durable entitlement.
+                        self._entitlements.pop(request.authority_identity, None)
+                        self._ephemeral_entitlements.pop(request.authority_identity, None)
+                        self._aligned_at.pop(request.authority_identity, None)
+                        self._ephemeral_aligned_at.pop(request.authority_identity, None)
+                        should_persist = True
                     self._last_declared_errors[
                         request.authority_identity
                     ] = outcome.declared_error
@@ -2220,7 +2233,10 @@ async def discover_tokenrhythm_models(
         catalog=coordinator._catalog,
         request=request,
     )
-    if not view.declared_available and view.declared_error is not None:
+    if view.declared_error is not None and (
+        not view.declared_available
+        or _error_failure_kind(view.declared_error) == ProviderFailureKind.AUTH_INVALID.value
+    ):
         return ProviderModelsDiscoverResult(
             ok=False,
             provider_id=provider_id,
