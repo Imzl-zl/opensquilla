@@ -124,6 +124,7 @@ def decode_steering_command(
         is_web_source=web_source,
         pending_input=pending,
         has_non_text_input=params.get("attachments") not in (None, [])
+        or params.get("selectedSkills") not in (None, [])
         or any(
             params.get(field) is not None
             for field in (

@@ -512,6 +512,10 @@ def test_task_runtime_leak_smoke_is_marked_ci_serial() -> None:
 
 def test_runner_saturated_subprocess_contracts_are_marked_ci_serial() -> None:
     assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/test_desktop/test_gateway_functional_probes.py"),
+        "test_mcp_probe_uses_real_stdio_server_and_gateway",
+    )
+    assert "pytest.mark.ci_serial" in _function_decorators(
         Path("tests/test_live_provider_profile_gateway_e2e.py"),
         "test_attachment_capacity_runner_bounds_provider_http_failures_to_one_call",
     )
@@ -550,10 +554,6 @@ def test_runner_saturated_subprocess_contracts_are_marked_ci_serial() -> None:
     assert "pytest.mark.ci_serial" in _function_decorators(
         Path("tests/functional/test_gateway_silent_reply_process_e2e.py"),
         "test_default_timing_sample_has_one_provider_call_and_no_goal",
-    )
-    assert "pytest.mark.ci_serial" in _function_decorators(
-        Path("tests/test_desktop/test_gateway_functional_probes.py"),
-        "test_mcp_probe_uses_real_stdio_server_and_gateway",
     )
     assert "pytest.mark.ci_serial" in _function_decorators(
         Path("tests/test_tools/test_shell_process_isolation.py"),

@@ -134,3 +134,16 @@ describe('pending input queue v4 adapter', () => {
     await expect(adapter.cancel({ key: 's', pendingInputId: 'p1' })).resolves.toBeUndefined()
   })
 })
+
+it('refuses explicit skill enqueue on a gateway that only supports the old queue', async () => {
+  const request = vi.fn(async <T>() => ({ requestFingerprint: 'fp', revision: 1 } as T))
+  const adapter = createV4PendingInputQueue({
+    request: request as <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>,
+    supports: method => method !== 'skills.candidates',
+  })
+  await expect(adapter.enqueue({
+    key: 'synthetic', pendingInputId: 'pending-skill', message: 'Make a table', attachments: [],
+    selectedSkills: [{ name: 'synthetic-table', instanceId: 'instance-one', digest: 'digest-one' }],
+  })).rejects.toMatchObject({ kind: 'unsupported', accepted: false })
+  expect(request).not.toHaveBeenCalled()
+})

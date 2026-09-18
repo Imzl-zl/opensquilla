@@ -3914,6 +3914,11 @@ class EnsembleProvider:
             return replace(
                 event,
                 input_tokens=_summed_int(rows, "input_tokens"),
+                terminal_request_input_tokens=(
+                    event.terminal_request_input_tokens
+                    if event.terminal_request_input_tokens is not None
+                    else event.input_tokens
+                ),
                 output_tokens=_summed_int(rows, "output_tokens"),
                 reasoning_tokens=_summed_int(rows, "reasoning_tokens"),
                 cached_tokens=_summed_int(rows, "cached_tokens"),
@@ -4692,6 +4697,11 @@ class EnsembleProvider:
                         yield replace(
                             event,
                             input_tokens=_summed_int(rows, "input_tokens"),
+                            terminal_request_input_tokens=(
+                                event.terminal_request_input_tokens
+                                if event.terminal_request_input_tokens is not None
+                                else event.input_tokens
+                            ),
                             output_tokens=_summed_int(rows, "output_tokens"),
                             reasoning_tokens=_summed_int(rows, "reasoning_tokens"),
                             cached_tokens=_summed_int(rows, "cached_tokens"),

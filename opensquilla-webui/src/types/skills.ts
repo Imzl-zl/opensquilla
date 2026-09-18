@@ -1,4 +1,20 @@
 import type { SkillStatTile } from '@/components/skills/SkillsStats.vue'
+import type { SelectedSkillRef } from '@/types/selectedSkills'
+
+/** Metadata-only slash candidate. Skill instructions remain on the Gateway. */
+export interface SkillCandidate extends SelectedSkillRef {
+  generation: number
+  description: string
+  descriptionZh?: string
+  aliases: readonly string[]
+  kind: 'skill' | 'meta'
+  source: 'extra' | 'bundled' | 'managed' | 'personal' | 'project' | 'workspace'
+  disabled: boolean
+  manualOnly: boolean
+  ready: boolean
+  reason?: string
+  reasonCode?: string
+}
 
 export interface SkillInstall {
   id: string
@@ -149,6 +165,9 @@ export interface SkillDependencyInstallOutcome {
 
 export interface Skill {
   name: string
+  disabled?: boolean
+  user_invocable?: boolean
+  disable_model_invocation?: boolean
   description?: string
   description_zh?: string
   emoji?: string

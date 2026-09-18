@@ -144,6 +144,13 @@
               "type": "null"
             }
           ]
+        },
+        "selectedSkills": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/SelectedSkillRef"
+          }
         }
       }
     },
@@ -196,6 +203,13 @@
         },
         "position": {
           "type": "integer"
+        },
+        "selectedSkills": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/SelectedSkillRef"
+          }
         }
       }
     },
@@ -276,7 +290,10 @@
       "additionalProperties": false,
       "properties": {
         "pagePath": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1,
           "maxLength": 4096,
           "pattern": "\\S",
@@ -340,6 +357,32 @@
           ],
           "maxLength": 16384,
           "description": "The Gateway enforces a 16384-byte UTF-8 limit."
+        }
+      }
+    },
+    "SelectedSkillRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "instanceId",
+        "digest"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "instanceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "digest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
         }
       }
     }

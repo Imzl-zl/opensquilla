@@ -186,6 +186,18 @@ def is_public_ordinary(skill: SkillSpec, *, coding_mode: bool) -> bool:
 
     if bool(getattr(skill, "disable_model_invocation", False)):
         return False
+    return _is_ordinary_domain(skill, coding_mode=coding_mode)
+
+
+def is_user_invocable_ordinary(skill: SkillSpec, *, coding_mode: bool) -> bool:
+    """Public manual selection, including skills excluded from model discovery."""
+
+    return bool(getattr(skill, "user_invocable", True)) and _is_ordinary_domain(
+        skill, coding_mode=coding_mode,
+    )
+
+
+def _is_ordinary_domain(skill: SkillSpec, *, coding_mode: bool) -> bool:
     name = str(getattr(skill, "name", ""))
     layer = getattr(skill, "layer", SkillLayer.EXTRA)
     if name in CODING_MODE_SKILLS:
@@ -280,10 +292,13 @@ def can_view_skill(
     *,
     coding_mode: bool,
     owner_meta_skill: str = "",
+    explicitly_selected: bool = False,
 ) -> bool:
     """Authorize a lazy body read without widening the public catalog."""
 
     if is_public_ordinary(skill, coding_mode=coding_mode):
+        return True
+    if explicitly_selected and is_user_invocable_ordinary(skill, coding_mode=coding_mode):
         return True
     return bool(
         owner_meta_skill

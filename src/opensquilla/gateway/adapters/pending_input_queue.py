@@ -203,8 +203,10 @@ class GatewayPendingInputQueueAdapter:
             value = self._value_string(raw, *aliases)
             if value is not None:
                 params[name] = value
-        for field in ("pageContext", "promptAnnotationIds", "prompt_annotation_ids",
-                      "documentContext", "document_context"):
+        for field in (
+            "pageContext", "selectedSkills", "promptAnnotationIds", "prompt_annotation_ids",
+            "documentContext", "document_context",
+        ):
             if field in raw:
                 params[field] = raw[field]
         confirmed = raw.get("confirmedPlainText", raw.get("confirmed_plain_text", False))

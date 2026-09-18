@@ -18,6 +18,7 @@ from opensquilla.process_tree import (
     capture_process_tree_owner,
     create_owned_subprocess_exec,
 )
+from opensquilla.skills.body import emit_skill_load, expanded_skill_body
 from opensquilla.skills.catalog_policy import can_view_skill, project_public_catalog
 from opensquilla.skills.hub.defaults import (
     build_default_skill_installer,
@@ -116,11 +117,7 @@ def _expanded_skill_body(skill: Any) -> str:
     selected through ``skill_view`` receives the runtime base directory.
     """
 
-    body = str(getattr(skill, "content", "") or "")
-    base_dir = str(getattr(skill, "base_dir", "") or "")
-    if not body or not base_dir:
-        return body
-    return body.replace("{baseDir}", base_dir).replace("{base_dir}", base_dir)
+    return expanded_skill_body(skill)
 
 
 async def _pinned_resource_tree_matches(skill: Any) -> bool:
@@ -474,7 +471,14 @@ def create_skill_tools(
     )
     async def skill_view(name: str, file_path: str | None = None) -> str:
         _reject_guest_skill_tool("skill_view")
+        tool_ctx = current_tool_context.get()
+        body_requested = not file_path or file_path.strip().lstrip("./") in {"", "SKILL.md"}
         if _loader is None:
+            if body_requested:
+                await emit_skill_load(
+                    tool_ctx, None, name=name, source="auto", status="failed",
+                    error="Skill catalog is unavailable.",
+                )
             return "No skill loader available."
         # Gate operator-disabled / coding-mode skills here too: removing them
         # from <available_skills> is not enough if skill_view can fetch any
@@ -488,6 +492,9 @@ def create_skill_tools(
             skill,
             coding_mode=_skill_available("code-task"),
             owner_meta_skill=current_meta_skill_owner.get(),
+            explicitly_selected=(
+                getattr(skill, "instance_id", "") in getattr(tool_ctx, "verified_skill_ids", set())
+            ),
         ):
             logger.info(
                 "skill_view.blocked_by_catalog_policy",
@@ -496,6 +503,11 @@ def create_skill_tools(
             )
             skill = None
         if skill is None:
+            if body_requested:
+                await emit_skill_load(
+                    tool_ctx, None, name=name, source="auto", status="failed",
+                    error="Skill is unavailable in this turn's catalog or permissions.",
+                )
             return (
                 f"Skill not found: {name}. This skill is not available in the "
                 "current skill catalog. Do not search host filesystem paths to "
@@ -505,35 +517,44 @@ def create_skill_tools(
                 "becomes visible next turn; absence here does not mean installation failed."
             )
 
-        if file_path:
-            normalized_path = file_path.strip().lstrip("./")
-            if normalized_path in {"", "SKILL.md"}:
-                return _expanded_skill_body(skill) or (f"(Skill '{name}' has no body content)")
-
-            from pathlib import Path
-
-            from opensquilla.skills.resources import SkillResources
-
-            if not await _pinned_resource_tree_matches(skill):
-                return _resource_generation_mismatch(name)
-
-            resources = SkillResources(
-                Path(skill.base_dir),
-                managed_manifest_files=_managed_resource_manifest(
-                    skill,
-                    lockfile_path=resource_lockfile_path,
-                ),
+        if body_requested:
+            source = (
+                "user" if getattr(skill, "instance_id", "")
+                in getattr(tool_ctx, "verified_skill_ids", set())
+                else "auto"
             )
-            content = await asyncio.to_thread(resources.read_resource, normalized_path)
-            if content is None:
-                return f"File not found in skill '{name}': {file_path}"
-            # Close the check/read race: a concurrent publish after the first
-            # digest must not leak its bytes into this pinned turn.
-            if not await _pinned_resource_tree_matches(skill):
-                return _resource_generation_mismatch(name)
-            return content
+            await emit_skill_load(tool_ctx, skill, source=source, status="loading")
+            body = _expanded_skill_body(skill)
+            await emit_skill_load(
+                tool_ctx, skill, source=source, status="loaded" if body.strip() else "failed",
+                error="" if body.strip() else "Skill has no instruction body.",
+            )
+            return body or f"(Skill '{name}' has no body content)"
 
-        return _expanded_skill_body(skill) or f"(Skill '{name}' has no body content)"
+        assert file_path is not None
+        normalized_path = file_path.strip().lstrip("./")
+        from pathlib import Path
+
+        from opensquilla.skills.resources import SkillResources
+
+        if not await _pinned_resource_tree_matches(skill):
+            return _resource_generation_mismatch(name)
+
+        resources = SkillResources(
+            Path(skill.base_dir),
+            managed_manifest_files=_managed_resource_manifest(
+                skill,
+                lockfile_path=resource_lockfile_path,
+            ),
+        )
+        content = await asyncio.to_thread(resources.read_resource, normalized_path)
+        if content is None:
+            return f"File not found in skill '{name}': {file_path}"
+        # Close the check/read race: a concurrent publish after the first
+        # digest must not leak its bytes into this pinned turn.
+        if not await _pinned_resource_tree_matches(skill):
+            return _resource_generation_mismatch(name)
+        return content
 
     @tool(
         name="skill_search_community",

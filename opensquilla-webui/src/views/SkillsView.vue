@@ -188,15 +188,19 @@
       :installing-deps-id="installingDepsId"
       :uninstalling-name="uninstallingName"
       :mutation-disabled="mutationBusy"
+      :can-set-enabled="skillCatalog.supportsSetEnabled?.() ?? false"
+      :setting-enabled="settingEnabled"
       @close="closeDialog"
       @install-deps="installDepsAndMaybeClose"
       @uninstall="uninstallSkillAndClose"
+      @set-enabled="setSkillEnabled"
     />
   </div>
 </template>
 
 <script setup lang="ts">
-import { inject, nextTick, onActivated, onDeactivated, onUnmounted, ref } from 'vue'
+import { inject, nextTick, onActivated, onDeactivated, onUnmounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import ControlSwitch from '@/components/ControlSwitch.vue'
@@ -216,6 +220,7 @@ import type { Proposal, Skill } from '@/types/skills'
 import { SKILL_CATALOG_KEY, type SkillReloadResult } from '@/modules/skillCatalog'
 
 const { t } = useI18n()
+const route = useRoute()
 const skillsOverviewOpen = ref(false)
 const { pushToast } = useToasts()
 const injectedSkillCatalog = inject(SKILL_CATALOG_KEY)
@@ -223,6 +228,7 @@ if (!injectedSkillCatalog) throw new Error('SkillCatalog was not provided')
 const skillCatalog = injectedSkillCatalog
 const addSkillOpen = ref(false)
 const reloading = ref(false)
+const settingEnabled = ref(false)
 const selectedProposal = ref<Proposal | null>(null)
 const proposalsPanelRef = ref<InstanceType<typeof PendingSkillProposals> | null>(null)
 
@@ -350,6 +356,31 @@ const {
   installCurrentDependencies,
 } = skillDetail
 
+async function setSkillEnabled(name: string, enabled: boolean) {
+  if (!skillCatalog.supportsSetEnabled?.() || !mutationGate.acquire('allow_use')) return
+  const original = selectedSkill.value
+  if (!original || original.name !== name) {
+    mutationGate.release('allow_use')
+    return
+  }
+  settingEnabled.value = true
+  try {
+    const result = await skillCatalog.setEnabled({ name, enabled })
+    if (result.persisted) {
+      pushToast(t(result.refreshed
+        ? enabled ? 'cronSkills.skillDetail.enabledSaved' : 'cronSkills.skillDetail.disabledSaved'
+        : 'cronSkills.skillDetail.refreshPending'), { tone: result.refreshed ? 'ok' : 'warn' })
+      await loadData()
+      if (selectedSkill.value === original) await openSkill({ ...original, disabled: !enabled })
+    }
+  } catch (error) {
+    pushToast(String(error instanceof Error ? error.message : error), { tone: 'danger' })
+  } finally {
+    settingEnabled.value = false
+    mutationGate.release('allow_use')
+  }
+}
+
 // This view is kept-alive (route meta.keepAlive), so the data fetch is bound on
 // activation rather than mount — onMounted/onUnmounted only fire on first mount /
 // cache eviction, not when navigating away and back. onActivated also runs on
@@ -358,8 +389,23 @@ const {
 // no-op, but it is kept idempotent and wired to both onDeactivated and onUnmounted
 // to match the reference pattern and guard against future additions.
 let unsubs: Array<() => void> = []
+let activeView = false
+let routeSkillRequest = 0
+
+async function openRequestedSkill() {
+  const request = ++routeSkillRequest
+  const name = typeof route.query.skill === 'string' ? route.query.skill : ''
+  if (!activeView || !name) return
+  const skill = catalog.allSkills.value.find(item => item.name === name && item.active !== false)
+    || catalog.allSkills.value.find(item => item.name === name)
+  if (request === routeSkillRequest && skill) await openSkill(skill)
+}
+
+watch(() => route.query.skill, () => { void openRequestedSkill() })
 
 function teardownLive() {
+  activeView = false
+  routeSkillRequest += 1
   unsubs.forEach(unsub => unsub())
   unsubs = []
   closeDialog()
@@ -367,8 +413,9 @@ function teardownLive() {
 }
 
 onActivated(() => {
+  activeView = true
   if (queueRunning.value) return
-  void loadData()
+  void loadData().then(() => openRequestedSkill())
 })
 
 onDeactivated(teardownLive)

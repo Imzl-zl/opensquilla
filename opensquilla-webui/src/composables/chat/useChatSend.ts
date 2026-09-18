@@ -1,3 +1,4 @@
+import { copySelectedSkills, sameSelectedSkills, type SelectedSkillRef } from '@/types/selectedSkills'
 import { normalizePageContext, pageContextForAnnotations, pageAnnotationSnapshots, type ChatPageContext } from '@/types/pageContext'
 import { computed, ref, watch, type ComputedRef, type Ref } from 'vue'
 import i18n from '@/i18n'
@@ -169,6 +170,9 @@ interface SendAttempt {
   draftIds: string[]
   promptAnnotations: PromptAnnotationSnapshot[]
   promptAnnotationsAcknowledged?: boolean
+  selectedSkills: SelectedSkillRef[]
+  composerSkillRefs?: SelectedSkillRef[]
+  unconsumedComposer?: ComposerSnapshot
   pageContext: ChatPageContext | null
   queueMode?: 'steer'
   text: string
@@ -208,6 +212,7 @@ interface ExplicitSendPayload {
   forkBeforeMessageId: string | null
   workspaceId?: string | null
   initialCollaborationMode?: CollaborationMode | null
+  selectedSkills?: SelectedSkillRef[]
   pageContext?: ChatPageContext | null
   initialRoutingMode?: GatewayModelRoutingMode | null
 }
@@ -216,6 +221,7 @@ interface ComposerSnapshot {
   revision: number | null
   inputText: string
   draftIds: string[]
+  selectedSkills: SelectedSkillRef[]
   pageContext: ChatPageContext | null
   attachmentRefs: Attachment[]
   payloadAttachments: Attachment[]
@@ -258,6 +264,7 @@ interface DispatchSendOptions {
 }
 
 export interface UsageBarrierReplayPayload {
+  selectedSkills?: SelectedSkillRef[]
   text: string
   forkBeforeMessageId: string
 }
@@ -426,6 +433,7 @@ function matchesRecoveredDraft(
   input: {
     requestSessionKey: string
     draftIds: readonly string[]
+    selectedSkills: SelectedSkillRef[]
     pageContext: ChatPageContext | null
     text: string
     attachments: SendableAttachment[]
@@ -440,6 +448,7 @@ function matchesRecoveredDraft(
     attempt.requestSessionKey === input.requestSessionKey &&
     JSON.stringify(attempt.draftIds) === JSON.stringify(input.draftIds) &&
     JSON.stringify(attempt.pageContext) === JSON.stringify(input.pageContext) &&
+    sameSelectedSkills(attempt.selectedSkills, input.selectedSkills) &&
     attempt.text === input.text &&
     attempt.intent === input.intent &&
     attempt.initialCollaborationMode === input.initialCollaborationMode &&
@@ -464,6 +473,11 @@ export interface UseChatSendOptions {
   turnCommands: TurnCommands
   activeSteerCapability?: Readonly<Ref<ChatSteerCapability | null>>
   inputText: Ref<string>
+  selectedSkills?: Ref<SelectedSkillRef[]>
+  consumeAcceptedDraft?: (
+    sessionKey: string,
+    snapshot: { text: string; selectedSkills: SelectedSkillRef[] },
+  ) => boolean | void | Promise<boolean | void>
   messages: Ref<ChatMessage[]>
   sessionKey: Ref<string>
   pendingQueueOwnerContext: Ref<PendingQueueOwnerContext | null>
@@ -545,6 +559,7 @@ export interface UseChatSendOptions {
     enqueueOptions?: {
       confirmedPlainText?: boolean
       draftIds?: readonly string[]
+      selectedSkills?: SelectedSkillRef[]
       pageContext?: ChatPageContext
       attachments?: Attachment[]
       deliveryIdentity?: string
@@ -554,6 +569,7 @@ export interface UseChatSendOptions {
     payload: {
       text: string
       draftIds?: readonly string[]
+      selectedSkills?: SelectedSkillRef[]
       pageContext?: ChatPageContext
       attachments?: Attachment[]
       intent?: string | null
@@ -719,6 +735,7 @@ export function useChatSend(options: UseChatSendOptions) {
     return {
       revision: options.composerRevision?.value ?? null,
       inputText: options.inputText.value,
+      selectedSkills: copySelectedSkills(options.selectedSkills?.value),
       draftIds: currentAnnotationDraftIds(),
       pageContext: pageContextForAnnotations(
         options.promptAnnotationSnapshots?.(currentAnnotationDraftIds()) || [],
@@ -758,6 +775,7 @@ export function useChatSend(options: UseChatSendOptions) {
     ) return false
     return (
       options.inputText.value === snapshot.inputText
+      && sameSelectedSkills(options.selectedSkills?.value, snapshot.selectedSkills)
       && JSON.stringify(currentAnnotationDraftIds()) === JSON.stringify(snapshot.draftIds)
       && options.pendingSessionIntent.value === snapshot.intent
       && options.pendingForkBeforeMessageId.value === snapshot.forkBeforeMessageId
@@ -777,6 +795,7 @@ export function useChatSend(options: UseChatSendOptions) {
       workspaceId: snapshot.workspaceId,
       initialCollaborationMode: snapshot.initialCollaborationMode,
       pageContext: snapshot.pageContext,
+      selectedSkills: copySelectedSkills(snapshot.selectedSkills),
       initialRoutingMode: snapshot.initialRoutingMode,
     }
   }
@@ -1037,6 +1056,7 @@ export function useChatSend(options: UseChatSendOptions) {
     attempt: SendAttempt,
     response: TurnSendResponse,
   ): Promise<boolean> {
+    consumeAcceptedComposer(attempt)
     acknowledgeAttemptPromptAnnotations(attempt, response)
     attempt.acceptanceResolved = true
     attempt.acceptedTaskId = acceptedTaskId(response)
@@ -1166,7 +1186,43 @@ export function useChatSend(options: UseChatSendOptions) {
     return intent === 'new_chat' ? options.initialRoutingMode.value : null
   }
 
+  function consumeAcceptedComposer(attempt: SendAttempt): void {
+    if (options.sessionKey.value !== attempt.requestSessionKey) {
+      if (attempt.unconsumedComposer && !attempt.hiddenControl) {
+        const snapshot = attempt.unconsumedComposer
+        attempt.unconsumedComposer = undefined
+        void Promise.resolve(options.consumeAcceptedDraft?.(attempt.requestSessionKey, {
+          text: snapshot.inputText,
+          selectedSkills: copySelectedSkills(snapshot.selectedSkills),
+        })).catch(() => {})
+      }
+      return
+    }
+    if (!attempt.hiddenControl && options.selectedSkills && attempt.unconsumedComposer
+      && options.selectedSkills.value === attempt.composerSkillRefs
+      && composerMatchesSnapshot(attempt.unconsumedComposer)) {
+      const sentAttachmentIds = new Set(attempt.attachments.map(attachment => attachment.local_id))
+      options.inputText.value = ''
+      options.selectedSkills.value = []
+      options.pendingAttachments.value = options.pendingAttachments.value.filter(
+        attachment => !sentAttachmentIds.has(attachment.local_id),
+      )
+      if (options.pendingForkBeforeMessageId.value === attempt.forkBeforeMessageId) {
+        options.pendingForkBeforeMessageId.value = null
+      }
+      options.autoResizeTextarea()
+      attempt.unconsumedComposer = undefined
+    }
+  }
+
+  function explicitComposerChanged(attempt: SendAttempt): boolean {
+    return Boolean(attempt.selectedSkills.length && attempt.unconsumedComposer
+      && (options.selectedSkills?.value !== attempt.composerSkillRefs
+        || !composerMatchesSnapshot(attempt.unconsumedComposer)))
+  }
+
   function consumeAcceptedSessionIntent(attempt: SendAttempt): void {
+    consumeAcceptedComposer(attempt)
     if (options.sessionKey.value !== attempt.requestSessionKey) return
     if (attempt.intent === 'new_chat') {
       options.materializeDraftSession?.(attempt.requestSessionKey)
@@ -1635,6 +1691,13 @@ export function useChatSend(options: UseChatSendOptions) {
   function restoreResponseHandoffDraft(record: ResponseHandoffWalRecord): boolean {
     if (options.sessionKey.value !== record.requestSessionKey) return false
     if (record.restoreComposerOnFailure === false) return true
+    if (record.params.selectedSkills?.length && options.inputText.value
+      && options.inputText.value !== record.composerText) return false
+    if (record.params.selectedSkills?.length && options.selectedSkills) {
+      if (options.selectedSkills.value.length
+        && !sameSelectedSkills(options.selectedSkills.value, record.params.selectedSkills)) return false
+      options.selectedSkills.value = copySelectedSkills(record.params.selectedSkills)
+    }
     const restoredText = record.composerText.trim()
     if (restoredText && options.inputText.value !== restoredText) {
       options.inputText.value = [restoredText, options.inputText.value]
@@ -1946,6 +2009,9 @@ export function useChatSend(options: UseChatSendOptions) {
       ? options.steerDelivery.attemptForItem(pendingItem)
       : null
     if (!requestSessionKey || !text.trim()
+      || pendingItem?.selectedSkills?.length
+      || optionsForSteer.composerSnapshot?.selectedSkills.length
+      || (!pendingItem && options.selectedSkills?.value.length)
       || pendingItem?.pageContext || optionsForSteer.composerSnapshot?.pageContext) return 'not_sent'
     if (!options.turnCommands.supports('same-turn-steer')) {
       return recovered ? 'retryable_failure' : 'not_sent'
@@ -2320,6 +2386,7 @@ export function useChatSend(options: UseChatSendOptions) {
         requestSessionKey: options.sessionKey.value,
         draftIds: composerSnapshot.draftIds,
         pageContext: composerSnapshot.pageContext,
+        selectedSkills: composerSnapshot.selectedSkills,
         text,
         attachments: sendableAttachments,
         intent: composerSnapshot.intent,
@@ -2367,6 +2434,14 @@ export function useChatSend(options: UseChatSendOptions) {
       ) return
     }
 
+    if (composerSnapshot.selectedSkills.length && (
+      slashClassification === 'registered'
+      || (!bypassSlashCommand && !isLiteralSlash && text.startsWith('!'))
+    )) {
+      pushToast(i18n.global.t('chat.skillPalette.commandWithSkills'), { tone: 'info' })
+      return
+    }
+
     const compactInFlight = options.isCompactInFlightForCurrentSession()
     if (
       options.stream.isStreaming.value
@@ -2403,6 +2478,7 @@ export function useChatSend(options: UseChatSendOptions) {
         if (
           options.busySendMode.value === 'steer'
           && !composerSnapshot.pageContext
+          && composerSnapshot.selectedSkills.length === 0
           && !options.taskOwnership?.stopRequestedTaskId.value
           && !isLiteralSlash
           && canSteerPayload(
@@ -2421,6 +2497,7 @@ export function useChatSend(options: UseChatSendOptions) {
         if (invocation.cancelIfComposerChanged && composerChanged) return
         const queuedAnnotationDraftIds = composerSnapshot.draftIds
         const queuedEnqueueOptions = {
+          ...(composerSnapshot.selectedSkills.length ? { selectedSkills: composerSnapshot.selectedSkills } : {}),
           ...(composerSnapshot.pageContext ? {
             pageContext: composerSnapshot.pageContext,
             attachments: composerSnapshot.payloadAttachments,
@@ -2434,6 +2511,7 @@ export function useChatSend(options: UseChatSendOptions) {
           composerChanged || invocation.textOverride !== undefined
             ? options.enqueuePendingPayload?.({
               text: durableText,
+              ...(composerSnapshot.selectedSkills.length ? { selectedSkills: composerSnapshot.selectedSkills } : {}),
               ...(composerSnapshot.pageContext ? { pageContext: composerSnapshot.pageContext } : {}),
               attachments: composerSnapshot.payloadAttachments,
               intent: composerSnapshot.intent,
@@ -2450,7 +2528,7 @@ export function useChatSend(options: UseChatSendOptions) {
                 queueOwnerFromSnapshot(composerSnapshot),
                 queuedEnqueueOptions,
               )
-              : queuedAnnotationDraftIds.length
+              : queuedAnnotationDraftIds.length || composerSnapshot.selectedSkills.length
                 ? options.enqueuePendingInput(
                   durableText,
                   queueOwnerFromSnapshot(composerSnapshot),
@@ -2634,6 +2712,7 @@ export function useChatSend(options: UseChatSendOptions) {
     }
 
     if (delivery === 'steer') {
+      if (item.selectedSkills?.length) return preserveRetryState('not_sent')
       if (item.pendingDeliveryIdentity) return preserveRetryState('not_sent')
       if (text.startsWith('//')) return preserveRetryState('not_sent')
       return dispatchSteerV2(text, { queuedItem: item })
@@ -2644,6 +2723,7 @@ export function useChatSend(options: UseChatSendOptions) {
       payload: {
         attachments: item.attachments,
         pageContext: item.pageContext,
+        selectedSkills: copySelectedSkills(item.selectedSkills),
         intent: item.intent,
         // A queued follow-up has no fork target. In particular, never inherit
         // the fork target of the unrelated draft currently in the composer.
@@ -2736,6 +2816,9 @@ export function useChatSend(options: UseChatSendOptions) {
       ? sendOpts.payload.initialRoutingMode ?? null
       : initialRoutingModeForIntent(intent)
     const initialSendableAttachments = sourceAttachments.filter(isSendableAttachment)
+    const requestedSelectedSkills = copySelectedSkills(
+      sendOpts.payload ? sendOpts.payload.selectedSkills : options.selectedSkills?.value,
+    )
     const requestedPageContext = normalizePageContext(sendOpts.payload?.pageContext)
       || pageContextForAnnotations(options.promptAnnotationSnapshots?.(
         sendOpts.draftIds ?? currentAnnotationDraftIds(),
@@ -2763,6 +2846,7 @@ export function useChatSend(options: UseChatSendOptions) {
           requestSessionKey,
           draftIds: requestedAnnotationDraftIds,
           pageContext: requestedPageContext,
+          selectedSkills: requestedSelectedSkills,
           text,
           attachments: initialSendableAttachments,
           intent,
@@ -2802,6 +2886,11 @@ export function useChatSend(options: UseChatSendOptions) {
         JSON.stringify(currentAnnotationDraftIds())
         !== JSON.stringify(attemptAnnotationDraftIds)
       ) return 'not_sent'
+    }
+    const attemptSelectedSkills = copySelectedSkills(retryAttempt?.selectedSkills ?? requestedSelectedSkills)
+    if (attemptSelectedSkills.length && !options.turnCommands.supports('explicit-skills')) {
+      pushToast(i18n.global.t('chat.skillPalette.unsupported'), { tone: 'warn' })
+      return 'not_sent'
     }
     const attemptPageContext = retryAttempt?.pageContext ?? requestedPageContext
     const sendAttachmentIds = new Set(
@@ -2876,6 +2965,7 @@ export function useChatSend(options: UseChatSendOptions) {
         text: userText,
         ts: new Date().toISOString(),
         clientId: attempt.clientMessageId,
+        ...(attempt.selectedSkills.length ? { selectedSkills: copySelectedSkills(attempt.selectedSkills) } : {}),
         ...(accepted?.messageId ? { messageId: accepted.messageId } : {}),
         ...(accepted?.turnId ? { turnId: accepted.turnId } : {}),
       })
@@ -2908,9 +2998,10 @@ export function useChatSend(options: UseChatSendOptions) {
         // The Vue client never uses the legacy cancel-style steer path. Make
         // ordinary sends explicit so a persisted session queue_mode="steer"
         // from an older client cannot silently turn them into interrupts.
-        queueMode: sendOpts?.queueMode ?? 'followup',
+        queueMode: attemptSelectedSkills.length ? 'followup' : sendOpts?.queueMode ?? 'followup',
         sessionKey: requestSessionKey,
       }
+      if (attemptSelectedSkills.length) params.selectedSkills = copySelectedSkills(attemptSelectedSkills)
       if (attemptPageContext) params.pageContext = attemptPageContext
       if (attemptPageContext?.annotations?.length && !userText) params.displayText = ''
       params.source = chatSourceMetadata(options)
@@ -2942,6 +3033,7 @@ export function useChatSend(options: UseChatSendOptions) {
         draftIds: [...attemptAnnotationDraftIds],
         promptAnnotations: sentSnapshots,
         pageContext: attemptPageContext,
+        selectedSkills: copySelectedSkills(attemptSelectedSkills),
         queueMode: sendOpts?.queueMode,
         text,
         attachments: attachmentsToSend.map(attachment => ({ ...attachment })),
@@ -2977,6 +3069,7 @@ export function useChatSend(options: UseChatSendOptions) {
           ts: now,
           clientId: clientMessageId,
           ...(displayAttachments.length > 0 ? { attachments: displayAttachments } : {}),
+          ...(attempt.selectedSkills.length ? { selectedSkills: copySelectedSkills(attempt.selectedSkills) } : {}),
           ...(attempt.promptAnnotations.length > 0
             ? { promptAnnotations: attempt.promptAnnotations }
             : {}),
@@ -2996,12 +3089,19 @@ export function useChatSend(options: UseChatSendOptions) {
       if (!preDispatchAllowed()) return rejectBeforeDispatch()
     }
     if (!preDispatchAllowed()) return rejectBeforeDispatch()
+    if (preserveComposer) {
+      attempt.composerSkillRefs = undefined
+      attempt.unconsumedComposer = undefined
+    }
     if (!preserveComposer) options.closeSlashMenu()
     recordSessionNavigationDiag('send.start', {
       requestSession: requestSessionKey,
       current: requestSessionKey,
     })
     if (!preserveComposer) {
+      if (sameSelectedSkills(options.selectedSkills?.value, attempt.selectedSkills)) {
+        attempt.composerSkillRefs = options.selectedSkills?.value
+      }
       recoveredAttempt = null
       const composerTextBeforeSend = options.inputText.value
       const preserveEditedComposer = Boolean(
@@ -3009,13 +3109,21 @@ export function useChatSend(options: UseChatSendOptions) {
         && composerTextBeforeSend
         && composerTextBeforeSend !== retryAttempt.composerText
       )
-      options.inputText.value = preserveEditedComposer ? composerTextBeforeSend : ''
-      options.autoResizeTextarea()
-      options.pendingAttachments.value = attachmentsToKeep
-      if (options.pendingForkBeforeMessageId.value === forkBeforeMessageId) {
-        options.pendingForkBeforeMessageId.value = null
+      if (attempt.selectedSkills.length) {
+        // Keep the complete explicit request in its draft until admission is
+        // known. Navigating away or losing an ACK cannot strand only its tags.
+        attempt.unconsumedComposer = composerTextBeforeSend === attempt.composerText
+          && sameSelectedSkills(options.selectedSkills?.value, attempt.selectedSkills)
+          ? captureComposerSnapshot() : undefined
+      } else {
+        options.inputText.value = preserveEditedComposer ? composerTextBeforeSend : ''
+        options.autoResizeTextarea()
+        options.pendingAttachments.value = attachmentsToKeep
+        if (options.pendingForkBeforeMessageId.value === forkBeforeMessageId) {
+          options.pendingForkBeforeMessageId.value = null
+        }
       }
-    } else if (sendOpts.composerSnapshot) {
+    } else if (sendOpts.composerSnapshot && !attempt.selectedSkills.length) {
       const originalAttachmentRefs = new Set(sendOpts.composerSnapshot.attachmentRefs)
       options.pendingAttachments.value = options.pendingAttachments.value.filter(
         attachment => !originalAttachmentRefs.has(attachment),
@@ -3103,7 +3211,9 @@ export function useChatSend(options: UseChatSendOptions) {
       attempt.acceptanceRequest = { request: acceptanceRequest }
       attempt.acceptanceInFlight = true
       const res = await options.turnCommands.send(acceptanceRequest)
+      consumeAcceptedComposer(attempt)
       acknowledgeAttemptPromptAnnotations(attempt, res)
+
       attempt.acceptanceResolved = true
       attempt.acceptedTaskId = acceptedTaskId(res)
       attempt.acceptedSessionKey = res?.sessionKey || requestSessionKey
@@ -3400,15 +3510,16 @@ export function useChatSend(options: UseChatSendOptions) {
       rememberRetryableAttempt(true)
       if (!preserveComposer && !acceptedError && !sendOpts.suppressRejectedFailureMessage) {
         const restoredSnapshot = captureComposerSnapshot()
-        const canRetry = commandError?.accepted === false
-          && commandError.retryable !== false
-          && Boolean(attempt.deliveryIdentity)
-          && attempt.deliveryIdentity === options.deliveryIdentity?.value
-          && restoredSnapshot.inputText === attempt.composerText
+        const separateSkillDraft = explicitComposerChanged(attempt)
+          || (options.selectedSkills?.value.length
+          && !sameSelectedSkills(options.selectedSkills.value, attempt.selectedSkills))
+          || (attempt.selectedSkills.length && restoredSnapshot.inputText !== attempt.composerText)
+        const originalDraftRestored = restoredSnapshot.inputText === attempt.composerText
           && matchesRecoveredDraft(attempt, {
             requestSessionKey,
             draftIds: restoredSnapshot.draftIds,
             pageContext: restoredSnapshot.pageContext,
+            selectedSkills: restoredSnapshot.selectedSkills,
             text: attempt.text,
             attachments: restoredSnapshot.payloadAttachments.filter(isSendableAttachment),
             intent: restoredSnapshot.intent,
@@ -3417,6 +3528,11 @@ export function useChatSend(options: UseChatSendOptions) {
             forkBeforeMessageId: restoredSnapshot.forkBeforeMessageId,
             workspaceId: restoredSnapshot.workspaceId,
           })
+        const canRetry = commandError?.accepted === false
+          && commandError.retryable !== false
+          && Boolean(attempt.deliveryIdentity)
+          && attempt.deliveryIdentity === options.deliveryIdentity?.value
+          && (separateSkillDraft || originalDraftRestored)
         pushToast(sendFailureMessage(err), {
           tone: 'danger',
           duration: 8000,
@@ -3433,7 +3549,21 @@ export function useChatSend(options: UseChatSendOptions) {
                 || options.stream.isStreaming.value
                 || hasAuthoritativeWork()
               ) return
-              void onSend()
+              if (separateSkillDraft) {
+                void dispatchSend(attempt.text, {
+                  retryAttempt: attempt, preserveComposer: true, draftIds: attempt.draftIds,
+                  payload: {
+                    selectedSkills: copySelectedSkills(attempt.selectedSkills),
+                    attachments: attempt.attachments, pageContext: attempt.pageContext,
+                    intent: attempt.intent, forkBeforeMessageId: attempt.forkBeforeMessageId,
+                    workspaceId: attempt.workspaceId,
+                    initialCollaborationMode: attempt.initialCollaborationMode,
+                    initialRoutingMode: attempt.initialRoutingMode,
+                  },
+                })
+              } else {
+                void onSend()
+              }
             },
           } } : {}),
         })
@@ -3491,6 +3621,7 @@ export function useChatSend(options: UseChatSendOptions) {
       return Boolean(
         anchor
         && anchor.text === text
+        && sameSelectedSkills(anchor.selectedSkills, payload.selectedSkills)
         && (anchor.attachments?.length ?? 0) === 0,
       )
     }
@@ -3520,6 +3651,7 @@ export function useChatSend(options: UseChatSendOptions) {
         requestSessionKey,
         draftIds: [],
         pageContext: null,
+        selectedSkills: copySelectedSkills(payload.selectedSkills),
         text,
         attachments: [],
         intent: null,
@@ -3534,6 +3666,7 @@ export function useChatSend(options: UseChatSendOptions) {
     try {
       const outcome = await dispatchSend(text, {
         payload: {
+          selectedSkills: copySelectedSkills(payload.selectedSkills),
           attachments: [],
           intent: null,
           forkBeforeMessageId,
@@ -3569,6 +3702,18 @@ export function useChatSend(options: UseChatSendOptions) {
     recovery: { requiresIdempotentReplay: boolean },
   ) {
     const currentText = options.inputText.value
+    if (explicitComposerChanged(attempt) || (options.selectedSkills?.value.length
+      && !sameSelectedSkills(options.selectedSkills.value, attempt.selectedSkills))
+      || (attempt.selectedSkills.length && currentText && currentText !== attempt.composerText)) {
+      // A rejected request still owns its bound identities. Do not merge its
+      // text into a newer draft that explicitly selected different instructions.
+      attempt.requiresIdempotentReplay = recovery.requiresIdempotentReplay
+      recoveredAttempt = attempt
+      return
+    }
+    if (attempt.selectedSkills.length && options.selectedSkills?.value.length === 0) {
+      options.selectedSkills.value = copySelectedSkills(attempt.selectedSkills)
+    }
     if (!currentText) {
       options.inputText.value = attempt.composerText
     } else if (
@@ -3892,6 +4037,7 @@ export function useChatSend(options: UseChatSendOptions) {
       draftIds: [],
       promptAnnotations: [],
       pageContext: null,
+      selectedSkills: [],
       text: providerText,
       attachments: [],
       intent: hiddenSessionIntent,

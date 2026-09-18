@@ -204,6 +204,7 @@ from opensquilla.engine.types import (
     ErrorEvent,
     RouterControlReplayEvent,
     RunHeartbeatEvent,
+    SkillLoadEvent,
     TextDeltaEvent,
     ThinkingLevel,
     ToolResultEvent,
@@ -617,7 +618,7 @@ def collect_invoked_skills(
     *,
     extra_first: list[str] | None = None,
 ) -> list[str]:
-    """Collect skill names from skill_view/meta_invoke tool segments."""
+    """Prefer real body-load receipts, retaining legacy transcript compatibility."""
 
     seen: set[str] = set()
     result: list[str] = []
@@ -625,11 +626,21 @@ def collect_invoked_skills(
         if isinstance(name, str) and name and name not in seen:
             seen.add(name)
             result.append(name)
+    receipt_names = {
+        segment.get("name") for segment in turn_segments if segment.get("type") == "skill_load"
+    }
     for segment in turn_segments:
         tool_name = segment.get("name")
-        if tool_name not in {"skill_view", "meta_invoke"}:
+        if segment.get("type") == "skill_load":
+            if segment.get("status") != "loaded":
+                continue
+            skill_name = segment.get("name")
+        elif tool_name in {"skill_view", "meta_invoke"}:
+            skill_name = (segment.get("input") or {}).get("name")
+            if tool_name == "skill_view" and skill_name in receipt_names:
+                continue
+        else:
             continue
-        skill_name = (segment.get("input") or {}).get("name")
         if not isinstance(skill_name, str) or not skill_name or skill_name in seen:
             continue
         seen.add(skill_name)
@@ -6329,6 +6340,19 @@ class TurnRunner:
         final_text_parts: list[str] = []
         reasoning_parts: list[str] = []
         turn_segments: list[dict] = []
+        skill_load_events: deque[SkillLoadEvent] = deque()
+        skill_load_ready = asyncio.Event()
+
+        async def _record_skill_load(receipt: dict[str, Any]) -> None:
+            content = {**receipt, "turnId": turn_id}
+            turn_segments.append({"type": "skill_load", **content})
+            skill_load_events.append(SkillLoadEvent(content=content))
+            skill_load_ready.set()
+
+        if tool_context is not None:
+            tool_context = replace(
+                tool_context, skill_load_emitter=_record_skill_load, verified_skill_ids=set(),
+            )
         turn_artifacts: list[dict[str, Any]] = []
         artifact_delivery_failures: list[str] = []
         pipeline_usage_context: UsageExecutionContext | None = None
@@ -6620,7 +6644,7 @@ class TurnRunner:
 
             with bind_usage_accounting_scope(turn_usage_scope):
                 mark_current_turn_failure_stage(TurnFailureStage.PROMPT_ASSEMBLY)
-                pa_outcome = await self._prompt_assembler_stage.run(
+                prompt_assembly = self._prompt_assembler_stage.run(
                     PromptAssemblerStageInput(
                         runtime_message=runtime_message,
                         semantic_input=semantic_input,
@@ -6658,7 +6682,28 @@ class TurnRunner:
                         provider_request_correlation=provider_request_correlation,
                     )
                 )
+                if tool_context is not None and tool_context.selected_skills:
+                    # Keep one producer for this stage so receipts can leave
+                    # while digest checks or routing are still awaiting work.
+                    assembly_task = asyncio.create_task(prompt_assembly)
+                    assembly_task.add_done_callback(lambda _task: skill_load_ready.set())
+                    try:
+                        while not assembly_task.done():
+                            await skill_load_ready.wait()
+                            skill_load_ready.clear()
+                            while skill_load_events:
+                                yield skill_load_events.popleft()
+                        pa_outcome = await assembly_task
+                    finally:
+                        if not assembly_task.done():
+                            assembly_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await _finish_required_cancel_cleanup(assembly_task)
+                else:
+                    pa_outcome = await prompt_assembly
             pa_out = pa_outcome.require_output()
+            while skill_load_events:
+                yield skill_load_events.popleft()
             provider = pa_out.provider
             turn = pa_out.turn
             turn_obj = turn
@@ -7505,6 +7550,8 @@ class TurnRunner:
             try:
                 with bind_usage_accounting_scope(turn_usage_scope):
                     async for event in stage_stream:
+                        while skill_load_events:
+                            yield skill_load_events.popleft()
                         if isinstance(event, RouterControlReplayEvent):
                             router_control_replay_event = event
                             yield event
@@ -8041,6 +8088,8 @@ class TurnRunner:
                 execution_context,
                 control_reason or ControlTerminalReason.CANCEL,
             )
+            while skill_load_events:
+                yield skill_load_events.popleft()
             if control_event is not None:
                 yield control_event
             raise
@@ -8057,6 +8106,8 @@ class TurnRunner:
                     expected_session_epoch=expected_session_epoch,
                 )
                 raise
+            while skill_load_events:
+                yield skill_load_events.popleft()
             provider_boundary_failure_kind = str(
                 getattr(exc, "failure_kind", "") or ""
             ).strip()
@@ -8161,6 +8212,11 @@ class TurnRunner:
                     "role": "system",
                     "content": transcript_message,
                 }
+                skill_segments = [
+                    segment for segment in turn_segments if segment.get("type") == "skill_load"
+                ]
+                if skill_segments:
+                    error_append_kwargs["tool_calls"] = skill_segments
                 if expected_session_id is not None:
                     error_append_kwargs["expected_session_id"] = expected_session_id
                 if expected_session_epoch is not None:
@@ -9015,6 +9071,11 @@ class TurnRunner:
                 loaded_skills, coding_mode=ctx.coding_mode, include_stable_meta=False,
             ):
                 skill_tools.update({"skill_list", "skill_view"})
+            if ctx.selected_skills:
+                # Manual-only catalogs still need the read capability. Normal
+                # profile/allow/deny policy below remains authoritative; the
+                # selected body is verified before any provider request.
+                skill_tools.add("skill_view")
             if skill_tools:
                 if ctx.surfaced_tools is None:
                     ctx.surfaced_tools = set()
@@ -10080,6 +10141,8 @@ class TurnRunner:
             initial_metadata["skill_catalog_generation"] = int(
                 getattr(skill_catalog, "generation", 0)
             )
+        if tool_context is not None and tool_context.selected_skills:
+            initial_metadata["selected_skills"] = list(tool_context.selected_skills)
         initial_provider_config = getattr(cloned_selector, "current_config", None)
         if initial_provider_config is not None:
             durable_base_provider = str(getattr(initial_provider_config, "provider", "") or "")
@@ -10286,6 +10349,11 @@ class TurnRunner:
             skill_catalog=(skill_catalog),
             provider_request_correlation=provider_request_correlation,
         )
+        # Explicit instructions are mandatory, unlike optional pipeline steps.
+        # Validate before routing can perform even an auxiliary model request.
+        from opensquilla.engine.steps.selected_skills import load_selected_skills
+
+        turn = await load_selected_skills(turn, tool_context)
         planning_turn = (
             tool_context is not None
             and str(getattr(tool_context, "collaboration_mode", "default")) == "plan"
