@@ -125,8 +125,8 @@ SESSIONS_LIST_GATEWAY_ADAPTER = PACKAGE_ROOT / "gateway" / "adapters" / "session
 # Primary-provider transitions add resetRecommended and upsertAndActivate.
 # Retire the five legacy memory raw-fallback and repair methods.
 # Add metadata-only Skill candidates and the allow-use setting.
-RUNTIME_RPC_METHOD_BASELINE = 294
-RUNTIME_RPC_METHOD_DIGEST = "f75e8df90b92006cfa2bbb69296731f81636c928e8287bf12f931b85f03fb417"
+RUNTIME_RPC_METHOD_BASELINE = 295
+RUNTIME_RPC_METHOD_DIGEST = "9325609b3f5a9deb73091c32efdd38f4e68143a9f33e77d7d02c304e48817278"
 STATIC_RPC_DECORATOR_BASELINE = 72
 
 # Physical lines in the sessions/runtime slice remain tracked for the final

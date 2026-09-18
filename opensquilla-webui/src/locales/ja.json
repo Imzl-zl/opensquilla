@@ -1985,10 +1985,98 @@
           "label": "デバウンス期間（秒）"
         },
         "transport_name": {
+          "label": "接続方式",
           "choices": {
             "polling": "ポーリング",
             "webhook": "Webhook"
           }
+        },
+        "access_token": {
+          "label": "アクセストークン"
+        },
+        "agent_id_int": {
+          "label": "エージェント ID（整数）"
+        },
+        "app_password": {
+          "label": "アプリパスワード"
+        },
+        "app_token": {
+          "label": "アプリレベルトークン（xapp-...）"
+        },
+        "application_id": {
+          "label": "アプリケーション ID"
+        },
+        "cool_app_code": {
+          "label": "Cool App Code"
+        },
+        "corp_id": {
+          "label": "企業 ID"
+        },
+        "default_channel_id": {
+          "label": "デフォルトチャンネル ID"
+        },
+        "device_id": {
+          "label": "デバイス ID"
+        },
+        "domain": {
+          "label": "ドメイン"
+        },
+        "drop_pending_updates": {
+          "label": "未処理のアップデートを破棄"
+        },
+        "encoding_aes_key": {
+          "label": "Encoding AES キー"
+        },
+        "encrypt_key": {
+          "label": "暗号化キー"
+        },
+        "encryption": {
+          "label": "暗号化方式"
+        },
+        "gateway_url": {
+          "label": "ゲートウェイ URL"
+        },
+        "intents": {
+          "label": "Intents ビットマスク"
+        },
+        "password": {
+          "label": "パスワード"
+        },
+        "poll_idle_sleep_s": {
+          "label": "ポーリングアイドル待機（秒）"
+        },
+        "poll_limit": {
+          "label": "1回のポーリング取得上限"
+        },
+        "poll_timeout_s": {
+          "label": "ポーリングタイムアウト（秒）"
+        },
+        "reply_in_thread": {
+          "label": "スレッドで返信"
+        },
+        "robot_code": {
+          "label": "ロボットコード"
+        },
+        "slack_channel_id": {
+          "label": "デフォルトチャンネル ID"
+        },
+        "token": {
+          "label": "ボットトークン（xoxb-...）"
+        },
+        "verification_token": {
+          "label": "検証トークン"
+        },
+        "webhook_path": {
+          "label": "Webhook パス"
+        },
+        "webhook_secret_token": {
+          "label": "Webhook シークレットトークン"
+        },
+        "webhook_url": {
+          "label": "Webhook URL（Webhook のみ）"
+        },
+        "websocket_url": {
+          "label": "WebSocket URL"
         }
       },
       "groups": {
@@ -2424,6 +2512,13 @@
       "enable": "有効化",
       "disable": "無効化",
       "notReported": "報告なし",
+      "transport": {
+        "polling": "ポーリング",
+        "webhook": "Webhook",
+        "websocket": "WebSocket",
+        "http_sync": "HTTP同期",
+        "mixed": "複数の接続方式"
+      },
       "tabs": {
         "overview": "概要",
         "pairings": "メンバー",
@@ -3989,6 +4084,8 @@
       }
     },
     "plan": {
+      "hidePlan": "計画を非表示",
+      "showPlan": "計画を表示",
       "label": "プラン",
       "process": "計画プロセス",
       "revision": "リビジョン {id}",
@@ -4041,7 +4138,7 @@
     },
     "planMode": {
       "label": "プランモード",
-      "readOnly": "エージェントはファイルを変更せず、調査してプランを提案します。",
+      "readOnly": "まず調査してプランを話し合い、実装はまだ行いません。必要なテストやビルドには通常の権限が適用されます。",
       "nextTurn": "次のターンから適用",
       "updating": "更新中…",
       "turnOff": "プランモードをオフ",
@@ -4087,6 +4184,26 @@
       }
     },
     "goal": {
+      "settings": "目標の設定",
+      "tokenBudget": "トークン予算",
+      "noTokenBudget": "トークン制限なし",
+      "invalidTokenBudget": "正の整数を入力してください。",
+      "partialUsageHistory": "過去の使用量は不完全なため、トークン予算には含まれません。",
+      "pendingUsageReceipts": "使用量の記録を待っています。記録が揃ったら Goal を再開してください。",
+      "usageReceiptsRecovered": "使用量の記録が揃いました。準備ができたら Goal を再開してください。",
+      "usageAccountingSince": "トークン予算は {time} 以降に記録された使用量を集計します。",
+      "usageAccountingPending": "次のモデルリクエストから予算の集計を開始します。",
+      "usageCoverageUnavailable": "使用量の集計状況を確認できないため、トークン予算を設定できません。",
+      "settingsNotConfirmed": "現在の接続では選択した目標設定への対応を確認できません。変更は適用されず、再試行できるよう保持されています。",
+      "emptyContinuations": "出力やツール操作のないターンが続いたため一時停止しました。目標を確認してから再開してください。",
+      "removeTokenBudget": "トークン予算を解除",
+      "executionPolicy": "実行の継続",
+      "foreground": "接続中のみ",
+      "background": "バックグラウンド",
+      "backgroundHint": "切断後も続行します。サーバー再起動時には目標を一時停止します。",
+      "backgroundActive": "バックグラウンド",
+      "tokenBudgetReached": "トークン予算に到達",
+      "tokenBudgetUsage": "{used} / {budget} トークン",
       "placeholder": "目標を説明して送信すると、取り組みを開始します",
       "modeLabel": "Goal モード",
       "modeDescription": "長期的な目標を開始",

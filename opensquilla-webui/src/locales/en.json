@@ -2068,10 +2068,98 @@
           "label": "Debounce window (s)"
         },
         "transport_name": {
+          "label": "Connection method",
           "choices": {
             "polling": "Polling",
             "webhook": "Webhook"
           }
+        },
+        "access_token": {
+          "label": "Access token"
+        },
+        "agent_id_int": {
+          "label": "Agent id (int)"
+        },
+        "app_password": {
+          "label": "App password"
+        },
+        "app_token": {
+          "label": "App-level token (xapp-...)"
+        },
+        "application_id": {
+          "label": "Application id"
+        },
+        "cool_app_code": {
+          "label": "Cool App Code"
+        },
+        "corp_id": {
+          "label": "Corp id"
+        },
+        "default_channel_id": {
+          "label": "Default channel id"
+        },
+        "device_id": {
+          "label": "Device id"
+        },
+        "domain": {
+          "label": "Domain"
+        },
+        "drop_pending_updates": {
+          "label": "Drop pending updates"
+        },
+        "encoding_aes_key": {
+          "label": "Encoding AES key"
+        },
+        "encrypt_key": {
+          "label": "Encrypt key"
+        },
+        "encryption": {
+          "label": "Encryption"
+        },
+        "gateway_url": {
+          "label": "Gateway URL"
+        },
+        "intents": {
+          "label": "Intents bitmask"
+        },
+        "password": {
+          "label": "Password"
+        },
+        "poll_idle_sleep_s": {
+          "label": "Poll idle sleep (s)"
+        },
+        "poll_limit": {
+          "label": "Poll limit"
+        },
+        "poll_timeout_s": {
+          "label": "Polling timeout (s)"
+        },
+        "reply_in_thread": {
+          "label": "Reply in thread"
+        },
+        "robot_code": {
+          "label": "Robot Code"
+        },
+        "slack_channel_id": {
+          "label": "Default channel id"
+        },
+        "token": {
+          "label": "Bot token (xoxb-...)"
+        },
+        "verification_token": {
+          "label": "Verification token"
+        },
+        "webhook_path": {
+          "label": "Webhook path"
+        },
+        "webhook_secret_token": {
+          "label": "Webhook secret token"
+        },
+        "webhook_url": {
+          "label": "Webhook URL (webhook only)"
+        },
+        "websocket_url": {
+          "label": "WebSocket URL"
         }
       },
       "groups": {
@@ -2507,6 +2595,13 @@
       "enable": "Enable",
       "disable": "Disable",
       "notReported": "Not reported",
+      "transport": {
+        "polling": "Polling",
+        "webhook": "Webhook",
+        "websocket": "WebSocket",
+        "http_sync": "HTTP sync",
+        "mixed": "Multiple connection methods"
+      },
       "tabs": {
         "overview": "Overview",
         "pairings": "Members",
@@ -4074,6 +4169,8 @@
       }
     },
     "plan": {
+      "hidePlan": "Hide plan",
+      "showPlan": "Show plan",
       "label": "Plan",
       "process": "Planning process",
       "revision": "Revision {id}",
@@ -4126,7 +4223,7 @@
     },
     "planMode": {
       "label": "Plan mode",
-      "readOnly": "The agent researches and proposes a plan without changing files.",
+      "readOnly": "Research and discuss before implementation. Tests and builds follow normal permissions.",
       "nextTurn": "Applies to the next turn",
       "updating": "Updating…",
       "turnOff": "Turn plan mode off",
@@ -4172,6 +4269,26 @@
       }
     },
     "goal": {
+      "settings": "Goal settings",
+      "tokenBudget": "Token budget",
+      "noTokenBudget": "No token limit",
+      "invalidTokenBudget": "Enter a positive whole number.",
+      "partialUsageHistory": "Earlier usage is incomplete and is not counted toward the token budget.",
+      "pendingUsageReceipts": "Waiting for usage receipts. Resume the Goal after usage is complete.",
+      "usageReceiptsRecovered": "Usage receipts are complete. Resume the Goal when ready.",
+      "usageAccountingSince": "The token budget counts usage recorded since {time}.",
+      "usageAccountingPending": "Budget accounting starts with the next model request.",
+      "usageCoverageUnavailable": "Usage accounting is unavailable. A token budget cannot be set.",
+      "settingsNotConfirmed": "This connection has not confirmed support for the selected Goal settings. Your changes were not applied and are kept for retry.",
+      "emptyContinuations": "Paused after repeated turns with no output or tool activity. Review the Goal and resume when ready.",
+      "removeTokenBudget": "Remove token budget",
+      "executionPolicy": "Continue running",
+      "foreground": "While connected",
+      "background": "In the background",
+      "backgroundHint": "Continues after disconnecting. A server restart pauses the goal.",
+      "backgroundActive": "Background",
+      "tokenBudgetReached": "Token budget reached",
+      "tokenBudgetUsage": "{used} / {budget} tokens",
       "placeholder": "Describe the goal, then press send to start working toward it",
       "modeLabel": "Goal mode",
       "modeDescription": "Start a long-running goal",

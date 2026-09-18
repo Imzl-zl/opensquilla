@@ -203,6 +203,9 @@
           :fork-busy="forkInFlight"
           :plan-action-pending="planCardPendingAction"
           :plan-actions-disabled="planActionsDisabled"
+          :plan-presentations="planPresentations"
+          :plan-presentation-available="planPresentationAvailable"
+          :plan-presentation-pending="planPresentationPending"
           :is-streaming="isStreaming"
           :follow-live-edge="autoScroll"
           :scroll-epoch="scrollEpoch"
@@ -234,6 +237,7 @@
           @plan-implement-current="implementCurrentPlan"
           @plan-implement-new="implementPlanInNewTask"
           @plan-replan="beginPlanRevision"
+          @plan-presentation-change="chatPlans.setPresentation"
           @goal-clear="clearGoal"
         >
           <template #router-strip="{ message: msg }">
@@ -285,9 +289,13 @@
           :plan="currentPlan"
           :disabled="planActionsDisabled"
           :pending-action="planCardPendingAction"
+          :dismissed="planPresentations[currentPlan.revisionId]?.dismissed"
+          :presentation-available="planPresentationAvailable"
+          :presentation-busy="Boolean(planPresentationPending)"
           @implement-current="implementCurrentPlan"
           @implement-new="implementPlanInNewTask"
           @replan="beginPlanRevision"
+          @presentation-change="chatPlans.setPresentation"
         />
 
         <!-- MetaSkill run cards: preflight checkpoint + progress ribbon,
@@ -525,6 +533,22 @@
     </Transition>
     <!-- Long-running goal progress lives in the same dock as plan execution so
          the active objective stays visible above the composer across turns. -->
+    <div
+      v-if="ordinaryTaskProgress && !executionDockRun && !activeGoalRun"
+      class="task-progress-dock"
+      :data-task-progress-id="taskProgress.taskId.value"
+    >
+      <ExecutionProgress :progress="ordinaryTaskProgress" />
+    </div>
+    <details v-if="goalDraftArmed && !shareMode && (goalTokenBudgetSupported || goalBackgroundExecutionSupported)" class="goal-draft-settings">
+      <summary>{{ t('chat.goal.settings') }}</summary>
+      <GoalExecutionSettings
+        v-model="goalDraftSettings"
+        :disabled="goalBusy"
+        :token-budget-supported="goalTokenBudgetSupported"
+        :background-execution-supported="goalBackgroundExecutionSupported"
+      />
+    </details>
     <Transition name="goal-run-dock">
       <div v-if="activeGoalRun" ref="goalRunDockRef" class="goal-run-dock">
         <GoalRibbon
@@ -534,6 +558,9 @@
           :plan-mode-active="initialCollaborationMode === 'plan'"
           :connection-takeover-available="goalConnectionTakeoverAvailable"
           :reattaching="goalReattaching"
+          :token-budget-supported="goalTokenBudgetSupported"
+          :background-execution-supported="goalBackgroundExecutionSupported"
+          @edit-open="prepareGoalExecutionSettings"
           @edit="editGoalFromRibbon"
           @pause="pauseGoal"
           @resume="resumeGoal"
@@ -642,6 +669,7 @@
       :voice-ready="voiceReady"
       :project-workspace="activeWorkspace"
       :project-workspace-status="activeWorkspaceStatus"
+      :project-binding-busy="projectBindingBusy || sessionHasActiveWork || goalBusy || planModeBusy || modelRoutingSettingsBusy"
       :project-status-message="activeProjectStatusMessage"
       :prompt-annotations="activePromptAnnotations"
       :selected-skills="selectedSkills"
@@ -703,7 +731,7 @@
       :enabled="gatewayAccess.canChooseProject"
       :session-key="sessionKey"
       :initial-path="activeWorkspace?.path"
-      @close="projectPickerOpen = false"
+      @close="cancelDraftProjectChoice"
       @choose="chooseProjectPath"
     />
     </div>
@@ -809,6 +837,10 @@ import MetaPreflightCard from '@/components/chat/MetaPreflightCard.vue'
 import MetaRibbon from '@/components/chat/MetaRibbon.vue'
 import MetaSkillSetupCard from '@/components/chat/MetaSkillSetupCard.vue'
 import GoalRibbon from '@/components/chat/GoalRibbon.vue'
+import GoalExecutionSettings from '@/components/chat/GoalExecutionSettings.vue'
+import ExecutionProgress from '@/components/chat/ExecutionProgress.vue'
+import { useChatTaskProgress } from '@/composables/chat/useChatTaskProgress'
+import type { GoalExecutionOptions } from '@/modules/goalCenter'
 import GoalOutcomeNotice from '@/components/chat/GoalOutcomeNotice.vue'
 import PendingQueue from '@/components/chat/PendingQueue.vue'
 import PlanCard from '@/components/chat/PlanCard.vue'
@@ -1276,6 +1308,15 @@ const {
   sendBlockedReason: activeWorkspaceSendBlockedReason,
 } = activeProjectWorkspace
 const projectPickerOpen = ref(false)
+const projectBindingBusy = ref(false)
+interface DraftProjectChoice {
+  sessionKey: string
+  agentId: string
+  projectId: string
+  connectionEpoch: number
+  target?: ActiveProjectWorkspaceSnapshot | null
+}
+let draftProjectChoice: DraftProjectChoice | null = null
 let activeProjectValidationController: AbortController | null = null
 
 function cancelActiveProjectValidation() {
@@ -1674,6 +1715,10 @@ const activeStreamSessionKey = ref<string>('')
 const acceptanceStopPending = ref(false)
 const acceptanceRecoveryPending = ref(false)
 const taskOwnership = useChatTaskOwnership()
+const taskProgress = useChatTaskProgress({
+  sessionKey, currentEpoch, activeTaskId: taskOwnership.stopTargetTaskId,
+})
+const ordinaryTaskProgress = taskProgress.progress
 const isStopPending = computed(() => (
   Boolean(taskOwnership.stopRequestedTaskId.value)
   || acceptanceStopPending.value
@@ -2103,6 +2148,7 @@ const {
   rebindFreshDraftSession,
   draftAgentId,
   goToDraft,
+  replaceDraftProject,
   hasLegacyNewChatQuery,
   isDraftRoute,
   persistSession,
@@ -2273,6 +2319,8 @@ const {
   initialCollaborationMode,
   currentPlan,
   currentPlanRevisionId,
+  planPresentations,
+  presentationPending: planPresentationPending,
   activePlanRun,
   modeBusy: planModeBusy,
   modeAppliesNextTurn: planModeAppliesNextTurn,
@@ -2643,6 +2691,7 @@ const chatSessionSubscription = useChatSessionSubscription({
   onSnapshot: snapshot => {
     chatSessionRouting.applyBootstrap(snapshot)
     chatPlans.applyBootstrap(snapshot)
+    taskProgress.applySnapshot(snapshot)
     applyGoalSnapshot(snapshot)
     applyPendingUserInputSnapshot(snapshot)
   },
@@ -2869,7 +2918,8 @@ const deliveryBlockedReason = computed<string | null>(() => (
   sessionRoutingSendBlockedReason.value || liveSendBlockedReason.value
 ))
 const effectiveSendBlockedReason = computed<string | null>(() => (
-  deliveryBlockedReason.value || promptAnnotationSendBlockedReason.value
+  (projectBindingBusy.value ? t('workspaces.activeProjectResolving') : null)
+  || deliveryBlockedReason.value || promptAnnotationSendBlockedReason.value
 ))
 const provenSessionDelivery = ref<{
   key: string; identity: string; withoutProject: boolean
@@ -3209,6 +3259,10 @@ const chatGoals = useChatGoals({
 applyGoalSnapshot = snapshot => { chatGoals.applyHydration(snapshot) }
 const {
   draftArmed: goalDraftArmed,
+  draftSettings: goalDraftSettings,
+  tokenBudgetSupported: goalTokenBudgetSupported,
+  backgroundExecutionSupported: goalBackgroundExecutionSupported,
+  prepareExecutionSettings: prepareGoalExecutionSettings,
   goal: currentGoalRun,
   activeGoal: activeGoalRun,
   lastGoal: lastGoalRun,
@@ -3232,10 +3286,11 @@ disarmGoalDraftForMetaRestore = disarmGoalMode
 async function editGoalFromRibbon(
   objective: string,
   settle?: (accepted: boolean) => void,
+  executionOptions?: GoalExecutionOptions,
 ) {
   let accepted = false
   try {
-    accepted = await editGoal(objective)
+    accepted = await editGoal(objective, executionOptions)
     if (accepted) {
       pushToast(t('chat.goal.editNextTurn'), { tone: 'info', duration: 6000 })
     }
@@ -3961,7 +4016,11 @@ const rpcEventHandlers = useChatRpcEventHandlers({
     if (receipt.status === 'failed') invalidateSkillCandidates()
   },
   onRecoveryRequired: () => { void recoverCurrentSession() },
-  onTaskSettled: (taskId, epoch) => chatPlans.noteTaskSettled(taskId, epoch),
+  onTaskProgress: taskProgress.applyEvent,
+  onTaskSettled: (taskId, epoch) => {
+    chatPlans.noteTaskSettled(taskId, epoch)
+    taskProgress.noteTaskSettled(taskId, epoch)
+  },
   conversationRuntime,
   sessionKey,
   currentEpoch,
@@ -4556,6 +4615,9 @@ const composerHasSendContent = computed(() =>
 // contract. Hide Plan rather than claim a read-only turn that would run Default.
 const planUiAvailable = computed(() =>
   planCenter.available('mode'),
+)
+const planPresentationAvailable = computed(() =>
+  !shareMode.value && !forkTransition.value && planCenter.available('presentation'),
 )
 const goalUiAvailable = computed(() => goalCenter.available('goal-mode'))
 const goalComposerExisting = computed(() => (
@@ -6572,44 +6634,114 @@ function persistDraftHistoryState() {
   } catch { /* ignore */ }
 }
 
+function canChangeDraftProject(): boolean {
+  return isDraftRoute()
+    && pendingSessionIntent.value === 'new_chat'
+    && gatewayAccess.canChooseProject
+    && !sessionHasActiveWork.value
+    && !goalBusy.value
+    && !planModeBusy.value
+    && !modelRoutingSettingsBusy.value
+    && pendingQueue.value.length === 0
+}
+
+function cancelDraftProjectChoice() {
+  draftProjectChoice = null
+  projectPickerOpen.value = false
+  projectBindingBusy.value = false
+}
+
+function draftProjectChoiceIsCurrent(choice: DraftProjectChoice): boolean {
+  return draftProjectChoice === choice
+    && !chatViewDisposed
+    && canChangeDraftProject()
+    && sessionKey.value === choice.sessionKey
+    && draftAgentId() === choice.agentId
+    && gatewayAccess.subscriptionEpoch === choice.connectionEpoch
+    && (readProjectFromUrl() === choice.projectId
+      || (choice.target !== undefined && readProjectFromUrl() === (choice.target?.id || '')))
+}
+
+function beginDraftProjectChoice(): DraftProjectChoice | null {
+  if (projectBindingBusy.value || !canChangeDraftProject()) return null
+  const choice: DraftProjectChoice = {
+    sessionKey: sessionKey.value,
+    agentId: draftAgentId(),
+    projectId: readProjectFromUrl(),
+    connectionEpoch: gatewayAccess.subscriptionEpoch,
+  }
+  draftProjectChoice = choice
+  projectBindingBusy.value = true
+  // Choosing a directory is an explicit draft edit, not a fresh task or an
+  // invitation to recover another provisional Meta draft.
+  markProvisionalDraftUsed()
+  cancelActiveProjectValidation()
+  return choice
+}
+
+function applyDraftProjectChoice(choice: DraftProjectChoice) {
+  if (choice.target) activeProjectWorkspace.beginProjectDraft(choice.target)
+  else activeProjectWorkspace.clearDraft()
+  persistDraftHistoryState()
+}
+
+async function commitDraftProjectChoice(
+  choice: DraftProjectChoice,
+  workspace: ActiveProjectWorkspaceSnapshot | null,
+) {
+  if (!draftProjectChoiceIsCurrent(choice)) return
+  choice.target = workspace
+  const committed = await replaceDraftProject(workspace?.id || null)
+  if (!draftProjectChoiceIsCurrent(choice)) return
+  if (!committed) throw new Error('Project navigation did not complete.')
+  // Until navigation succeeds, the original route still owns its hydration.
+  // Cancelling the picker or a failed choice must let that draft finish loading.
+  draftProjectHydration.invalidate()
+  applyDraftProjectChoice(choice)
+  await nextTick()
+}
+
 async function chooseProjectPath(path: string) {
   projectPickerOpen.value = false
-  if (!gatewayAccess.canChooseProject) return
-  const trusted = await confirm({
-    title: t('workspaces.trustTitle'),
-    body: t('workspaces.trustBody', { path }),
-    primaryLabel: t('workspaces.trustConfirm'),
-    primaryClass: 'btn--primary',
-  })
-  if (!trusted) return
+  const choice = draftProjectChoice
+  if (!choice || !draftProjectChoiceIsCurrent(choice)) return
   try {
-    const workspace = await projectWorkspaces.openWorkspace(path)
-    if (!workspace) return
-    freshTaskDraft.requestFreshTask(draftAgentId(), workspace.id)
-    goToDraft({
-      agentId: draftAgentId(),
-      projectId: workspace.id,
-      replace: true,
+    const trusted = await confirm({
+      title: t('workspaces.trustTitle'),
+      body: t('workspaces.trustBody', { path }),
+      primaryLabel: t('workspaces.trustConfirm'),
+      primaryClass: 'btn--primary',
     })
+    if (!trusted || !draftProjectChoiceIsCurrent(choice)) return
+    const workspace = await projectWorkspaces.openWorkspace(path)
+    if (!workspace || !draftProjectChoiceIsCurrent(choice)) return
+    await commitDraftProjectChoice(choice, activeSnapshot(workspace))
   } catch (cause) {
+    if (!draftProjectChoiceIsCurrent(choice)) return
     const detail = cause instanceof Error ? cause.message : String(cause)
     pushToast(t('workspaces.openFailed', { error: detail }), { tone: 'warn' })
+  } finally {
+    if (draftProjectChoice === choice) cancelDraftProjectChoice()
   }
 }
 
 function openProjectPicker() {
-  if (!gatewayAccess.canChooseProject) return
+  if (!beginDraftProjectChoice()) return
   projectPickerOpen.value = true
 }
 
-function closeProjectDraft() {
-  activeProjectWorkspace.clearDraft()
-  freshTaskDraft.requestFreshTask(draftAgentId())
-  goToDraft({
-    agentId: draftAgentId(),
-    projectId: null,
-    replace: true,
-  })
+async function closeProjectDraft() {
+  const choice = beginDraftProjectChoice()
+  if (!choice) return
+  try {
+    await commitDraftProjectChoice(choice, null)
+  } catch (cause) {
+    if (!draftProjectChoiceIsCurrent(choice)) return
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    pushToast(t('workspaces.openFailed', { error: detail }), { tone: 'warn' })
+  } finally {
+    if (draftProjectChoice === choice) cancelDraftProjectChoice()
+  }
 }
 
 async function validateActiveProjectBeforeSend(): Promise<string | null> {
@@ -7005,6 +7137,7 @@ watch(
 )
 
 onUnmounted(() => {
+  cancelDraftProjectChoice()
   window.removeEventListener('pointerup', onThreadPointerEnd)
   window.removeEventListener('pointercancel', onThreadPointerEnd)
   chatRouteHeaderRegistration.release()
@@ -7141,6 +7274,12 @@ watch(
 
 // Entering the draft route resets to a clean draft for the requested agent.
 watch(() => [route.path, route.query.agent, route.query.project], async () => {
+  if (
+    draftProjectChoice
+    && draftProjectChoice.target !== undefined
+    && draftProjectChoiceIsCurrent(draftProjectChoice)
+    && readProjectFromUrl() === (draftProjectChoice.target?.id || '')
+  ) return
   durableRecoveryGeneration += 1
   metaDraftRecovery.invalidate()
   draftProjectHydration.invalidate()
@@ -7175,6 +7314,7 @@ watch(() => pendingQueue.value.length, (count) => {
 // draft URL already on screen (for example, clicking the same project pencil).
 watch(freshTaskDraft.request, request => {
   if (!request) return
+  cancelDraftProjectChoice()
   draftProjectHydration.invalidate()
   landingPrefilled.value = false
   // Clear before changing sessionKey. The draft watcher then observes an empty
@@ -7194,6 +7334,27 @@ watch(freshTaskDraft.request, request => {
   startDraftSession(request.agentId)
   if (isDesktopViewport.value) composerRef.value?.focusTextarea()
 })
+
+watch(
+  () => [
+    sessionKey.value,
+    route.fullPath,
+    gatewayAccess.subscriptionEpoch,
+    gatewayAccess.canChooseProject,
+    pendingSessionIntent.value,
+    sessionHasActiveWork.value,
+    goalBusy.value,
+    planModeBusy.value,
+    modelRoutingSettingsBusy.value,
+    pendingQueue.value.length,
+  ],
+  () => {
+    if (draftProjectChoice && !draftProjectChoiceIsCurrent(draftProjectChoice)) {
+      cancelDraftProjectChoice()
+    }
+  },
+  { flush: 'sync' },
+)
 
 watch(projectWorkspaces.workspaces, workspaces => {
   if (!gatewayAccess.canManageProjectWorkspaces) return
@@ -7350,6 +7511,26 @@ watch(
 <style scoped src="../styles/chat-view.css"></style>
 
 <style scoped>
+.task-progress-dock {
+  width: var(--chat-col, min(calc(100% - 48px), 980px));
+  margin: var(--sp-2) auto;
+  font-size: var(--fs-xs);
+}
+
+.goal-draft-settings {
+  width: var(--chat-col, min(calc(100% - 48px), 980px));
+  max-width: 100%;
+  box-sizing: border-box;
+  margin: var(--sp-2) auto;
+  padding: var(--sp-2);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+.goal-draft-settings summary {
+  min-height: 44px;
+  cursor: pointer;
+}
+
 /* No shared sr-only utility exists in this repo (each component scopes its
    own), so the completion announcer's clip-out lives here: zero visual
    footprint, still exposed to assistive tech. */

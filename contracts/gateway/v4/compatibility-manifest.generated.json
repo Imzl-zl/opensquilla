@@ -29,7 +29,7 @@
       "delivery": "live-only-best-effort",
       "family": "conversation.events",
       "schema": "conversation/conversation-events.schema.json",
-      "schemaSha256": "8210d5b4ad3206cade4a5a66b57dbbe8776f962b5e8aa47938a2bf15253d6dd7",
+      "schemaSha256": "37e966a31c677a86cc04fa7bd0bb8e306a2bb082d6696ed9b471f2e34cb77854",
       "schemaVersion": 1,
       "wireNames": [
         "chat.done",
@@ -53,6 +53,8 @@
         "session.event.meta_step_state",
         "session.event.plan_revision",
         "session.event.plan_run",
+        "session.event.progress",
+        "session.event.plan_presentation",
         "session.event.provider_activity",
         "session.event.router_control_replay",
         "session.event.router_decision",
@@ -543,7 +545,7 @@
       "lifecycle": "stable",
       "name": "goals.capabilities",
       "schema": "goals/goals-capabilities.schema.json",
-      "schemaSha256": "93f2cf0df3769d88b99a8386701f2ed9d65db87d59b0089e476465f1a6ed087a"
+      "schemaSha256": "465c8714e0e4086d03606c6efc00d8ea40ac7ebfcde6878d1d01ae4abe7d8248"
     },
     {
       "lifecycle": "stable",
@@ -555,7 +557,7 @@
       "lifecycle": "stable",
       "name": "goals.edit",
       "schema": "goals/goals-edit.schema.json",
-      "schemaSha256": "53f8c9c0a78fcd6add852d85081a3344db732b7eafa89f896c822c1b96489832"
+      "schemaSha256": "b69e352c2bc3589fdbb23e8cd0ee606a00a8bbce228418f4c5704fbce296772e"
     },
     {
       "lifecycle": "stable",
@@ -567,7 +569,7 @@
       "lifecycle": "stable",
       "name": "goals.reattach",
       "schema": "goals/goals-reattach.schema.json",
-      "schemaSha256": "d639707f780a938a2b2cea1273d364b12033d8a042a0053fbdaf2e05689ea5a5"
+      "schemaSha256": "1705fd533c9c24caed6f139803802c6b1a6cb9f54a0188902256bfa7491c416b"
     },
     {
       "lifecycle": "stable",
@@ -579,13 +581,13 @@
       "lifecycle": "stable",
       "name": "goals.set",
       "schema": "goals/goals-set.schema.json",
-      "schemaSha256": "9973941559f89f54fb936751340e67e18e568d3f751724a9d4ff55fa8327c16b"
+      "schemaSha256": "52b223587068d3a205b1c70f58faa121ec3a7c43be303b653d2c58b621e440ca"
     },
     {
       "lifecycle": "stable",
       "name": "goals.status",
       "schema": "goals/goals-status.schema.json",
-      "schemaSha256": "9c16afd2233a21c701b2d0eebcd753b1e8f8215f2cbdf263c81a0f9478335fd9"
+      "schemaSha256": "0975d46c404160e3556f914dba33982ac23d15985627fe8a360f0ab950d9cab5"
     },
     {
       "lifecycle": "stable",
@@ -966,6 +968,12 @@
       "schemaSha256": "95078307ae1101da932038d08608ffd55b34de98236ae8bbb6dfeb090ffa6986"
     },
     {
+      "lifecycle": "stable",
+      "name": "plans.setPresentation",
+      "schema": "plans/plans-set-presentation.schema.json",
+      "schemaSha256": "23f5e62feef9d2629345aa9a7dda85f7318c3f3464df335d0da0ac6109c2d547"
+    },
+    {
       "canonicalName": "exec.approval.extend",
       "lifecycle": "legacy",
       "name": "plugin.approval.extend",
@@ -1158,7 +1166,7 @@
       "lifecycle": "stable",
       "name": "sessions.messages.hydrate",
       "schema": "sessions/sessions-messages-hydrate.schema.json",
-      "schemaSha256": "ddbb28a77c34297c4b13496bb722bb31c67e9278435c5d978febbd11c35695c2"
+      "schemaSha256": "85fc86c05c228cadfada376be2638f39175a98e44bc82025f0e475ee2c9a12be"
     },
     {
       "lifecycle": "stable",
@@ -1176,7 +1184,7 @@
       "lifecycle": "stable",
       "name": "sessions.messages.subscribe",
       "schema": "sessions/sessions-messages-subscribe.schema.json",
-      "schemaSha256": "b082e52b55b254fa328911f48b8fd6f217e3548bc3cf13ee7ffb08b0afce170b"
+      "schemaSha256": "dddb0c56c82e6fede540252b9b3364711e2dbc8f16485a775d72df8fdfe7691b"
     },
     {
       "lifecycle": "stable",
@@ -1482,10 +1490,10 @@
   "protocol": "opensquilla-websocket-json",
   "source": {
     "eventFamilyCount": 10,
-    "generatorSha256": "7fd8ece5595cb07b9993fa92b4265ae8a88289ac968a92f64575fb79627ab8f1",
-    "methodCount": 218,
-    "schemaCount": 228,
-    "schemaTreeSha256": "213ddafe8b5bb8cd43735d6ba6f63cc3d57e870ac5161d2f451e4cd083a14ce5",
+    "generatorSha256": "98262cd21bdbc6de2e38075601b5b389d1fa05bf4db4df748881369a779f55e1",
+    "methodCount": 219,
+    "schemaCount": 229,
+    "schemaTreeSha256": "86a22f6844fb558d064485b98da29e53ad8d9ce917f36e9702c2ed00264aaa8b",
     "toolchains": {
       "legacyTypes": {
         "python": {

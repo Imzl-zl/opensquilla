@@ -57,7 +57,7 @@ class InteractionMode(StrEnum):
 
 
 class PlanAccess(StrEnum):
-    """Whether a tool may be exposed or dispatched while planning."""
+    """Legacy tool metadata; collaboration intent no longer gates tool access."""
 
     DENY = "deny"
     READ_ONLY = "read_only"
@@ -299,6 +299,16 @@ class ToolContext:
     # Trusted install receipts are shared with built-in tools only for this turn.
     # Appended to preserve positional compatibility; never serialize this state.
     skill_install_turn: Any | None = field(default=None, repr=False)
+
+    # The context yields a finish-without-compute callback for a decided terminal
+    # outcome. Calling it forbids subsequent model/tool execution in this turn.
+    suspend_compute_slot: Callable[[], Any] | None = field(default=None, repr=False)
+    update_progress: Callable[..., Awaitable[dict[str, Any]]] | None = field(
+        default=None, repr=False
+    )
+
+    usage_root_turn_id: str | None = None
+
     # Authenticated per-turn selection; never inferred from model tool arguments.
     selected_skills: tuple[dict[str, str], ...] = field(default=(), repr=False)
     verified_skill_ids: set[str] = field(default_factory=set, repr=False)
@@ -371,6 +381,8 @@ current_tool_context: contextvars.ContextVar[ToolContext | None] = contextvars.C
 
 SUBAGENT_TOOL_DENY: frozenset[str] = frozenset(
     {
+        "submit_plan", "update_plan", "create_goal", "get_goal", "update_goal",
+        "update_goal_progress", "plan_run_checkpoint",
         "cron",
         "gateway",
         "agents_list",

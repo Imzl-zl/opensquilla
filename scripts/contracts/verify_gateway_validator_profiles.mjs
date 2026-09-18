@@ -54,7 +54,10 @@ export async function verifyProfiles({ baselineRoot, verificationRoot } = {}) {
   const selected = new Set(readProductionTargets(inventory, policy).map(target => (
     targetIdentity(target.kind, target.wireName, target.role)
   )))
-  for (const wireName of ['meta.inspect', 'meta.list', 'telemetry.product_active.record', 'skills.candidates', 'skills.setEnabled']) {
+  for (const wireName of [
+    'meta.inspect', 'meta.list', 'telemetry.product_active.record', 'plans.setPresentation',
+    'skills.candidates', 'skills.setEnabled',
+  ]) {
     const contract = inventory.find(entry => entry.kind === 'method' && entry.wireName === wireName)
     assert.ok(contract, `${wireName}: complete Contract is required`)
     assert.deepEqual(contract.targets.map(target => target.role).sort(), [
@@ -107,8 +110,8 @@ export async function verifyProfiles({ baselineRoot, verificationRoot } = {}) {
       result.roles++
     }
   }
-  assert.equal(result.roles, 882)
-  assert.equal(result.comparedRoles, baselineRoot ? 881 : selected.size)
+  assert.equal(result.roles, 886)
+  assert.equal(result.comparedRoles, baselineRoot ? 885 : selected.size)
   assert.deepEqual(result.rolesWithoutPositiveSeed, [], 'each role requires a positive seed')
   if (baselineRoot) assert.deepEqual(result.supplementalRoles, [
     'method:sessions.list:params',

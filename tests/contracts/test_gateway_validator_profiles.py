@@ -22,16 +22,16 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
     specs = runner.discover_contracts()
     targets = runner.load_production_targets(specs)
 
-    assert len(targets) == 200
+    assert len(targets) == 201
     assert targets[("method", "skills.candidates")] == ("result",)
     assert targets[("method", "skills.setEnabled")] == ("result",)
     assert Counter(role for roles in targets.values() for role in roles) == {
-        "result": 190,
+        "result": 191,
         "params": 21,
         "payload": 9,
         "frame": 1,
     }
-    assert sum(len(spec.targets) for spec in specs) == 882
+    assert sum(len(spec.targets) for spec in specs) == 886
     assert targets[("method", "models.capacity.resolve")] == ("params", "result")
     assert targets[("method", "sessions.executionLog.read")] == ("params", "result")
     assert targets[("method", "sessions.list")] == ("result",)
@@ -45,6 +45,7 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
         "params", "result",
     )
     assert targets[("method", "models.routing.resetRecommended")] == ("params", "result")
+    assert targets[("method", "plans.setPresentation")] == ("result",)
     assert targets[("event", "transport.flow.dirty")] == ("payload",)
 
     retired_writes = {
@@ -58,6 +59,9 @@ def test_production_targets_preserve_every_approved_validator_role() -> None:
         "artifacts.source.patch",
     }
     method_specs = {spec.wire_name: spec for spec in specs if spec.contract_type == "method"}
+    assert {role for role, _ in method_specs["plans.setPresentation"].targets} == {
+        "request", "params", "response", "result",
+    }
     assert retired_writes.isdisjoint(method_specs)
     assert all(("method", name) not in targets for name in retired_writes)
 

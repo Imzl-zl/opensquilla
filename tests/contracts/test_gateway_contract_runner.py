@@ -497,8 +497,8 @@ def test_compatibility_manifest_is_schema_derived_and_deterministic() -> None:
     assert manifest["protocol"] == runner.GATEWAY_PROTOCOL
     assert manifest["wireVersion"] == 4
     assert manifest["source"] == {
-        "schemaCount": 228,
-        "methodCount": 218,
+        "schemaCount": 229,
+        "methodCount": 219,
         "eventFamilyCount": 10,
         "schemaTreeSha256": runner._schema_tree_digest(specs),
         "generatorSha256": runner._generator_digest(),
@@ -531,7 +531,7 @@ def test_compatibility_manifest_is_schema_derived_and_deterministic() -> None:
         {entry["name"] for entry in manifest["methods"]}
     )
     assert Counter(entry["lifecycle"] for entry in manifest["methods"]) == {
-        "stable": 215,
+        "stable": 216,
         "legacy": 3,
     }
     assert [
@@ -548,6 +548,11 @@ def test_compatibility_manifest_is_schema_derived_and_deterministic() -> None:
     assert profile_save_activate["schema"] == (
         "platform/onboarding-llm-profile-upsert-and-activate.schema.json"
     )
+    plan_presentation = next(
+        entry for entry in manifest["methods"] if entry["name"] == "plans.setPresentation"
+    )
+    assert plan_presentation["lifecycle"] == "stable"
+    assert plan_presentation["schema"] == "plans/plans-set-presentation.schema.json"
     capacity_resolve = next(
         entry for entry in manifest["methods"] if entry["name"] == "models.capacity.resolve"
     )

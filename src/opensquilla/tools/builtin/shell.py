@@ -11,6 +11,7 @@ import ntpath
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -166,6 +167,7 @@ from opensquilla.tools.run_mode import (
 )
 from opensquilla.tools.types import (
     CallerKind,
+    RetryableToolInputError,
     ToolError,
     current_tool_context,
 )
@@ -2472,8 +2474,110 @@ def _windows_with_powershell_proxy_defaults(command: str) -> str:
     return f"{prelude.rstrip(';')}; {command}"
 
 
-def _windows_direct_powershell_argv(command: str) -> tuple[str, ...]:
+_WINDOWS_PYTHON_LITERAL_COMMAND = r"""
+$__opensquillaTokens = $null;
+$__opensquillaErrors = $null;
+$__opensquillaAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $__opensquillaSource, [ref]$__opensquillaTokens, [ref]$__opensquillaErrors);
+if ($__opensquillaErrors.Count) { return $__opensquillaSource };
+$__opensquillaEdits = @();
+$literalType = [System.Management.Automation.Language.StringConstantExpressionAst];
+foreach ($node in $__opensquillaAst.FindAll({
+    param($item) $item -is [System.Management.Automation.Language.CommandAst]
+}, $true)) {
+    $name = $node.GetCommandName();
+    if ($name -notmatch '(?i)(^|[\\/])python(?:\d+(?:\.\d+)?)?(?:\.exe)?$') { continue };
+    $elements = $node.CommandElements;
+    for ($index = 1; $index -lt $elements.Count; $index++) {
+        $option = $elements[$index].Extent.Text;
+        if ($elements[$index] -is $literalType) {
+            $option = $elements[$index].Value;
+        };
+        if ($option -ceq '-c' -and $index + 1 -lt $elements.Count) {
+            $argument = $elements[$index + 1];
+            if ($argument -isnot $literalType) { break };
+            if (-not $argument.Value.Contains('"')) { break };
+            # Existing PowerShell 5 callers may already escape native quotes.
+            # Preserve that spelling instead of protecting it a second time.
+            if ($argument.Value.Contains('\"')) { break };
+            $escaped = $argument.Value.Replace('\', '\\').Replace("'", "\'").Replace(
+                '"', '\x22').Replace("`r", '\r').Replace("`n", '\n');
+            $code = "exec('" + $escaped + "')";
+            # Keep already-runnable commands near Windows' argv limit unchanged.
+            $nativeLength = $code.Length + $__opensquillaSource.Length -
+                $argument.Extent.Text.Length;
+            if ($nativeLength -gt 30000) {
+                break
+            };
+            $quotedCode = "'" + $code.Replace("'", "''") + "'";
+            $quotedName = "'" + $name.Replace("'", "''") + "'";
+            # Resolve at execution time: functions/aliases named python must keep
+            # their original argument, including definitions earlier in this script.
+            $replacement = '$(if (($ExecutionContext.InvokeCommand.GetCommand(' + $quotedName +
+                ', [System.Management.Automation.CommandTypes]::All)).CommandType -eq ' +
+                '[System.Management.Automation.CommandTypes]::Application) { ' + $quotedCode +
+                ' } else { ' + $argument.Extent.Text + ' })';
+            $__opensquillaEdits += [pscustomobject]@{
+                Start = $argument.Extent.StartOffset;
+                Length = $argument.Extent.EndOffset - $argument.Extent.StartOffset;
+                Value = $replacement;
+            };
+            break;
+        };
+        # Stop at a script, module, stdin or unknown option. A later -c belongs
+        # to that program's argv, not to the Python interpreter.
+        if ($option -ceq '-W' -or $option -ceq '-X') { $index++; continue };
+        if ($option -cmatch '^-(?:[bBdEiIOqsSuvVx]+|[WX].+)$') { continue };
+        break;
+    };
+};
+foreach ($edit in ($__opensquillaEdits | Sort-Object -Property Start -Descending)) {
+    $__opensquillaSource = $__opensquillaSource.Remove($edit.Start, $edit.Length).Insert(
+        $edit.Start, $edit.Value);
+};
+# ScriptBlock invocation otherwise turns a native failure into a successful
+# invocation. Check the final command's status inside that same script scope.
+$__opensquillaSource += @'
+
+if (-not $?) {
+    if ($global:LASTEXITCODE -is [int] -and $global:LASTEXITCODE -ne 0) {
+        exit $global:LASTEXITCODE
+    };
+    exit 1
+}
+'@;
+$__opensquillaSource
+""".strip()
+
+
+def _windows_preserve_python_c_literals(command: str) -> str:
+    """Protect literal Python source from PowerShell 5's native quote removal.
+
+    Let PowerShell parse and execute its own language. Only a literal ``-c``
+    payload containing double quotes needs encoding; native process invocation,
+    shell operators and all other arguments stay with PowerShell. Using Python
+    builtins avoids importing a module that the workspace could shadow.
+    """
+    if '"' not in command or "-c" not in command or "python" not in command.lower():
+        return command
+    # PowerShell decides whether to collect automatic pipeline input while
+    # compiling the outer command. Executing a replacement ScriptBlock would
+    # change that contract. Conservatively retain native handling for these
+    # scripts, including ambiguous references inside quoted text.
+    if re.search(r"\$\{?(?:(?:global|local|script|private):)?input\b", command, re.IGNORECASE):
+        return command
+    source = _windows_ps_single_quote(command)
+    # Keep parser temporaries out of the user's script scope.
     return (
+        "$__opensquillaSource = & { param([string] $__opensquillaSource)\n"
+        f"{_WINDOWS_PYTHON_LITERAL_COMMAND}\n}} {source};\n"
+        ". ([scriptblock]::Create($__opensquillaSource))"
+    )
+
+
+def _windows_direct_powershell_argv(command: str) -> tuple[str, ...]:
+    script = _windows_preserve_python_c_literals(command)
+    prefix = (
         _trusted_windows_powershell_path(),
         "-NoLogo",
         "-NoProfile",
@@ -2481,8 +2585,14 @@ def _windows_direct_powershell_argv(command: str) -> tuple[str, ...]:
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        _windows_with_powershell_proxy_defaults(command),
     )
+    argv = (*prefix, _windows_with_powershell_proxy_defaults(script))
+    command_line_bytes = subprocess.list2cmdline(argv).encode("utf-16-le", errors="surrogatepass")
+    if script != command and len(command_line_bytes) >= 65534:
+        # A repair must not turn an otherwise runnable command into a launch
+        # failure. Large inline programs can still use exec_command's stdin.
+        return (*prefix, _windows_with_powershell_proxy_defaults(command))
+    return argv
 
 
 def _windows_powershell_with_final_exit_code(command: str) -> str:
@@ -5791,6 +5901,28 @@ def _effective_workdir(workdir: str | None) -> str | None:
     return None
 
 
+def _validate_explicit_workdir(workdir: str | None, cwd: str | None) -> None:
+    """Diagnose an input error only after the execution/path gates authorize it.
+
+    This is not an access grant or a race-free filesystem guarantee: the backend
+    still enforces its policy and validates the directory at process creation.
+    """
+
+    if not workdir or cwd is None:
+        return
+    try:
+        is_directory = stat.S_ISDIR(Path(cwd).stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        is_directory = False
+    if not is_directory:
+        raise RetryableToolInputError(
+            "The workdir argument must name an existing directory. Correct workdir "
+            "using the configured workspace or an existing directory you are authorized "
+            "to access, then retry the command. No command was executed; changing "
+            "sandbox permissions is not needed to correct this argument."
+        )
+
+
 def _shell_elevation_required_envelope(
     command: str,
     cwd: str | None,
@@ -6700,6 +6832,7 @@ async def exec_command(
     reject_windows_guest_process(runtime)
     if full_host_access_active():
         cwd = _effective_workdir(workdir)
+        _validate_explicit_workdir(workdir, cwd)
         mutation_before = snapshot_current_workspace_mutations()
         source_mutation_signal = (
             _shell_source_mutation_signal(command, cwd)
@@ -6966,6 +7099,7 @@ async def exec_command(
                 host_execution = True
                 backend_retry_granted = True
             else:
+                _validate_explicit_workdir(workdir, cwd)
                 backend_cwd = _sandbox_shell_backend_cwd(cwd, request)
                 backend_policy = request.policy
                 backend_policy = _policy_with_active_tool_mounts(backend_policy)
@@ -7084,6 +7218,7 @@ async def exec_command(
         )
         merged_env = _host_shell_env(merged_env)
 
+    _validate_explicit_workdir(workdir, cwd)
     runtime_unavailable = _runtime_unavailable_envelope(command, merged_env, cwd=cwd)
     if runtime_unavailable is not None:
         return finish(json.dumps(runtime_unavailable, ensure_ascii=False), executed=False)
