@@ -1464,6 +1464,51 @@ describe('useChatSend attachment payloads', () => {
     expect(retained).toBeNull()
   })
 
+  it('retains a failed skill handoff while a different plain-text draft is being edited', async () => {
+    const sessionKey = 'agent:main:webchat:failed-skill'
+    const skill = { name: 'tables', instanceId: 'skill:tables', digest: 'a'.repeat(64) }
+    const pendingInputWal = memoryHandoffWal()
+    const record: ResponseHandoffWalRecord = {
+      schemaVersion: 1,
+      ownerRequestId: 'failed-skill-request',
+      requestSessionKey: sessionKey,
+      clientRequestId: 'failed-skill-request',
+      clientMessageId: 'failed-skill-message',
+      composerText: 'Make a table',
+      recoveryAttachments: [],
+      params: {
+        sessionKey,
+        clientRequestId: 'failed-skill-request',
+        clientMessageId: 'failed-skill-message',
+        message: 'Make a table',
+        selectedSkills: [skill],
+      },
+      state: 'failed',
+      createdAt: 1,
+      updatedAt: 2,
+    }
+    await pendingInputWal.putHandoff!(record)
+    const inputText = ref('A separate question')
+    const selectedSkills = ref<typeof skill[]>([])
+    const { api, rpc } = makeOptions({
+      sessionKey: ref(sessionKey), inputText, selectedSkills, pendingInputWal,
+    })
+
+    await api.recoverResponseHandoffs()
+
+    expect(inputText.value).toBe('A separate question')
+    expect(selectedSkills.value).toEqual([])
+    expect(await pendingInputWal.listHandoffs!()).toEqual([record])
+    expect(rpc.call).not.toHaveBeenCalled()
+
+    inputText.value = ''
+    await api.recoverResponseHandoffs()
+
+    expect(inputText.value).toBe('Make a table')
+    expect(selectedSkills.value).toEqual([skill])
+    expect(await pendingInputWal.listHandoffs!()).toEqual([])
+  })
+
   it('refreshes expired handoff attachments only after a definite rejection', async () => {
     const parent = 'agent:main:webchat:expired-fork-parent'
     const child = 'agent:main:webchat:expired-fork-child'

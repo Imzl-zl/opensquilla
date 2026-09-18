@@ -124,9 +124,9 @@ SESSIONS_LIST_GATEWAY_ADAPTER = PACKAGE_ROOT / "gateway" / "adapters" / "session
 # so this does not authorize unrelated wire growth.
 # Primary-provider transitions add resetRecommended and upsertAndActivate.
 # Retire the five legacy memory raw-fallback and repair methods.
-# Plan presentation and model capacity each add one method.
-RUNTIME_RPC_METHOD_BASELINE = 293
-RUNTIME_RPC_METHOD_DIGEST = "2ed659685a9803406523a4f710742fda0361c54150249fac19f3ae0a56346398"
+# Add metadata-only Skill candidates and the allow-use setting.
+RUNTIME_RPC_METHOD_BASELINE = 295
+RUNTIME_RPC_METHOD_DIGEST = "9325609b3f5a9deb73091c32efdd38f4e68143a9f33e77d7d02c304e48817278"
 STATIC_RPC_DECORATOR_BASELINE = 72
 
 # Physical lines in the sessions/runtime slice remain tracked for the final

@@ -1,3 +1,4 @@
+import type { SelectedSkillRef } from '@/types/selectedSkills'
 import type { ChatPageContext } from '@/types/pageContext'
 import type { InjectionKey } from 'vue'
 import type { Attachment } from '@/types/chat'
@@ -13,6 +14,7 @@ export interface PendingInputServerItem {
   readonly position?: number
   readonly revision?: number
   readonly requestFingerprint?: string
+  readonly selectedSkills?: readonly SelectedSkillRef[]
   readonly pageContext?: ChatPageContext
   readonly intent?: string | null
   readonly confirmedPlainText?: boolean
@@ -31,6 +33,7 @@ export interface PendingInputEnqueueRequest {
   clientMessageId?: string
   message: string
   attachments: readonly unknown[]
+  selectedSkills?: readonly SelectedSkillRef[]
   pageContext?: ChatPageContext
   confirmedPlainText?: boolean
   displayText?: string

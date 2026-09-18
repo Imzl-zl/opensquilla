@@ -155,6 +155,10 @@ async def test_skills_list_serializes_invocation_visibility_flags(tmp_path) -> N
     row = next(item for item in payload["skills"] if item["name"] == "manual-only")
     assert row["user_invocable"] is True
     assert row["disable_model_invocation"] is True
+    assert row["lifecycle"]["selection_state"] == "active"
+    assert row["active"] is True
+    assert row["invocation"]["model_catalog"] is False
+    assert row["invocation"]["user_completion"] is True
 
 
 @pytest.mark.asyncio

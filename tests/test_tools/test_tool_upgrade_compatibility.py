@@ -166,9 +166,15 @@ def test_tool_context_appends_new_runtime_fields_after_legacy_fields() -> None:
         "suspend_compute_slot",
         "update_progress",
         "usage_root_turn_id",
+        "selected_skills",
+        "verified_skill_ids",
+        "skill_load_emitter",
     ]
 
     assert ToolContext().skill_install_turn is None
+    assert ToolContext().selected_skills == ()
+    assert ToolContext().verified_skill_ids == set()
+    assert ToolContext().skill_load_emitter is None
     assert ToolContext().suspend_compute_slot is None
     assert ToolContext().update_progress is None
     assert ToolContext().usage_root_turn_id is None

@@ -36,6 +36,7 @@ export type ConversationEventKind = 'known' | 'unknown'
  * is explicitly adopted.
  */
 const SEMANTIC_EVENT_KIND_BY_WIRE_NAME = new Map<string, ConversationSemanticEventKind>([
+  ['session.event.skill_load', 'skill-load'],
   ['chat.done', 'turn-completed'],
   ['exec.approval.requested', 'approval-requested'],
   ['exec.approval.resolved', 'approval-resolved'],

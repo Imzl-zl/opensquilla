@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
@@ -31,6 +33,19 @@ type SettingsValue = (
     None | bool | int | float | str | list["SettingsValue"] | dict[str, "SettingsValue"]
 )
 type SettingsObject = dict[str, SettingsValue]
+
+# Separate RPC adapters share the same live config object. Serialize the full
+# read/modify/commit transaction, not only the eventual disk write.
+_settings_locks: weakref.WeakValueDictionary[int, asyncio.Lock] = weakref.WeakValueDictionary()
+
+
+def _settings_lock(config: object) -> asyncio.Lock:
+    key = id(config)
+    lock = _settings_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _settings_locks[key] = lock
+    return lock
 
 
 class EffectiveSetting(TypedDict):
@@ -180,6 +195,7 @@ class AppSettings[Config: SettingsConfig, PreparedProvider]:
 
     def __init__(self, runtime: SettingsRuntime[Config, PreparedProvider]) -> None:
         self._runtime = runtime
+        self._last_write_persisted = False
 
     async def read_all(self) -> SettingsObject:
         return dict(self._runtime.read_public_settings())
@@ -269,10 +285,12 @@ class AppSettings[Config: SettingsConfig, PreparedProvider]:
         linked: Sequence[str] = (),
     ) -> SettingsMutation:
         runtime = self._runtime
+        self._last_write_persisted = False
         provider = runtime.resolve_provider(candidate)
         # Persistence is the commit point. Later runtime failures do not undo it.
         async with runtime.mutation_scope(candidate):
             runtime.persist(candidate)
+            self._last_write_persisted = True
             if before.config is not None:
                 runtime.replace(before.config, candidate)
         if before.config is not None:
@@ -296,6 +314,33 @@ class AppSettings[Config: SettingsConfig, PreparedProvider]:
         return result
 
     async def set(self, path: str, value: SettingsValue) -> SettingsMutation:
+        async with _settings_lock(self._runtime.config):
+            return await self._set(path, value)
+
+    async def set_skill_enabled(self, name: str, enabled: bool) -> dict[str, Any]:
+        """Atomically update one name without replacing another writer's choices."""
+        async with _settings_lock(self._runtime.config):
+            config = self._runtime.config
+            if config is None:
+                raise ValueError("No config available")
+            skills = _config_dump(config).get("skills")
+            disabled = list(skills.get("disabled", [])) if isinstance(skills, dict) else []
+            disabled = [item for item in disabled if isinstance(item, str) and item != name]
+            if not enabled:
+                disabled.append(name)
+            self._last_write_persisted = False
+            try:
+                await self._set("skills.disabled", disabled)
+            except Exception:
+                if not self._last_write_persisted:
+                    raise
+                return {
+                    "name": name, "enabled": enabled, "persisted": True, "refreshed": False,
+                    "message": "Saved. Live refresh failed; reload the Gateway before using it.",
+                }
+            return {"name": name, "enabled": enabled, "persisted": True, "refreshed": True}
+
+    async def _set(self, path: str, value: SettingsValue) -> SettingsMutation:
         if _path_is_or_contains_readonly(path):
             raise ValueError(f"Path is read-only: {path}")
         _reject_local_file_only_write({path} | _collect_paths(value, path))
@@ -350,6 +395,12 @@ class AppSettings[Config: SettingsConfig, PreparedProvider]:
         return await self._mutate(dict(patch), dict(changes))
 
     async def _mutate(self, patch: SettingsObject, changes: SettingsObject) -> SettingsMutation:
+        async with _settings_lock(self._runtime.config):
+            return await self._mutate_unlocked(patch, changes)
+
+    async def _mutate_unlocked(
+        self, patch: SettingsObject, changes: SettingsObject
+    ) -> SettingsMutation:
         if not patch and not changes:
             raise ValueError("params.patch or params.patches is required")
         requested_paths = _collect_paths(patch)
@@ -414,6 +465,10 @@ class AppSettings[Config: SettingsConfig, PreparedProvider]:
         )
 
     async def apply(self, payload: Mapping[str, SettingsValue]) -> SettingsMutation:
+        async with _settings_lock(self._runtime.config):
+            return await self._apply(payload)
+
+    async def _apply(self, payload: Mapping[str, SettingsValue]) -> SettingsMutation:
         before = self._before(required=False)
         replacement = dict(payload)
         _reject_changed_local_file_only_apply(before.payload, replacement)
@@ -432,6 +487,10 @@ class AppSettings[Config: SettingsConfig, PreparedProvider]:
         return await self._write(before, candidate)
 
     async def reload(self) -> SettingsObject:
+        async with _settings_lock(self._runtime.config):
+            return await self._reload()
+
+    async def _reload(self) -> SettingsObject:
         before = self._before()
         assert before.config is not None
         runtime = self._runtime

@@ -17,6 +17,7 @@ from opensquilla.gateway.adapters.contract_method import (
 
 SKILL_CATALOG_CONTRACT_METHODS: Final = (
     "skills.list",
+    "skills.candidates",
     "skills.get",
     "skills.search",
 )

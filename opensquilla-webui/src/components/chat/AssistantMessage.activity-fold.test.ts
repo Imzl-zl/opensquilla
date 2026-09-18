@@ -430,15 +430,23 @@ describe('AssistantMessage activity disclosure', () => {
     }
   })
 
-  it('keeps usage inspectable beside explicit failed and stopped outcomes', async () => {
+  it('keeps loaded skill receipts and usage inspectable beside failed and stopped outcomes', async () => {
     for (const outcome of [
       { turnId: 'turn-failed', status: 'failed', kind: 'failed' },
       { turnId: 'turn-stopped', status: 'cancelled', kind: 'cancelled' },
     ]) {
       const el = mountMessage(baseMessage({
+        text: '',
         timelineItems: [],
         parts: [],
         statusHistory: [],
+        skillLoads: [{
+          name: 'synthetic-document',
+          instanceId: 'synthetic-instance',
+          digest: 'synthetic-digest',
+          source: 'user',
+          status: 'loaded',
+        }],
         meta: usageMeta(),
         turnOutcome: outcome,
       }), true)
@@ -448,6 +456,13 @@ describe('AssistantMessage activity disclosure', () => {
       expect(el.querySelector('.turn-outcome')).not.toBeNull()
       expect(el.querySelector('.turn-usage-details')).toBeNull()
       expect(el.querySelector('.msg-meta__more-btn')).not.toBeNull()
+      const receipts = el.querySelectorAll('[data-testid="skill-load-status"]')
+      expect(receipts).toHaveLength(1)
+      expect(receipts[0]?.closest('.msg-ai-main')).not.toBeNull()
+      expect(receipts[0]?.textContent).toContain('synthetic-document')
+      expect(receipts[0]?.textContent).toContain('Loaded')
+      expect(receipts[0]?.compareDocumentPosition(el.querySelector('.msg-ai-footer')!)
+        & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
       el.remove()
     }
   })
