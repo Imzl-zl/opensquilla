@@ -766,16 +766,27 @@ async def test_prepare_shutdown_releases_send_lock_and_keeps_producer_records_op
 
 
 async def test_close_uploads_other_scope_while_inflight_request_stalls(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offline_uploads
+    tmp_path: Path, offline_uploads
 ) -> None:
     entered = asyncio.Event()
     accepted_growth = asyncio.Event()
+    release_reliability = asyncio.Event()
+    cancelled_reliability = asyncio.Event()
 
     async def stalled_reliability(request):
         if request.url.path == "/v1/reliability/events":
             entered.set()
-            await asyncio.Event().wait()
+            try:
+                await release_reliability.wait()
+            except asyncio.CancelledError:
+                cancelled_reliability.set()
+                raise
+            return httpx.Response(503)
+        assert runtime._closing
+        assert entered.is_set()
+        assert not cancelled_reliability.is_set()
         accepted_growth.set()
+        release_reliability.set()
         return _accepted_response(request)
 
     offline_uploads.handler = stalled_reliability
@@ -801,12 +812,19 @@ async def test_close_uploads_other_scope_while_inflight_request_stalls(
         strict=True,
     )
     await runtime.record(growth)
-    await runtime.start()
-    await asyncio.wait_for(entered.wait(), timeout=1)
-    monkeypatch.setattr(runtime_module, "SHUTDOWN_UPLOAD_TIMEOUT_SECONDS", 0.1)
-    await asyncio.wait_for(runtime.close(), timeout=1)
+    try:
+        await runtime.start()
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        # The upload loop is sequential, so only close can reach growth while
+        # reliability is stalled. Release it on that observation instead of
+        # requiring real SQLite claim/receipt writes to fit a 100 ms deadline.
+        await asyncio.wait_for(runtime.close(), timeout=5)
+    finally:
+        release_reliability.set()
+        await asyncio.wait_for(runtime.close(flush=False), timeout=5)
 
     assert accepted_growth.is_set()
+    assert not cancelled_reliability.is_set()
     for scope, expected_pending in ((TelemetryScope.RELIABILITY, 1), (TelemetryScope.GROWTH, 0)):
         outbox = await TelemetryOutbox.open(tmp_path, scope)
         try:
