@@ -347,6 +347,7 @@ def test_selected_bytes_refuses_opened_descriptor_substitution(tmp_path, monkeyp
         "ino": str(info.st_ino),
         "mtimeNs": str(info.st_mtime_ns),
         "ctimeNs": str(info.st_ctime_ns),
+        "birthtimeNs": str(getattr(info, "st_birthtime_ns", 0)),
         "sha256": hashlib.sha256(first.read_bytes()).hexdigest(),
     }
     real_open = os.open

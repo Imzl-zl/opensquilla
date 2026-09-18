@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -524,9 +525,13 @@ async def test_close_cancels_stalled_upload_and_preserves_unacknowledged_event(
     offline_uploads.handler = stalled
     runtime = ScopedTelemetryRuntime(config=_config(tmp_path))
     await runtime.record(_turn_event())
+    # Establish the stalled request before measuring shutdown cancellation;
+    # leasing its real SQLite batch is setup, not the network stall under test.
+    await runtime.start()
+    await asyncio.wait_for(entered.wait(), timeout=1)
     monkeypatch.setattr(runtime_module, "SHUTDOWN_UPLOAD_TIMEOUT_SECONDS", 0.05)
     closing = asyncio.create_task(runtime.close())
-    await asyncio.wait_for(entered.wait(), timeout=1)
+    await asyncio.sleep(0)
     if cancel_close:
         closing.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -713,6 +718,24 @@ async def test_close_uploads_other_scope_while_inflight_request_stalls(
 ) -> None:
     entered = asyncio.Event()
     accepted_growth = asyncio.Event()
+    flushed_growth = asyncio.Event()
+    deadline_reached = asyncio.Event()
+    deadlines = []
+
+    @asynccontextmanager
+    async def controlled_timeout_at(deadline):
+        deadlines.append(deadline)
+        async with asyncio.timeout(None) as timeout:
+            async def expire():
+                await deadline_reached.wait()
+                timeout.reschedule(asyncio.get_running_loop().time())
+
+            expiration = asyncio.create_task(expire())
+            try:
+                yield
+            finally:
+                expiration.cancel()
+                await asyncio.gather(expiration, return_exceptions=True)
 
     async def stalled_reliability(request):
         if request.url.path == "/v1/reliability/events":
@@ -744,12 +767,35 @@ async def test_close_uploads_other_scope_while_inflight_request_stalls(
         strict=True,
     )
     await runtime.record(growth)
+    growth_uploader = runtime._scopes[TelemetryScope.GROWTH].uploader
+    upload_growth = growth_uploader.upload_once
+
+    async def observe_growth_flush():
+        result = await upload_growth()
+        flushed_growth.set()
+        return result
+
+    monkeypatch.setattr(growth_uploader, "upload_once", observe_growth_flush)
     await runtime.start()
     await asyncio.wait_for(entered.wait(), timeout=1)
+    # This case checks that one blocked scope does not serialize another scope's
+    # final upload. Drive their shared deadline after the real growth receipt is
+    # durable, rather than requiring SQLite fsync to finish within 100 ms. The
+    # cancellation tests above exercise the real, unchanged wall-clock budget.
+    monkeypatch.setattr(runtime_module, "asyncio", SimpleNamespace(
+        **(vars(asyncio) | {"timeout_at": controlled_timeout_at}),
+    ))
     monkeypatch.setattr(runtime_module, "SHUTDOWN_UPLOAD_TIMEOUT_SECONDS", 0.1)
-    await asyncio.wait_for(runtime.close(), timeout=1)
+    closing = asyncio.create_task(runtime.close())
+    try:
+        await asyncio.wait_for(flushed_growth.wait(), timeout=1)
+    finally:
+        deadline_reached.set()
+        await asyncio.wait_for(closing, timeout=1)
 
     assert accepted_growth.is_set()
+    assert len(deadlines) == 2
+    assert deadlines == [runtime._shutdown_deadline] * 2
     for scope, expected_pending in ((TelemetryScope.RELIABILITY, 1), (TelemetryScope.GROWTH, 0)):
         outbox = await TelemetryOutbox.open(tmp_path, scope)
         try:
