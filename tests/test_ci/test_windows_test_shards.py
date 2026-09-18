@@ -561,6 +561,13 @@ def test_runner_saturated_subprocess_contracts_are_marked_ci_serial() -> None:
     )
 
 
+def test_real_skill_install_cancellation_is_marked_ci_serial() -> None:
+    assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/test_engine/test_skill_install_turn.py"),
+        "test_explicit_turn_deadline_cancels_install_and_preserves_receipt",
+    )
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows process and mapped-file lifecycle")
 @pytest.mark.ci_serial
 def test_gateway_cleanup_waits_for_writer_after_launcher_exit(tmp_path: Path) -> None:
