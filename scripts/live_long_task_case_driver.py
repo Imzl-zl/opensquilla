@@ -562,6 +562,7 @@ class GatewayProcess:
         self.proc: subprocess.Popen[bytes] | None = None
         self._stdout: Any = None
         self._stderr: Any = None
+        self._startup_log_offsets: dict[str, int] = {}
 
     @property
     def http_url(self) -> str:
@@ -612,6 +613,12 @@ class GatewayProcess:
             raise RuntimeError("Gateway is already running")
         self._stdout = (self.root / "gateway.stdout.log").open("ab")
         self._stderr = (self.root / "gateway.stderr.log").open("ab")
+        # Restarts append to the raw logs so cleanup can scan every attempt.
+        # Diagnostics must only describe the process launched by this start().
+        self._startup_log_offsets = {
+            "gateway.stdout.log": self._stdout.tell(),
+            "gateway.stderr.log": self._stderr.tell(),
+        }
         self.proc = subprocess.Popen(
             [
                 sys.executable,
@@ -668,7 +675,10 @@ class GatewayProcess:
             try:
                 with (self.root / name).open("rb") as stream:
                     stream.seek(0, os.SEEK_END)
-                    stream.seek(max(0, stream.tell() - _STARTUP_LOG_TAIL_BYTES))
+                    stream.seek(max(
+                        self._startup_log_offsets.get(name, 0),
+                        stream.tell() - _STARTUP_LOG_TAIL_BYTES,
+                    ))
                     tail = stream.read(_STARTUP_LOG_TAIL_BYTES)
             except OSError:
                 continue

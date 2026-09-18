@@ -356,6 +356,41 @@ def test_gateway_startup_failure_keeps_safe_phase_evidence(
     }
 
 
+@pytest.mark.parametrize("log_name", ["gateway.stdout.log", "gateway.stderr.log"])
+def test_gateway_startup_failure_excludes_previous_attempt_phases(
+    startup_gateway, monkeypatch: pytest.MonkeyPatch, log_name: str,
+) -> None:
+    gateway = startup_gateway
+    previous = {
+        "event": "gateway.startup_phase", "phase": "gateway_ready", "status": "ready",
+        "duration_ms": 12, "startup_elapsed_ms": 34_000,
+    }
+    current = {
+        **previous, "phase": "config", "duration_ms": 3, "startup_elapsed_ms": 4,
+    }
+    log = gateway.root / log_name
+    log.write_text(json.dumps(previous) + "\n", encoding="utf-8")
+
+    def launch(*_args, **_kwargs):
+        with log.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(current) + "\n")
+        return SimpleNamespace(poll=lambda: 17)
+
+    monkeypatch.setattr(driver.subprocess, "Popen", launch)
+    with pytest.raises(driver.DriverConfigurationError) as caught:
+        gateway.start()
+
+    evidence = json.loads(str(caught.value).split("; startup=", 1)[1])
+    assert evidence["exit_code"] == 17
+    assert evidence["phases"] == {
+        "config": {"status": "ready", "duration_ms": 3, "startup_elapsed_ms": 4},
+    }
+    # Both attempts remain available for the mandatory secret scan in cleanup.
+    assert [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] == [
+        previous, current,
+    ]
+
+
 def test_gateway_startup_diagnostics_bound_and_filter_raw_logs(startup_gateway) -> None:
     gateway = startup_gateway
     valid = {
