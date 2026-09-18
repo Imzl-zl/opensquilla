@@ -12,6 +12,7 @@ import {
 class MockWebSocket {
   static readonly CONNECTING = 0
   static readonly OPEN = 1
+  static readonly CLOSING = 2
   static readonly CLOSED = 3
   static instances: MockWebSocket[] = []
   static initialReadyState = MockWebSocket.OPEN
@@ -915,6 +916,40 @@ describe('RpcClient', () => {
     expect(pendingCount(closedClient)).toBe(0)
     closedClient.disconnect()
   })
+
+  it.each([MockWebSocket.CLOSING, MockWebSocket.CLOSED])(
+    'publishes disconnect before rejecting a call when the close event is delayed (%s)',
+    async (readyState) => {
+      const client = new RpcClient()
+      client.connect('ws://rpc.test')
+      const socket = MockWebSocket.instances[0]
+      establishConnection(socket)
+      const sibling = client.call('chat.history').catch(error => error)
+      const onSent = vi.fn()
+      const stateChanged = vi.fn()
+      client.on('_state', stateChanged)
+      const lateClose = socket.onclose
+      const sentCount = socket.sent.length
+      socket.readyState = readyState
+
+      const result = client.call('sessions.list', {}, { onSent }).catch(error => error)
+
+      expect(stateChanged).toHaveBeenCalledExactlyOnceWith('disconnected')
+      expect(client.state).toBe('disconnected')
+      expect(pendingCount(client)).toBe(0)
+      expect(socket.sent).toHaveLength(sentCount)
+      expect(onSent).not.toHaveBeenCalled()
+      await expect(result).resolves.toMatchObject({ code: 'RPC_TRANSPORT_ERROR', accepted: false })
+      await expect(sibling).resolves.toMatchObject({ code: 'RPC_TRANSPORT_ERROR', accepted: null })
+
+      await vi.advanceTimersByTimeAsync(500)
+      expect(MockWebSocket.instances).toHaveLength(2)
+      establishConnection(MockWebSocket.instances[1])
+      lateClose?.({ code: 1000, reason: '', wasClean: true } as CloseEvent)
+      expect(client.state).toBe('connected')
+      client.disconnect()
+    },
+  )
 
   it('cleans a call when send throws and recycles the failed socket', async () => {
     const client = new RpcClient()

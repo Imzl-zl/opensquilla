@@ -2888,9 +2888,9 @@ async def test_terminal_persistence_failure_pauses_goal_fail_closed(
         tmp_path / "goal-terminal-persistence.sqlite",
         wire_lifecycle=True,
     ) as stack:
-        original_update = stack.storage.update_agent_task
+        original_settle = stack.storage.settle_agent_task
 
-        async def fail_terminal_update(task_id: str, **fields: Any) -> Any:
+        async def fail_terminal_settlement(task_id: str, **fields: Any) -> Any:
             status = fields.get("status")
             if status in {
                 AgentTaskStatus.SUCCEEDED,
@@ -2900,9 +2900,9 @@ async def test_terminal_persistence_failure_pauses_goal_fail_closed(
                 AgentTaskStatus.ABANDONED,
             }:
                 raise RuntimeError("injected terminal persistence failure")
-            return await original_update(task_id, **fields)
+            return await original_settle(task_id, **fields)
 
-        monkeypatch.setattr(stack.storage, "update_agent_task", fail_terminal_update)
+        monkeypatch.setattr(stack.storage, "settle_agent_task", fail_terminal_settlement)
         created = await _handle_goals_set(_set_params(), stack.context)
         await stack.runtime.wait(created["taskId"], timeout=2.0)
         goal = await _wait_for_goal(
@@ -2920,6 +2920,15 @@ async def test_terminal_persistence_failure_pauses_goal_fail_closed(
         assert goal.turns_settled == 1
         await asyncio.sleep(0.05)
         assert await _table_count(stack.storage, "agent_tasks") == 1
+        monkeypatch.setattr(stack.storage, "settle_agent_task", original_settle)
+        assert stack.runtime._terminal_retry_task is not None
+        await asyncio.wait_for(asyncio.shield(stack.runtime._terminal_retry_task), timeout=2)
+        recovered = await stack.runtime.status(created["taskId"])
+        assert recovered.status == AgentTaskStatus.ABANDONED
+        assert recovered.terminal_reason == "persistence_error"
+        assert not stack.runtime._terminal_pending_updates
+        assert created["taskId"] not in stack.runtime._terminal_fallback_records
+        assert (await stack.runtime.shutdown(cancel=False, timeout=2)).clean
 
 
 @pytest.mark.asyncio

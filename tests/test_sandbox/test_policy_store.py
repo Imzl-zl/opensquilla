@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from opensquilla.sandbox.policy_models import SandboxPolicy
@@ -64,3 +66,29 @@ def test_policy_rejects_invalid_prefix_and_quota() -> None:
                 "files": {"backupQuotaBytes": 0},
             }
         )
+
+
+def test_existing_policy_can_be_pinned_while_session_writer_is_active(tmp_path, monkeypatch):
+    path = tmp_path / "sessions.db"
+    existing = SandboxPolicyStore(path).read()
+    writer = sqlite3.connect(path, isolation_level=None)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("BEGIN IMMEDIATE")
+    statements = []
+
+    def connect(self):
+        connection = sqlite3.connect(self._path, timeout=0.02, isolation_level=None)
+        connection.row_factory = sqlite3.Row
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(SandboxPolicyStore, "_connect", connect)
+    try:
+        assert SandboxPolicyStore(path).read() == existing
+    finally:
+        writer.rollback()
+        writer.close()
+    assert not any(
+        sql.lstrip().upper().startswith(("INSERT", "UPDATE", "CREATE", "DELETE"))
+        for sql in statements
+    )

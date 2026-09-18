@@ -14,6 +14,7 @@
     ".github/scripts/verify-nsis-upgrade-regression.py",
     ".github/scripts/verify-sandbox-package.mjs",
     ".github/scripts/windows_test_assignments.json",
+    ".github/scripts/windows_test_partitions.json",
     ".github/scripts/windows_test_shards.py",
     ".github/workflows/ci.yml",
     ".github/workflows/managed-toolchain-artifacts.yml",

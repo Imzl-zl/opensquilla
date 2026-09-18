@@ -252,7 +252,7 @@ async def run_direct_turn(
             workspace_strict=workspace_strict,
             default_elevated=configured_default_elevated(config),
         )
-        pin_sandbox_policy(tool_ctx, config)
+        await asyncio.to_thread(pin_sandbox_policy, tool_ctx, config)
         from opensquilla.telemetry.contracts.common import ClientSurface, ExecutionMode
         raw_stream = runner.run(
             provider_message,

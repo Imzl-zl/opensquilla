@@ -2284,8 +2284,9 @@ async def test_native_overflow_after_final_admission_does_not_compact_history(
 async def test_inline_overflow_compaction_reduces_tool_heavy_structured_context() -> None:
     big_output = ("synthetic log line: lorem ipsum dolor sit amet 0123456789\n" * 700)[:40_000]
     # Leave room for the two most recent raw tool results protected by the
-    # default semantic-tail policy while still forcing older rounds to compact.
-    window_tokens = 30_000
+    # default semantic-tail policy under both BPE and conservative estimates,
+    # while the complete request still exceeds the window.
+    window_tokens = 60_000
     messages: list[Message] = [
         Message(role="user", content="Please analyze every log file in the workspace."),
         Message(role="assistant", content="Reading the logs now."),
@@ -2314,6 +2315,8 @@ async def test_inline_overflow_compaction_reduces_tool_heavy_structured_context(
         config=AgentConfig(context_window_tokens=window_tokens, ),
     )
     original_chars = session_payload_chars(messages)
+    assert agent._estimate_live_request_tokens(messages) > window_tokens
+    assert agent._estimate_live_request_tokens(messages[-4:]) < window_tokens
 
     outcome = await agent._check_context_overflow(
         messages,
@@ -2324,6 +2327,7 @@ async def test_inline_overflow_compaction_reduces_tool_heavy_structured_context(
     assert outcome is not None
     assert outcome.compacted
     assert session_payload_chars(outcome.messages) < original_chars
+    assert outcome.messages[-4:] == messages[-4:]
 
 
 @pytest.mark.asyncio
@@ -2469,10 +2473,20 @@ async def test_soft_pressure_keeps_protected_current_turn_when_final_request_fit
     agent = Agent(
         provider=_ContextOverflowProvider(),
         config=AgentConfig(
-            context_window_tokens=1000,
-            context_overflow_threshold=0.85,
+            # Cross the soft threshold while the entire request fits the hard
+            # window even when the optional tokenizer is unavailable.
+            context_window_tokens=3000,
+            context_overflow_threshold=0.3,
         ),
     )
+    protected_tokens = sum(
+        int(entry["token_count"])
+        for entry in agent._message_count_compaction_entries(messages[2:])
+    )
+    assert protected_tokens > (
+        agent.config.context_window_tokens * agent.config.context_overflow_threshold
+    )
+    assert agent._estimate_live_request_tokens(messages) < agent.config.context_window_tokens
 
     outcome = await agent._check_context_overflow(
         messages,
@@ -2796,7 +2810,9 @@ async def test_stable_consumer_retries_with_completed_live_round_summary(
     agent = Agent(
         provider=provider,
         config=AgentConfig(
-            context_window_tokens=10_000,
+            # This case exercises the provider's character limit. Token
+            # pressure must not preempt that boundary on either estimator.
+            context_window_tokens=100_000,
             context_overflow_threshold=0.85,
             max_overflow_retries=1,
             max_provider_retries=0,
@@ -2812,6 +2828,15 @@ async def test_stable_consumer_retries_with_completed_live_round_summary(
 
     events = [event async for event in agent.run_turn("finish the active task")]
 
+    assert any(
+        session_payload_chars(call) > provider.max_message_chars
+        for call in provider.calls
+    )
+    assert all(
+        agent._estimate_live_request_tokens(call)
+        < agent.config.context_window_tokens * agent.config.context_overflow_threshold
+        for call in provider.calls
+    )
     assert any(
         isinstance(event, DoneEvent)
         and event.text == "finished after live-turn recovery"

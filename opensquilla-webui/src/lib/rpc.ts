@@ -451,7 +451,13 @@ export class RpcClient {
       const socket = this._ws;
       const generation = this._socketGeneration;
       if (!socket || socket.readyState !== WebSocket.OPEN || this._state !== 'connected') {
-        reject(new RpcTransportError('Not connected', false));
+        const error = new RpcTransportError('Not connected', false);
+        // The socket can start closing before its close event reaches us.
+        // Publish the lost connection so owners cancel reads from this generation.
+        if (this._state === 'connected') {
+          this._recycleConnection(generation, error, 'socket_not_open');
+        }
+        reject(error);
         return;
       }
       if (options.signal?.aborted) {

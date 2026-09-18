@@ -21,6 +21,9 @@ SHARD_NAMES: Final[tuple[str, ...]] = (
     "recovery-migration",
     "desktop-installer-contracts",
 )
+WINDOWS_SHARD_NAMES: Final[tuple[str, ...]] = tuple(
+    f"{family}-{partition}" for family in SHARD_NAMES for partition in (1, 2)
+)
 METADATA_NAME: Final[str] = "windows-shard-metadata.json"
 JUNIT_NAME: Final[str] = "junit.xml"
 PROVISIONAL_FLOOR_SECONDS: Final[float] = 0.01
@@ -37,6 +40,9 @@ class RunObservation:
     files_by_shard: dict[str, tuple[str, ...]]
     node_ids: frozenset[str]
     file_seconds: dict[str, float]
+    partition_sha256: str | None
+    execution_by_shard: dict[str, dict[str, object]]
+    file_phase_seconds: dict[str, dict[str, float]]
 
 
 def _load_json(path: Path) -> object:
@@ -85,6 +91,8 @@ def _parse_junit(
     junit_path: Path,
     module_index: tuple[tuple[str, str], ...],
     seen_nodes: set[str],
+    *,
+    allow_empty: bool = False,
 ) -> tuple[set[str], dict[str, float]]:
     try:
         root = ET.parse(junit_path).getroot()
@@ -125,19 +133,25 @@ def _parse_junit(
         path = _test_file_for_classname(classname, module_index, junit_path)
         nodes.add(node_id)
         file_seconds[path] += seconds
-    if not nodes:
+    if not nodes and not allow_empty:
         raise ValueError(f"JUnit report contains no testcases: {junit_path}")
     seen_nodes.update(nodes)
     return nodes, dict(file_seconds)
 
 
 def load_run_directory(run_dir: Path) -> RunObservation:
-    """Load one complete four-shard Windows run or fail closed."""
+    """Load a complete legacy or partitioned Windows run or fail closed."""
 
     metadata_paths = sorted(run_dir.rglob(METADATA_NAME))
-    if len(metadata_paths) != len(SHARD_NAMES):
+    payloads = [_load_json(path) for path in metadata_paths]
+    physical = any(
+        isinstance(payload, dict) and payload.get("shard") in WINDOWS_SHARD_NAMES
+        for payload in payloads
+    )
+    shard_names = WINDOWS_SHARD_NAMES if physical else SHARD_NAMES
+    if len(metadata_paths) != len(shard_names):
         raise ValueError(
-            f"expected {len(SHARD_NAMES)} Windows shard metadata files in {run_dir}, "
+            f"expected {len(shard_names)} Windows shard metadata files in {run_dir}, "
             f"found {len(metadata_paths)}"
         )
 
@@ -147,9 +161,10 @@ def load_run_directory(run_dir: Path) -> RunObservation:
     image_versions_by_shard: dict[str, str | None] = {}
     files_by_shard: dict[str, tuple[str, ...]] = {}
     junit_by_shard: dict[str, Path] = {}
+    execution_by_shard: dict[str, dict[str, object]] = {}
+    partition_hashes: set[str] = set()
     all_files: set[str] = set()
-    for metadata_path in metadata_paths:
-        payload = _load_json(metadata_path)
+    for metadata_path, payload in zip(metadata_paths, payloads, strict=True):
         if not isinstance(payload, dict) or payload.get("schema_version") != 1:
             raise ValueError(f"unsupported Windows shard metadata in {metadata_path}")
         if payload.get("platform") != "windows":
@@ -176,8 +191,35 @@ def load_run_directory(run_dir: Path) -> RunObservation:
             or any(char not in "0123456789abcdef" for char in assignment_sha256)
         ):
             raise ValueError(f"invalid assignment_sha256 in {metadata_path}")
-        if shard not in SHARD_NAMES or shard in files_by_shard:
+        if shard not in shard_names or shard in files_by_shard:
             raise ValueError(f"invalid or duplicate shard in {metadata_path}")
+        if physical:
+            partition_hash = payload.get("partition_sha256")
+            if (
+                not isinstance(partition_hash, str)
+                or len(partition_hash) != 64
+                or any(char not in "0123456789abcdef" for char in partition_hash)
+            ):
+                raise ValueError(f"invalid partition_sha256 in {metadata_path}")
+            partition_hashes.add(partition_hash)
+            if len(partition_hashes) != 1:
+                raise ValueError("inconsistent Windows partition fingerprints")
+        execution = payload.get("execution")
+        if not isinstance(execution, dict) or set(execution) != {"parallel", "serial"}:
+            raise ValueError(f"invalid execution configuration in {metadata_path}")
+        parallel = execution["parallel"]
+        serial = execution["serial"]
+        if (
+            not isinstance(parallel, dict)
+            or set(parallel) != {"workers", "dist", "marker"}
+            or type(parallel.get("workers")) is not int
+            or parallel["workers"] < 1
+            or parallel.get("dist") != "loadfile"
+            or parallel.get("marker") != "not ci_serial"
+            or serial != {"workers": 1, "marker": "ci_serial"}
+        ):
+            raise ValueError(f"invalid execution configuration in {metadata_path}")
+        execution_by_shard[str(shard)] = execution
         expected_runtime_keys = {
             "python_version",
             "runner_os",
@@ -223,19 +265,42 @@ def load_run_directory(run_dir: Path) -> RunObservation:
             raise ValueError(f"missing JUnit report beside {metadata_path}")
         junit_by_shard[str(shard)] = junit_path
 
-    if set(files_by_shard) != set(SHARD_NAMES) or common is None:
+    if set(files_by_shard) != set(shard_names) or common is None:
         raise ValueError(f"incomplete Windows shard set in {run_dir}")
 
     module_index = _module_index(all_files)
     node_ids: set[str] = set()
     file_seconds: dict[str, float] = defaultdict(float)
-    for shard in SHARD_NAMES:
+    file_phase_seconds: dict[str, dict[str, float]] = {}
+    for shard in shard_names:
         nodes, shard_seconds = _parse_junit(
             junit_by_shard[shard], module_index, node_ids
         )
         node_ids.update(nodes)
         for path, seconds in shard_seconds.items():
             file_seconds[path] += seconds
+        phase_paths = {
+            phase: junit_by_shard[shard].with_name(f"junit.{phase}.xml")
+            for phase in ("parallel", "serial")
+        }
+        if physical or any(path.exists() for path in phase_paths.values()):
+            phase_nodes: set[str] = set()
+            for phase, phase_path in phase_paths.items():
+                _, seconds_by_file = _parse_junit(
+                    phase_path, module_index, phase_nodes, allow_empty=True
+                )
+                for path, seconds in seconds_by_file.items():
+                    file_phase_seconds.setdefault(
+                        path, {"parallel": 0.0, "serial": 0.0}
+                    )[phase] = seconds
+            if phase_nodes != nodes:
+                raise ValueError(f"phase JUnit collection differs from merged report: {shard}")
+            for path, seconds in shard_seconds.items():
+                if not math.isclose(
+                    sum(file_phase_seconds[path].values()), seconds,
+                    rel_tol=1e-9, abs_tol=1e-6,
+                ):
+                    raise ValueError(f"phase JUnit duration differs from merged report: {path}")
 
     return RunObservation(
         run_id=common[0],
@@ -247,6 +312,9 @@ def load_run_directory(run_dir: Path) -> RunObservation:
         files_by_shard=files_by_shard,
         node_ids=frozenset(node_ids),
         file_seconds=dict(file_seconds),
+        partition_sha256=next(iter(partition_hashes), None),
+        execution_by_shard=execution_by_shard,
+        file_phase_seconds=file_phase_seconds,
     )
 
 
@@ -266,6 +334,7 @@ def build_duration_payload(
     observations: list[RunObservation],
     *,
     expected_assignment_sha256: str,
+    expected_partition_sha256: str | None = None,
     minimum_runs: int = 3,
 ) -> dict[str, object]:
     """Aggregate comparable successful runs into a deterministic proposal."""
@@ -282,6 +351,12 @@ def build_duration_payload(
     for run in observations:
         if run.assignment_sha256 != expected_assignment_sha256:
             raise ValueError("Windows run assignment hash does not match the current snapshot")
+        if run.partition_sha256 != expected_partition_sha256:
+            raise ValueError("Windows run partition hash does not match the current snapshot")
+        if run.execution_by_shard != reference.execution_by_shard:
+            raise ValueError("Windows execution configuration differs across source runs")
+        if set(run.file_phase_seconds) != set(reference.file_phase_seconds):
+            raise ValueError("Windows phase duration coverage differs across source runs")
         if run.runtime_compatibility != reference.runtime_compatibility:
             raise ValueError("Windows runtime metadata differs across source runs")
         if run.files_by_shard != reference.files_by_shard:
@@ -292,6 +367,7 @@ def build_duration_payload(
             raise ValueError("Windows JUnit test file collection differs across source runs")
 
     weights: dict[str, float] = {}
+    phase_weights: dict[str, dict[str, float]] = {}
     samples: dict[str, dict[str, float | int]] = {}
     for path in sorted(reference.file_seconds):
         values = [run.file_seconds[path] for run in observations]
@@ -304,18 +380,27 @@ def build_duration_payload(
             "min_seconds": round(min(values), 3),
             "max_seconds": round(max(values), 3),
         }
+        if path in reference.file_phase_seconds:
+            phase_weights[path] = {
+                phase: round(statistics.median(
+                    run.file_phase_seconds[path][phase] for run in observations
+                ), 3)
+                for phase in ("parallel", "serial")
+            }
 
     source_runs = [
         {
             "id": run.run_id,
             "sha": run.sha,
             "attempts": {
-                shard: run.attempts_by_shard[shard] for shard in SHARD_NAMES
+                shard: run.attempts_by_shard[shard] for shard in sorted(run.files_by_shard)
             },
             "assignment_sha256": run.assignment_sha256,
+            "partition_sha256": run.partition_sha256,
+            "execution": run.execution_by_shard,
             "runtime_compatibility": run.runtime_compatibility,
             "image_versions": {
-                shard: run.image_versions_by_shard[shard] for shard in SHARD_NAMES
+                shard: run.image_versions_by_shard[shard] for shard in sorted(run.files_by_shard)
             },
             "node_count": len(run.node_ids),
             "weighted_file_count": len(run.file_seconds),
@@ -332,6 +417,7 @@ def build_duration_payload(
         "source_runs": source_runs,
         "samples": samples,
         "weights_seconds": weights,
+        "phase_weights_seconds": phase_weights,
     }
 
 
@@ -355,9 +441,17 @@ def main() -> int:
     args = _parser().parse_args()
     root = args.root.resolve()
     observations = [load_run_directory(path.resolve()) for path in args.run_dir]
+    shard_module = runpy.run_path(
+        (root / ".github/scripts/windows_test_shards.py").as_posix(),
+        run_name="windows_partition_snapshot",
+    )
     payload = build_duration_payload(
         observations,
         expected_assignment_sha256=_current_assignment_fingerprint(root),
+        expected_partition_sha256=(
+            shard_module["partition_snapshot_fingerprint"]()
+            if observations and observations[0].partition_sha256 is not None else None
+        ),
         minimum_runs=args.minimum_runs,
     )
     rendered = json.dumps(payload, indent=2, sort_keys=True) + "\n"

@@ -2717,6 +2717,7 @@ const chatSessionBootstrap = useChatSessionBootstrap({
   subscribeSession,
   reconcileSession,
   connectionState: gatewayConnectionState,
+  metadataRecoveryError: chatSessionSubscription.metadataRecoveryError,
   cancelHistory: cancelActiveHistory,
   cancelSubscription: cancelActiveSubscription,
 })
