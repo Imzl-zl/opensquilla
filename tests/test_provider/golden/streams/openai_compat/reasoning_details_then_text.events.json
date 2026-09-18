@@ -42,6 +42,7 @@
     },
     "reasoning_content": "Check the map. Pick a route.",
     "reasoning_tokens": 5,
+    "refusal": false,
     "stop_reason": "stop",
     "thinking_signature": null,
     "type": "DoneEvent",
