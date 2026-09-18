@@ -11,12 +11,12 @@ import socket
 import sys
 import time
 import uuid
-from collections.abc import Callable, Mapping, MutableMapping
+from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass, field
 from functools import partial
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from opensquilla.engine.types import public_agent_event_payload
 
@@ -98,6 +98,24 @@ _WS_SHUTDOWN_CANCEL_GRACE_S = 0.05
 def _elapsed_monotonic_ms(started_at: float, ended_at: float | None = None) -> int:
     end = time.monotonic() if ended_at is None else ended_at
     return max(0, int((end - started_at) * 1000))
+
+
+def _record_gateway_ready_telemetry(services: ServiceContainer, *, duration_ms: int) -> None:
+    """Record the source Gateway boundary; Desktop owns its process lifecycle."""
+    from opensquilla.paths import desktop_profile_lifecycle_active
+    from opensquilla.telemetry.contracts.common import ResultOutcome
+
+    if desktop_profile_lifecycle_active():
+        return
+    try:
+        observer = getattr(services.reliability_event_sink, "observe_gateway_start", None)
+        if callable(observer):
+            observer(
+                outcome=ResultOutcome.SUCCESS, error_code=None, failure_stage=None,
+                duration_ms=duration_ms,
+            )
+    except Exception:
+        log.debug("gateway.start_telemetry_record_failed", exc_info=True)
 
 
 def _log_gateway_startup_phase(
@@ -196,19 +214,6 @@ def gateway_shutdown_deadline() -> float:
     raising the drain budget automatically widens the kill window.
     """
     return gateway_graceful_timeout() * 2 + 15.0
-
-
-class _FlushReceiptSessionStorage(Protocol):
-    async def get_session(self, session_key: str) -> Any | None: ...
-
-    async def list_memory_durable_receipts(self, **kwargs: Any) -> list[Any]: ...
-
-    async def upsert_memory_durable_receipt(
-        self,
-        receipt: Any,
-        *,
-        expected_session_id: str | None = None,
-    ) -> Any: ...
 
 
 _AUTO_PROPOSE_TOOL_ALLOWLIST = frozenset(
@@ -326,7 +331,7 @@ def _make_channel_rpc_context_factory(svc: ServiceContainer, config: GatewayConf
     from opensquilla.channels.command_registry import build_channel_rpc_context
 
     def _factory(envelope: Any) -> Any:
-        names = ("session_manager", "provider_selector", "tool_registry", "usage_tracker", "usage_event_sink", "skill_loader", "cron_scheduler", "task_runtime", "flush_service", "heartbeat_loop", "agent_registry", "memory_managers", "memory_stores", "memory_retrievers")  # noqa: E501
+        names = ("session_manager", "provider_selector", "tool_registry", "usage_tracker", "usage_event_sink", "skill_loader", "cron_scheduler", "task_runtime", "heartbeat_loop", "agent_registry", "memory_managers", "memory_stores", "memory_retrievers")  # noqa: E501
         return build_channel_rpc_context(
             envelope,
             gateway_config=config,
@@ -682,8 +687,6 @@ class ServiceContainer:
     memory_watchers: list[MemoryFileWatcher] = field(default_factory=list)
     memory_retrievers: dict[str, Any] = field(default_factory=dict)
     turn_capture_services: dict[str, Any] = field(default_factory=dict)
-    flush_service: Any = None  # SessionFlushService | None (gated by OPENSQUILLA_SESSION_FLUSH)
-    memory_repair_service: Any = None
     meta_run_writer: Any = None
     router_decision_writer: Any = None
     turn_error_writer: Any = None
@@ -695,9 +698,9 @@ class ServiceContainer:
     task_runtime: Any = None
     goal_service: Any = None
     heartbeat_loop: Any = None
-    heartbeat_watcher: Any = None
     prompt_cache_keepalive_service: Any = None
     daily_usage_telemetry_task: asyncio.Task[Any] | None = field(default=None, repr=False)
+    standalone_usage_telemetry: Any = None
     deferred_warmups: list[Callable[[], Any]] = field(default_factory=list)
     deferred_warmup_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _compaction_listener_remove: Callable[[], None] | None = None
@@ -838,11 +841,6 @@ class ServiceContainer:
             except Exception:
                 pass
             self.prompt_cache_keepalive_service = None
-        if self.heartbeat_watcher is not None:
-            try:
-                await self.heartbeat_watcher.stop()
-            except Exception:
-                pass
         if self.heartbeat_loop is not None:
             try:
                 await self.heartbeat_loop.stop()
@@ -877,8 +875,19 @@ class ServiceContainer:
             except Exception:
                 pass
 
-        # Turn/tool producers are stopped above. Closing scoped telemetry now
-        # preserves any unsent queue without forcing network I/O at shutdown.
+        # Turn/tool producers are stopped above. Finish bounded telemetry
+        # delivery while retaining any unacknowledged events for a later run.
+        if self.standalone_usage_telemetry is not None:
+            try:
+                await self.standalone_usage_telemetry.close()
+            except Exception:
+                log.debug("gateway.standalone_usage_telemetry_close_failed", exc_info=True)
+            self.standalone_usage_telemetry = None
+        # Pending growth observations may need the consent lock currently held
+        # by an upload. Start its deadline before draining those producers.
+        prepare_shutdown = getattr(self.telemetry_runtime, "prepare_shutdown", None)
+        if callable(prepare_shutdown):
+            prepare_shutdown()
         if self.growth_event_sink is not None:
             try:
                 await self.growth_event_sink.close()
@@ -899,11 +908,6 @@ class ServiceContainer:
             except Exception:
                 pass
 
-        if self.memory_repair_service is not None:
-            try:
-                await self.memory_repair_service.stop()
-            except Exception:
-                pass
         if self.router_calibration_service is not None:
             # Stop the 24h job before its writer is closed below.
             try:
@@ -1141,17 +1145,34 @@ def _ensure_configured_agent_workspaces(
     if not config.workspace_dir:
         return
 
+    from opensquilla.gateway.workspace_template_upgrade import upgrade_workspace_defaults
     from opensquilla.identity.bootstrap import ensure_agent_workspace
+
+    seen_workspaces: set[Path] = set()
 
     for agent_id in _configured_agent_ids(config, extra_agent_ids):
         result = ensure_agent_workspace(resolve_agent_workspace_dir(agent_id, config))
+        physical_workspace = result.workspace_dir.resolve()
+        if physical_workspace not in seen_workspaces:
+            seen_workspaces.add(physical_workspace)
+            for upgrade in upgrade_workspace_defaults(
+                result.workspace_dir, profile_home=default_opensquilla_home()
+            ):
+                if upgrade.status != "unchanged":
+                    logger = log.info if upgrade.reason == "old-default" else log.warning
+                    logger(
+                        "build_services.workspace_template_upgrade",
+                        agent_id=agent_id,
+                        filename=upgrade.filename,
+                        status=upgrade.status,
+                        reason=upgrade.reason,
+                        backup=str(upgrade.backup_path) if upgrade.backup_path else None,
+                    )
         log.info(
             "build_services.agent_workspace_ready",
             agent_id=agent_id,
             workspace=str(result.workspace_dir),
             created_files=list(result.created_files),
-            bootstrap_seeded=result.bootstrap_seeded,
-            bootstrap_completed=result.bootstrap_completed,
         )
 
 
@@ -1967,6 +1988,7 @@ async def _emit_task_runtime_stream_events(
             raw_usage_call_index = event_dict.pop("usage_call_index", None)
             raw_no_prior_provider_dispatch = event_dict.pop("no_prior_provider_dispatch", None)
             raw_replay_safe = event_dict.pop("replay_safe", None)
+            model_capacity = event_dict.pop("model_capacity", None)
             # Keep the normalized provider classification internal to the
             # durable task outcome; it is not part of the public stream event.
             raw_failure_kind = event_dict.pop("failure_kind", None)
@@ -2013,6 +2035,9 @@ async def _emit_task_runtime_stream_events(
                     replay_safe=raw_replay_safe,
                 )
                 terminal_payload.update(replay_proof)
+            if model_capacity is not None:
+                event_dict["model_capacity"] = model_capacity
+                terminal_payload["model_capacity"] = model_capacity
             terminal_message = build_terminal_reply(terminal_payload)
             # Additive ref suffix joining the reply to its durable turn_errors
             # row; absent when no record was written (error_id empty).
@@ -2521,7 +2546,9 @@ class GatewayServer:
                     self._server.should_exit = True
                 if self._task is not None:
                     try:
-                        await asyncio.wait_for(self._task, timeout=5.0)
+                        await asyncio.wait_for(
+                            asyncio.gather(self._task, return_exceptions=True), timeout=5.0
+                        )
                     except TimeoutError:
                         self._task.cancel()
                 preview_server = getattr(self, "_preview_server", None)
@@ -2535,7 +2562,9 @@ class GatewayServer:
                     preview_server.should_exit = True
                 if preview_task is not None:
                     try:
-                        await asyncio.wait_for(preview_task, timeout=5.0)
+                        await asyncio.wait_for(
+                            asyncio.gather(preview_task, return_exceptions=True), timeout=5.0
+                        )
                     except TimeoutError:
                         preview_task.cancel()
                 if preview_socket is not None:
@@ -2551,206 +2580,6 @@ class GatewayServer:
                 if runtime_shutdown_clean:
                     self._release_pid_lock()
         return runtime_shutdown_result
-
-
-def build_flush_service(
-    *,
-    tool_registry: Any,
-    provider_selector: Any,
-    config: GatewayConfig | None = None,
-    session_manager: Any | None = None,
-    memory_managers: Mapping[str, Any] | None = None,
-) -> Any:
-    """Construct a :class:`SessionFlushService` gated by flush config.
-
-    Returns ``None`` when the kill-switch env var is disabled or gateway memory
-    config does not explicitly enable flush. Otherwise returns a service wired to the gateway's tool
-    registry and provider selector. ``agent_id`` is threaded through the
-    callable signature for future multi-agent support, but today OpenSquilla
-    uses a single ModelSelector so we just call its ``resolve()`` and ignore
-    the agent id.
-    """
-    from opensquilla.memory.flush_config import is_session_flush_enabled
-
-    if not is_session_flush_enabled():
-        return None
-    memory_cfg = getattr(config, "memory", None)
-    if memory_cfg is None or not getattr(memory_cfg, "flush_enabled", False):
-        return None
-
-    from opensquilla.memory.session_flush import SessionFlushService
-    from opensquilla.tools.dispatch import build_tool_handler
-
-    tool_handler = build_tool_handler(tool_registry)
-    raw_session_storage = get_session_storage(session_manager)
-    session_storage: _FlushReceiptSessionStorage | None = None
-    if (
-        raw_session_storage is not None
-        and callable(getattr(raw_session_storage, "get_session", None))
-        and callable(getattr(raw_session_storage, "list_memory_durable_receipts", None))
-        and callable(getattr(raw_session_storage, "upsert_memory_durable_receipt", None))
-    ):
-        session_storage = cast(_FlushReceiptSessionStorage, raw_session_storage)
-
-    def _resolve_provider(_agent_id: str) -> Any:
-        if provider_selector is None:
-            return None
-        resolver = getattr(provider_selector, "resolve", None)
-        if resolver is None:
-            return None
-        try:
-            return resolver()
-        except Exception:  # noqa: BLE001
-            return None
-
-    async def _resolve_flush_session_id(session_key: str) -> str | None:
-        if session_storage is None:
-            return None
-        session = await session_storage.get_session(session_key)
-        if session is None:
-            return None
-        return str(getattr(session, "session_id", "") or "") or None
-
-    async def _resolve_flush_checkpoint_exists(
-        session_key: str,
-        session_id: str | None,
-    ) -> bool:
-        if session_storage is None or not session_id:
-            return False
-        rows = await session_storage.list_memory_durable_receipts(
-            session_key=session_key,
-            session_id=session_id,
-            scope="checkpoint",
-            status="checkpoint_saved",
-            limit=1,
-        )
-        return bool(rows)
-
-    async def _write_durable_flush_receipt(receipt: Any, **row: Any) -> None:
-        if session_storage is None:
-            return
-
-        from opensquilla.session.models import MemoryDurableReceipt
-
-        session_key = str(row.get("session_key") or "")
-        if not session_key:
-            return
-        captured_session_id = str(row.get("session_id") or "")
-        if not captured_session_id:
-            log.warning(
-                "session_flush.receipt_write_skipped",
-                reason="session_id_missing",
-                session_key=session_key,
-                result_status=getattr(receipt, "result_status", None),
-            )
-            return
-        current_session = await session_storage.get_session(session_key)
-        current_session_id = (
-            str(getattr(current_session, "session_id", "") or "")
-            if current_session is not None
-            else ""
-        )
-        if not current_session_id:
-            log.warning(
-                "session_flush.receipt_write_skipped",
-                reason="session_missing",
-                session_key=session_key,
-                captured_session_id=captured_session_id,
-                result_status=getattr(receipt, "result_status", None),
-            )
-            return
-        if current_session_id != captured_session_id:
-            log.warning(
-                "session_flush.receipt_session_mismatch",
-                session_key=session_key,
-                captured_session_id=captured_session_id,
-                current_session_id=current_session_id,
-                result_status=getattr(receipt, "result_status", None),
-            )
-            return
-
-        scope = str(row.get("scope") or "")
-        status = str(row.get("status") or "")
-        reason = row.get("reason")
-        target_path = row.get("target_path")
-        target_path = str(target_path) if target_path else None
-        source_path = row.get("source_path")
-        source_path = str(source_path) if source_path else None
-        turn_id = row.get("turn_id")
-        turn_id = str(turn_id) if turn_id else None
-        content_hash = row.get("content_hash")
-        content_hash = str(content_hash) if content_hash else None
-        idempotency_key = ":".join(
-            [
-                "flush-receipt",
-                scope,
-                session_key,
-                captured_session_id,
-                turn_id or "",
-                status,
-                str(reason or ""),
-                source_path or "",
-                target_path or "",
-                content_hash or "",
-                str(getattr(receipt, "input_message_count", 0) or 0),
-                str(getattr(receipt, "first_included_message", "") or ""),
-                str(getattr(receipt, "last_included_message", "") or ""),
-            ]
-        )
-        await session_storage.upsert_memory_durable_receipt(
-            MemoryDurableReceipt(
-                session_key=session_key,
-                session_id=captured_session_id,
-                turn_id=turn_id,
-                scope=scope,
-                source_path=source_path,
-                target_path=target_path,
-                content_hash=content_hash,
-                idempotency_key=idempotency_key,
-                status=status,
-                reason=str(reason) if reason else None,
-                attempt_count=1,
-            ),
-            expected_session_id=captured_session_id,
-        )
-
-    def _resolve_archive_workspace(agent_id: str) -> Path | None:
-        if not memory_managers:
-            return None
-        managers = [memory_managers.get(agent_id), memory_managers.get("main")]
-        for attr_name in ("workspace_dir", "memory_dir"):
-            for manager in managers:
-                if manager is None:
-                    continue
-                path_value = getattr(manager, attr_name, None)
-                if path_value is not None:
-                    return Path(path_value).expanduser()
-        return None
-
-    service_kwargs: dict[str, Any] = {}
-    if memory_cfg is not None:
-        service_kwargs["default_timeout"] = getattr(
-            memory_cfg,
-            "flush_background_timeout_seconds",
-            30.0,
-        )
-        service_kwargs["raw_archive_max_chars"] = getattr(
-            memory_cfg,
-            "flush_archive_max_bytes",
-            800_000,
-        )
-    if session_storage is not None:
-        service_kwargs["receipt_writer"] = _write_durable_flush_receipt
-        service_kwargs["session_identity_resolver"] = _resolve_flush_session_id
-        service_kwargs["checkpoint_exists_resolver"] = _resolve_flush_checkpoint_exists
-
-    return SessionFlushService(
-        provider_selector=_resolve_provider,
-        tool_registry=tool_registry,
-        tool_handler=tool_handler,
-        archive_workspace_resolver=_resolve_archive_workspace,
-        **service_kwargs,
-    )
 
 
 def _squilla_router_bundle_dir(router_cfg: Any) -> Path:
@@ -2869,6 +2698,9 @@ def apply_model_catalog_overrides(catalog: ModelCatalog, config: GatewayConfig) 
     value rather than dropping it silently.
     """
     try:
+        from opensquilla.provider.model_capacity import sync_custom_capacity_endpoints
+
+        sync_custom_capacity_endpoints(catalog, config)
         catalog.set_user_overrides(model_override_entries(config))
     except ValueError as exc:
         log.warning("model_catalog.user_override_rejected", error=str(exc))
@@ -2910,6 +2742,7 @@ async def build_services(
     extra_agent_ids: list[str] | None = None,
     seed_agent_workspaces: bool = True,
     defer_sandbox_startup: bool = False,
+    start_standalone_telemetry: bool = False,
 ) -> ServiceContainer:
     """Initialize reusable services without any gateway-specific side effects.
 
@@ -3223,7 +3056,7 @@ async def build_services(
     proxy = llm_runtime.proxy
     if provider_selector is None:
         # Always build the selector, even before an API key exists: every
-        # service (TurnRunner, RPC contexts, flush, auto-propose) captures
+        # service (TurnRunner, RPC contexts, auto-propose) captures
         # this one object at boot, and config hot-apply mutates it in place
         # via sync_primary. Booting without a selector would strand the
         # gateway on "No provider available" until a restart even after the
@@ -3723,49 +3556,6 @@ async def build_services(
     elif config.mcp.enabled:
         log.info("build_services.mcp_enabled_no_servers")
 
-    flush_service = build_flush_service(
-        tool_registry=tool_registry,
-        provider_selector=provider_selector,
-        config=config,
-        session_manager=session_manager,
-        memory_managers=memory_managers,
-    )
-    if flush_service is not None:
-        log.info("build_services.session_flush_service_ready")
-    else:
-        log.info("build_services.session_flush_service_disabled")
-
-    memory_repair_service = None
-    if (
-        bool(getattr(config.memory, "repair_enabled", True))
-        and flush_service is not None
-        and session_manager is not None
-    ):
-        try:
-            from opensquilla.gateway.memory_repair_service import MemoryRepairService
-
-            memory_roots = {
-                agent_id: Path(root)
-                for agent_id, manager in memory_managers.items()
-                for root in [
-                    getattr(manager, "workspace_dir", None) or getattr(manager, "memory_dir", None)
-                ]
-                if root is not None
-            }
-            memory_repair_service = MemoryRepairService(
-                session_manager=session_manager,
-                flush_service=flush_service,
-                memory_roots=memory_roots,
-                agent_ids=tuple(_configured_agent_ids(config, extra_agent_ids)),
-                interval_seconds=float(getattr(config.memory, "repair_interval_seconds", 60.0)),
-                max_items_per_tick=int(getattr(config.memory, "repair_max_items_per_tick", 5)),
-                usage_event_sink=usage_event_sink,
-                config=config,
-            )
-            log.info("build_services.memory_repair_service_ready")
-        except Exception as e:
-            log.warning("build_services.memory_repair_service_failed", error=str(e))
-
     meta_run_writer = None
     try:
         from opensquilla.skills.meta.enabled import is_meta_skill_enabled
@@ -3918,6 +3708,9 @@ async def build_services(
         await growth_event_sink.start()
     except Exception:
         log.debug("build_services.telemetry_runtime_unavailable", exc_info=True)
+        prepare_shutdown = getattr(telemetry_runtime, "prepare_shutdown", None)
+        if callable(prepare_shutdown):
+            prepare_shutdown()
         if growth_event_sink is not None:
             try:
                 await growth_event_sink.close()
@@ -3952,8 +3745,6 @@ async def build_services(
         memory_watchers=memory_watchers,
         memory_retrievers=memory_retrievers,
         turn_capture_services=turn_capture_services,
-        flush_service=flush_service,
-        memory_repair_service=memory_repair_service,
         meta_run_writer=meta_run_writer,
         router_decision_writer=router_decision_writer,
         turn_error_writer=turn_error_writer,
@@ -3966,6 +3757,16 @@ async def build_services(
         sandbox_setup_task=sandbox_setup_task,
         sandbox_upgrade_report=sandbox_upgrade_report,
     )
+    if start_standalone_telemetry and os.environ.get("OPENSQUILLA_CODETASK_CHILD") != "1":
+        try:
+            from opensquilla.observability.usage_telemetry import StandaloneUsageTelemetry
+
+            svc.standalone_usage_telemetry = StandaloneUsageTelemetry(
+                config=config, legacy_storage=get_session_storage(session_manager),
+            )
+            svc.standalone_usage_telemetry.start()
+        except Exception:
+            log.debug("build_services.standalone_usage_telemetry_unavailable", exc_info=True)
     if skill_loader is not None:
         try:
             from opensquilla.skills.watcher import SkillCatalogWatcher
@@ -4048,12 +3849,12 @@ def build_turn_runner_from_services(
         skill_loader=svc.skill_loader,
         usage_tracker=svc.usage_tracker,
         usage_event_sink=getattr(svc, "usage_event_sink", None),
+        usage_telemetry=getattr(svc, "standalone_usage_telemetry", None),
         config=resolved_config,
         memory_sync_managers=getattr(svc, "memory_sync_managers", None) or None,
         model_catalog=getattr(svc, "model_catalog", None),
         memory_retrievers=getattr(svc, "memory_retrievers", None) or None,
         turn_capture_services=getattr(svc, "turn_capture_services", None) or None,
-        session_flush_service=getattr(svc, "flush_service", None),
         session_lock_provider=_standalone_lock_provider,
         diagnostics_state=diagnostics_state,
         # Hook registries forwarded from services when present so any future
@@ -4371,10 +4172,6 @@ async def start_gateway_server(
         maintain_profile_imports(),
     )
 
-    memory_repair_service = getattr(svc, "memory_repair_service", None)
-    if memory_repair_service is not None:
-        memory_repair_service.start()
-        log.info("gateway.memory_repair_service_started")
 
     router_calibration_service = getattr(svc, "router_calibration_service", None)
     if router_calibration_service is not None:
@@ -4385,10 +4182,6 @@ async def start_gateway_server(
     # populated after channel_manager is constructed below.
     _cm_holder: list = [None]
     from opensquilla.gateway.project_workspace_runtime import prepare_heartbeat_tool_context
-    from opensquilla.scheduler.heartbeat import (
-        HeartbeatConfigWatcher,
-        HeartbeatRunner,
-    )
     from opensquilla.scheduler.heartbeat_loop import HeartbeatLoop
     from opensquilla.scheduler.heartbeat_service import HeartbeatService
 
@@ -4653,26 +4446,6 @@ async def start_gateway_server(
                 "gateway.steer_restart_recovery_completed",
                 **steer_recovery,
             )
-
-    # Resolve HEARTBEAT.md path; instantiate Runner + Watcher;
-    # start Watcher BEFORE the Loop so the first tick already sees any
-    # frontmatter overrides. ``reload_now()`` runs synchronously at start.
-    heartbeat_runner = HeartbeatRunner()
-    workspace_dir = config.workspace_dir or ""
-    md_path_setting = getattr(config.heartbeat, "config_path", None)
-    if md_path_setting:
-        heartbeat_md_path = Path(md_path_setting).expanduser()
-    elif workspace_dir:
-        heartbeat_md_path = Path(workspace_dir).expanduser() / "HEARTBEAT.md"
-    else:
-        heartbeat_md_path = Path.home() / ".opensquilla" / "workspace" / "HEARTBEAT.md"
-    heartbeat_watcher = HeartbeatConfigWatcher(
-        heartbeat_runner,
-        heartbeat_md_path,
-        loop_listener=heartbeat_loop.apply_overrides,
-    )
-    await heartbeat_watcher.start()
-    svc.heartbeat_watcher = heartbeat_watcher
 
     await heartbeat_loop.start()
     svc.heartbeat_loop = heartbeat_loop
@@ -5278,7 +5051,6 @@ async def start_gateway_server(
         cron_scheduler=svc.cron_scheduler,
         turn_runner=turn_runner,
         task_runtime=task_runtime,
-        flush_service=svc.flush_service,
         heartbeat_service=heartbeat_service,
         heartbeat_loop=heartbeat_loop,
         prompt_cache_keepalive_service=prompt_cache_keepalive_service,
@@ -5310,13 +5082,14 @@ async def start_gateway_server(
     # in-process app readiness is the final startup boundary.
     listener_ready = not run
     runtime_state_ready = False
+    app.state.gateway_start_ready = False
     gateway_ready_phase_emitted = False
     gateway_ready_wait_started_at = startup_phase_started_at
 
     def _start_post_ready_observability() -> None:
-        # Only the listening Gateway owns V1 uploads. Embedded app construction
-        # must not launch workers. The install worker is a daemon; daily usage
-        # belongs to the service container and is cancelled before storage closes.
+        # A listening Gateway starts its V1 workers only after readiness.
+        # Embedded app construction must not launch them. Standalone clients
+        # explicitly own their separate reporting lifecycle in build_services.
         if not run:
             return
         _start_background_install_telemetry(config)
@@ -5338,6 +5111,7 @@ async def start_gateway_server(
         if gateway_ready_phase_emitted or not listener_ready or not runtime_state_ready:
             return
         gateway_ready_phase_emitted = True
+        app.state.gateway_start_ready = True
         ready_at = time.monotonic()
         log.info(
             "gateway.startup_phase",
@@ -5350,6 +5124,10 @@ async def start_gateway_server(
             _ensure_sandbox_setup_on_boot(config)
         )
         _start_post_ready_observability()
+        if run:
+            _record_gateway_ready_telemetry(
+                svc, duration_ms=_elapsed_monotonic_ms(startup_started_at, ready_at),
+            )
 
     server_handle = GatewayServer(app=app, config=config)
     server_handle._pid_lock = _pid_lock

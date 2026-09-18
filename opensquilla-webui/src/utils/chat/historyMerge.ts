@@ -1,12 +1,21 @@
 import type { ChatMessage } from '@/types/chat'
 import type { StatusPart } from '@/types/parts'
 import { isUsageAccountingBarrier } from '@/utils/chat/usageAccountingFailure'
+import { dedupeTerminalErrorNotices } from '@/utils/chat/terminalErrorNotices'
 
 const TERMINAL_STEER_DISPOSITIONS = new Set([
   'applied',
   'promoted',
   'cancelled',
   'rejected',
+])
+const TERMINAL_TURN_STATUSES = new Set([
+  'succeeded',
+  'failed',
+  'cancelled',
+  'timeout',
+  'abandoned',
+  'interrupted',
 ])
 
 function isPromotedSteerRow(message: ChatMessage): boolean {
@@ -534,23 +543,30 @@ export function reconcileClientTerminalNotices(
       }
       return -1
     })()
-    if (priorUserIndex < 0) continue
-    const userIndex = findIncomingUserForPreviousNotice(prev, merged, priorUserIndex)
-    if (userIndex < 0) continue
-
-    let turnEnd = userIndex + 1
-    while (turnEnd < merged.length && merged[turnEnd]?.role !== 'user') turnEnd++
-    const durableErrorExists = merged
-      .slice(userIndex + 1, turnEnd)
-      .some(message => message.role === 'error')
-    if (durableErrorExists) continue
+    const exactTurnId = notice.turnId?.trim()
+    let turnEnd: number
+    if (exactTurnId) {
+      const turnIndexes = merged.flatMap((message, index) => message.turnId === exactTurnId ? [index] : [])
+      if (!turnIndexes.length) continue
+      turnEnd = Math.max(...turnIndexes) + 1
+      // Keep both inputs until deduplication has checked their references.
+      // A durable row replacing a live notice must not erase conflicts.
+    } else {
+      // Preserve legacy unscoped text without assigning it a turn or a
+      // diagnostic reference. Identified notices never take this fallback.
+      if (priorUserIndex < 0) continue
+      const userIndex = findIncomingUserForPreviousNotice(prev, merged, priorUserIndex)
+      if (userIndex < 0) continue
+      turnEnd = userIndex + 1
+      while (turnEnd < merged.length && merged[turnEnd]?.role !== 'user') turnEnd++
+      if (merged.slice(userIndex + 1, turnEnd).some(message => message.role === 'error')) continue
+    }
 
     // A retryable pre-provider failure can leave a status-only assistant with
     // no durable message id while the terminal task projection is still
     // catching up. Preserve that activity only when both snapshots prove the
     // same durable user id and exact turn id. Once canonical history carries a
     // same-turn status snapshot, it replaces this optimistic row naturally.
-    const exactTurnId = notice.turnId?.trim()
     const previousUser = prev[priorUserIndex]
     const exactIncomingUserIndex = exactTurnId && previousUser?.messageId
       ? merged.findIndex(message =>
@@ -584,7 +600,7 @@ export function reconcileClientTerminalNotices(
     merged.splice(turnEnd, 0, notice)
   }
 
-  return merged
+  return dedupeTerminalErrorNotices(merged)
 }
 
 function lastUserIndex(messages: ChatMessage[]): number {
@@ -621,7 +637,32 @@ export function reconcileRunningHistoryMessages(
   if (incoming.length === 0) return prev
 
   const previousLastUserIndex = lastUserIndex(prev)
-  if (previousLastUserIndex < 0) return reconcileHistoryMessages(prev, incoming)
+  if (previousLastUserIndex < 0) {
+    // Subscribe can restore the live snapshot before initial history supplies
+    // its user row. Anchor only the newest identified live tail to that exact
+    // canonical turn; unrelated or already-terminal history stays authoritative.
+    const latest = prev[prev.length - 1]!
+    const turnId = latest.restoredFromHistory ? undefined : latest.turnId
+    const latestUser = incoming[lastUserIndex(incoming)]
+    const anchor = turnId
+      ? incoming.find(message => message.role === 'user' && message.turnId === turnId)
+      : undefined
+    const terminal = turnId && incoming.some(message => message.turnId === turnId && (
+      message.role === 'error'
+      || TERMINAL_TURN_STATUSES.has(String(message.turnOutcome?.status || '').trim().toLowerCase())
+      || Boolean(message.usage || message.turn_usage || message.routerUsage)
+    ))
+    if (!anchor || latestUser?.turnId !== turnId || terminal) {
+      return reconcileHistoryMessages(prev, incoming)
+    }
+    let tailStart = prev.length - 1
+    while (
+      tailStart > 0
+      && prev[tailStart - 1]?.turnId === turnId
+      && prev[tailStart - 1]?.restoredFromHistory !== true
+    ) tailStart--
+    return reconcileRunningHistoryMessages([anchor, ...prev.slice(tailStart)], incoming)
+  }
 
   const incomingById = new Map(
     incoming

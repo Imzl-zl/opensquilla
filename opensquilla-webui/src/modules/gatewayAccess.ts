@@ -23,9 +23,14 @@ export interface GatewayConnectionSettings {
 export interface GatewayAccess {
   readonly availability: GatewayAvailability
   readonly connectionError: string | null
+  readonly requiresCredential: boolean
   readonly isAvailable: boolean
   readonly isLocalOwner: boolean
   readonly isAuthenticated: boolean
+  /** Current anonymous session namespace, verified from this connection's Hello. */
+  readonly guestSessionOwnerId: string | null
+  /** Proven delivery authority; retained only while the same connection intent retries. */
+  readonly deliveryIdentity: string | null
   readonly canManageProjectWorkspaces: boolean
   readonly canChooseProject: boolean
   readonly runModePolicy: GatewayRunModePolicy | null

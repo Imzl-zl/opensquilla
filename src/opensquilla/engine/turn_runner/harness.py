@@ -81,7 +81,7 @@ from opensquilla.engine.turn_runner.turn_finalizer_stage import (
 )
 from opensquilla.engine.usage_accounting import UsageExecutionContext
 from opensquilla.provider.model_catalog import resolve_effective_context_window
-from opensquilla.session.compaction_lifecycle import normalize_flush_triggers_strict
+from opensquilla.provider.registry import LOCAL_RUNTIME_PROVIDERS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -94,10 +94,6 @@ if TYPE_CHECKING:
     from opensquilla.observability.turn_call_log import TurnCallLogger
     from opensquilla.provider.protocol import LLMProvider
     from opensquilla.tools.types import ToolContext
-
-
-def _coerce_flush_triggers(value: Any) -> list[str]:
-    return list(normalize_flush_triggers_strict(value))
 
 
 def create_turn_execution_context(
@@ -552,6 +548,12 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
         user_context_window = _positive_int_or_zero(
             getattr(llm_cfg, "context_window_tokens", 0)
         )
+        if provider and provider.strip().lower() != str(
+            getattr(llm_cfg, "provider", "") or ""
+        ).strip().lower():
+            # The global context declaration belongs to the primary deployment;
+            # a routed model at another provider must use its own capacity.
+            user_context_window = 0
         # Explicit provider-request proof budget (chars). Positive values bypass
         # the derived context-budget ladder in ContextBudgetGovernor.from_values.
         user_proof_max_chars = _positive_int_or_zero(
@@ -597,11 +599,15 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
                 )
             # Per-model [models.*] context_window overrides beat the global
             # llm.context_window_tokens value; the global still beats the catalog.
-            context_window, _context_window_source = resolve_effective_context_window(
+            context_window, context_window_source = resolve_effective_context_window(
                 runner._model_catalog,
                 model_id,
                 provider=provider_name,
                 global_override=user_context_window,
+            )
+            context_window_known = (
+                context_window_source in {"override", "config", "catalog"}
+                or provider_name.strip().lower() in LOCAL_RUNTIME_PROVIDERS
             )
             capabilities = runner._model_catalog.get_capabilities(
                 model_id, provider_name=provider_name, base_url=base_url
@@ -652,6 +658,7 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
             auto_max_tokens = 0
             auto_max_tokens_source = "default"
             context_window = user_context_window if user_context_window > 0 else 200_000
+            context_window_known = user_context_window > 0
             capabilities = None
             tools_capability_verified = False
             vision_support = "unknown"
@@ -660,6 +667,7 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
         return _ResolvedCatalog(
             max_tokens=max_tokens,
             context_window=context_window,
+            context_window_known=context_window_known,
             capabilities=capabilities,
             tools_capability_verified=tools_capability_verified,
             vision_support=cast(Any, vision_support),
@@ -762,6 +770,7 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
         if vision_support not in {"supported", "unsupported", "unknown"}:
             vision_support = "unknown"
         context_window = limits.context_window
+        context_window_known = bool(getattr(limits, "context_window_known", True))
         if include_global_overrides:
             per_model_context = catalog.user_context_window_override(
                 model_id,
@@ -772,12 +781,14 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
             )
             if per_model_context is None and global_context > 0:
                 context_window = global_context
+                context_window_known = True
         max_tokens = limits.max_output_tokens
         if include_global_overrides and configured_max_tokens > 0:
             max_tokens = min(configured_max_tokens, context_window)
         return _ResolvedCatalog(
             max_tokens=max_tokens,
             context_window=context_window,
+            context_window_known=context_window_known,
             capabilities=capabilities,
             tools_capability_verified=tools_capability_verified,
             vision_support=cast(Any, vision_support),
@@ -815,7 +826,6 @@ class _TurnRunnerAgentConfigBuilderAdapter(AgentConfigBuilderPort):
         from opensquilla.paths import media_root_from_config
 
         runner = self._runner
-        mem_cfg = getattr(runner._config, "memory", None) if runner._config else None
         agent_token_cfg = (
             getattr(runner._config, "agent_token_saving", None)
             if runner._config
@@ -829,39 +839,10 @@ class _TurnRunnerAgentConfigBuilderAdapter(AgentConfigBuilderPort):
         thinking = runner._resolve_turn_thinking(turn)
         return _AgentConfigAuxiliaries(
             thinking=thinking,
-            flush_workspace_dir=str(runner._resolve_memory_source_dir(agent_id)),
             tool_result_store_dir=str(
                 media_root_from_config(runner._config) / "tool-results"
             ),
             tool_result_store_session_id=session_id_for_log or session_key,
-            flush_enabled=getattr(mem_cfg, "flush_enabled", False),
-            flush_triggers=_coerce_flush_triggers(
-                getattr(mem_cfg, "flush_triggers", None)
-            ),
-            flush_pre_compaction=getattr(mem_cfg, "flush_pre_compaction", False),
-            flush_timeout_seconds=getattr(mem_cfg, "flush_timeout_seconds", 15.0),
-            flush_background_timeout_seconds=getattr(
-                mem_cfg, "flush_background_timeout_seconds", 120.0
-            ),
-            flush_backoff_initial_seconds=getattr(
-                mem_cfg, "flush_backoff_initial_seconds", 30.0
-            ),
-            flush_backoff_max_seconds=getattr(
-                mem_cfg, "flush_backoff_max_seconds", 300.0
-            ),
-            flush_archive_max_bytes=getattr(
-                mem_cfg, "flush_archive_max_bytes", 800_000
-            ),
-            flush_compaction_requires_safe_receipt=getattr(
-                mem_cfg,
-                "flush_compaction_requires_safe_receipt",
-                False,
-            ),
-            flush_compaction_safety_mode=getattr(
-                mem_cfg,
-                "flush_compaction_safety_mode",
-                "protect",
-            ),
             compaction_profile=getattr(
                 compaction_cfg,
                 "compaction_profile",
@@ -971,7 +952,7 @@ class _TurnRunnerAgentFactoryAdapter(AgentFactoryPort):
     """Bind the typed ``Agent(...)`` constructor.
 
     The adapter injects the runner-singleton dependencies
-    (``usage_tracker``, ``session_flush_service``) so the stage never
+    (``usage_tracker``) so the stage never
     sees those runtime attributes directly.
     """
 
@@ -1041,7 +1022,6 @@ class _TurnRunnerAgentFactoryAdapter(AgentFactoryPort):
             session_key=session_key,
             turn_call_logger=turn_call_logger,
             memory_sync_manager=memory_sync_manager,
-            session_flush_service=self._runner._session_flush_service,
             tool_registry=self._runner._tool_registry,
             tool_context=tool_context,
             usage_event_sink=usage_event_sink,

@@ -188,6 +188,7 @@ METHOD_SCOPES: dict[str, str] = {
     "logs.tail": READ_SCOPE,
     "logs.trace": READ_SCOPE,
     "models.list": READ_SCOPE,
+    "models.capacity.resolve": READ_SCOPE,
     "models.routing.get": READ_SCOPE,
     "providers.status": READ_SCOPE,
     # OpenSquilla-only; non-consuming peek at a session's router-control hold
@@ -449,11 +450,6 @@ METHOD_SCOPES: dict[str, str] = {
     "memory.import.apply": ADMIN_SCOPE,
     "memory.import.undo": ADMIN_SCOPE,
     "memory.import.discard": ADMIN_SCOPE,
-    "memory.raw_fallbacks.list": ADMIN_SCOPE,
-    "memory.raw_fallbacks.show": ADMIN_SCOPE,
-    "memory.repair.list": ADMIN_SCOPE,
-    "memory.repair.run": ADMIN_SCOPE,
-    "memory.repair.show": ADMIN_SCOPE,
     # Settings-only profile import discovery. These methods expose no paths
     # and never apply an import, but host-level inventory remains admin-only.
     "migration.sources.list": ADMIN_SCOPE,

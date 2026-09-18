@@ -583,6 +583,8 @@
       :steer-available="sameTurnSteerAvailable"
       :durable-steer-available="turnCommands.supports('durable-steer')"
       :steer-unavailable-message="sameTurnSteerUnavailableMessage"
+      :delivery-identity="gatewayAccess.deliveryIdentity"
+      :offline="!gatewayAccess.isAvailable"
       @clear="clearPendingQueue"
       @edit="editPendingMessage"
       @remove="removePendingChip"
@@ -617,6 +619,7 @@
       :attachments="pendingAttachments"
       :busy-send-mode="busySendMode"
       :has-send-content="composerHasSendContent"
+      :send-pending="chatSend.sendPending.value"
       :is-streaming="isStreaming"
       :can-stop="canStop"
       :stop-targets-plan-run="composerStopsPlanRun"
@@ -648,6 +651,7 @@
       :voice-ready="voiceReady"
       :project-workspace="activeWorkspace"
       :project-workspace-status="activeWorkspaceStatus"
+      :project-binding-busy="projectBindingBusy || sessionHasActiveWork || goalBusy || planModeBusy || modelRoutingSettingsBusy"
       :project-status-message="activeProjectStatusMessage"
       :prompt-annotations="activePromptAnnotations"
       :can-close-project="isDraftRoute() && pendingWorkspaceId !== null"
@@ -707,7 +711,7 @@
       :enabled="gatewayAccess.canChooseProject"
       :session-key="sessionKey"
       :initial-path="activeWorkspace?.path"
-      @close="projectPickerOpen = false"
+      @close="cancelDraftProjectChoice"
       @choose="chooseProjectPath"
     />
     </div>
@@ -762,7 +766,7 @@
 <script setup lang="ts">
 import { ref, computed, inject, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRouter } from 'vue-router'
+import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { GATEWAY_ACCESS_KEY } from '@/modules/gatewayAccess'
 import {
@@ -1153,6 +1157,7 @@ const toolResultModal = ref<{
 const injectedGatewayAccess = inject(GATEWAY_ACCESS_KEY)
 if (!injectedGatewayAccess) throw new Error('GatewayAccess was not provided')
 const gatewayAccess = injectedGatewayAccess
+const deliveryIdentity = computed(() => gatewayAccess.deliveryIdentity)
 const gatewayConnectionState = computed(() => gatewayAccess.availability === 'available'
   ? 'connected'
   : gatewayAccess.availability === 'preparing' ? 'connecting' : 'disconnected')
@@ -1272,6 +1277,15 @@ const {
   sendBlockedReason: activeWorkspaceSendBlockedReason,
 } = activeProjectWorkspace
 const projectPickerOpen = ref(false)
+const projectBindingBusy = ref(false)
+interface DraftProjectChoice {
+  sessionKey: string
+  agentId: string
+  projectId: string
+  connectionEpoch: number
+  target?: ActiveProjectWorkspaceSnapshot | null
+}
+let draftProjectChoice: DraftProjectChoice | null = null
 let activeProjectValidationController: AbortController | null = null
 
 function cancelActiveProjectValidation() {
@@ -1559,6 +1573,7 @@ const copySupported = shareCopyImageSupported()
 
 const chatElevatedMode = useChatElevatedMode({
   sessionKey,
+  connectionState: gatewayConnectionState,
   approvalCenter,
 })
 // Persist the composer draft per session so a refresh / session switch / crash
@@ -1903,6 +1918,8 @@ const chatPendingQueue = useChatPendingQueue({
   pendingInputWal,
   pendingInputQueue,
   connectionState: gatewayConnectionState,
+  deliveryIdentity,
+  composerRevision,
   prepareAttachmentsForSend,
   onPendingPersistenceError: reason => {
     const message = reason === 'order_conflict'
@@ -1911,7 +1928,7 @@ const chatPendingQueue = useChatPendingQueue({
       ? 'Queued attachments are not supported yet. Your draft was kept.'
       : reason === 'wal_failed'
         ? 'Could not save the queued message locally. Your draft was kept.'
-        : 'The queued message is still saved locally and will retry after reconnecting.'
+        : t('chat.pending.offlineRejected')
     pushToast(message, {
       tone: ['server_rejected', 'order_conflict'].includes(reason) ? 'warn' : 'danger',
     })
@@ -2086,12 +2103,15 @@ const {
   loadCurrentSessionUsage,
 } = chatUsageWidget
 
-const chatSessionRoute = useChatSessionRoute(sessionKey)
+const chatSessionRoute = useChatSessionRoute(sessionKey, () => gatewayAccess.guestSessionOwnerId)
 const {
   route,
   createSessionKey,
+  forgetFreshDraftSession,
+  rebindFreshDraftSession,
   draftAgentId,
   goToDraft,
+  replaceDraftProject,
   hasLegacyNewChatQuery,
   isDraftRoute,
   persistSession,
@@ -2209,6 +2229,7 @@ const {
   queueRouterDecision,
   appendEnsembleProgress,
   markEnsembleHandoff,
+  updateRouterExecutionModel,
   flushPendingRouterDecision,
   clearPendingRouterDecision,
   bindRouterDecisionToModelCall,
@@ -2758,6 +2779,7 @@ function startSessionBootstrap(options?: {
   includeHistory?: boolean
   force?: boolean
 }) {
+  bindFreshGuestDraft()
   const key = sessionKey.value
   return bindSessionBootstrapRun(startSessionBootstrapCoordinator(options), key)
 }
@@ -2803,6 +2825,7 @@ function handleSessionConnectionState(
   state: string,
   includeHistory = true,
 ) {
+  if (state === 'connected') bindFreshGuestDraft()
   const run = handleSessionConnectionStateCoordinator(state, includeHistory)
   if (
     run
@@ -2812,6 +2835,31 @@ function handleSessionConnectionState(
     return trackSessionBootstrapAdmission(run)
   }
   return run
+}
+
+function bindFreshGuestDraft() {
+  if (
+    pendingSessionIntent.value !== 'new_chat'
+    || messages.value.length > 0
+    || isStreaming.value
+    || acceptanceRecoveryPending.value
+    || acceptanceStopPending.value
+    || activeStreamTaskId.value
+    || activeTaskGroups.value.size > 0
+    || pendingQueue.value.length > 0
+    || pendingQueueOwnerContext.value
+  ) return
+  rebindFreshDraftSession(key => {
+    // Hello owns the namespace. Cancel the captured pre-Hello lease before
+    // ready() continuations can subscribe with its provisional owner key.
+    cancelSessionBootstrap()
+    metaDraftRecovery.invalidate()
+    draftPersistence.rebindCurrentDraft(key)
+    // A change of authority preserves the editor but requires explicit Send.
+    pendingAutoSend.value = ''
+    pendingAutoSendSessionKey.value = ''
+    persistDraftHistoryState()
+  })
 }
 
 const isSessionHydrating = computed(() => livePhase.value === 'connecting')
@@ -2829,8 +2877,37 @@ const deliveryBlockedReason = computed<string | null>(() => (
   sessionRoutingSendBlockedReason.value || liveSendBlockedReason.value
 ))
 const effectiveSendBlockedReason = computed<string | null>(() => (
-  deliveryBlockedReason.value || promptAnnotationSendBlockedReason.value
+  (projectBindingBusy.value ? t('workspaces.activeProjectResolving') : null)
+  || deliveryBlockedReason.value || promptAnnotationSendBlockedReason.value
 ))
+const provenSessionDelivery = ref<{
+  key: string; identity: string; withoutProject: boolean
+} | null>(null)
+watch(
+  [sessionKey, deliveryIdentity, () => gatewayAccess.isAvailable, livePhase, activeWorkspaceStatus],
+  ([key, identity, available, live, workspaceStatus]) => {
+    if (available && live === 'ready' && key && identity) {
+      provenSessionDelivery.value = { key, identity, withoutProject: workspaceStatus === 'none' }
+    }
+  },
+)
+const offlineQueueIdentity = computed<string | null>(() => {
+  const identity = deliveryIdentity.value
+  const proven = provenSessionDelivery.value
+  if (
+    gatewayAccess.isAvailable || gatewayAccess.requiresCredential
+    || !identity || proven?.identity !== identity || proven.key !== sessionKey.value
+    || !proven.withoutProject
+    || pendingSessionIntent.value || pendingForkBeforeMessageId.value
+    || boundWorkspaceId.value || pendingWorkspaceId.value
+    || goalDraftArmed.value || replanActive.value || collaboration.value.mode !== 'default'
+    || forkTransition.value || acceptanceRecoveryPending.value || acceptanceStopPending.value
+    || sendableAnnotationDraftIds.value.length > 0 || hasPendingAttachmentWork()
+    || promptAnnotationSendBlockedReason.value
+    || /^[!/]/.test(inputText.value.trim())
+  ) return null
+  return identity
+})
 isLiveDeliveryBlocked = () => Boolean(liveSendBlockedReason.value)
 watch(
   livePhase,
@@ -2848,8 +2925,8 @@ watch(livePhase, (phase, previousPhase) => {
 })
 watch(activeWorkspaceStatus, (status, previousStatus) => {
   if (
-    status !== 'ready'
-    || previousStatus === 'ready'
+    (status !== 'ready' && status !== 'none')
+    || previousStatus === status
     || pendingQueue.value.length === 0
   ) return
   schedulePendingDrainAfterTerminal()
@@ -3333,7 +3410,19 @@ resetComposerInputHistory = chatComposerShortcuts.resetInputHistory
 
 const chatSend = useChatSend({
   metaRunCenter,
-  turnCommands,
+  turnCommands: {
+    send(request, options) {
+      // Retire freshness at the delivery boundary, including hidden sends and
+      // unknown acceptance receipts. A reconnect must retain that attempt's key.
+      forgetFreshDraftSession(
+        request.kind === 'new-turn' ? request.params.sessionKey : request.params.key,
+      )
+      return turnCommands.send(request, options)
+    },
+    cancel: (request, options) => turnCommands.cancel(request, options),
+    steer: (request, options) => turnCommands.steer(request, options),
+    supports: capability => turnCommands.supports(capability),
+  },
   activeSteerCapability,
   inputText,
   messages,
@@ -3353,6 +3442,8 @@ const chatSend = useChatSend({
   pendingSessionIntent,
   pendingWorkspaceId,
   sendBlockedReason: effectiveSendBlockedReason,
+  offlineQueueIdentity,
+  deliveryIdentity,
   validateActiveProjectBeforeSend,
   acceptPendingWorkspaceBinding: activeProjectWorkspace.acceptPendingBinding,
   initialCollaborationMode,
@@ -3744,6 +3835,7 @@ const chatApprovals = useChatApprovals({
   conversationEvents: conversationSessionRuntime.events,
   clarificationSubmission,
   approvalCenter,
+  gatewayAvailability: computed(() => gatewayAccess.availability),
   sessionKey,
   runStatus,
   stream: { isStreaming, appendInterruptFrame, ensureInterruptBubble },
@@ -3877,6 +3969,7 @@ const rpcEventHandlers = useChatRpcEventHandlers({
   sessionRunStatus,
   applySessionRunState,
   queueRouterDecision,
+  updateRouterExecutionModel,
   bindRouterDecisionToModelCall,
   appendEnsembleProgress,
   markEnsembleHandoff,
@@ -4591,8 +4684,8 @@ const composerSendBlockedMessage = computed(() =>
       )
     : '')
   || modelImageSendBlockedMessage.value
-  || effectiveSendBlockedReason.value
-  || activeProjectComposerBlockMessage.value,
+  || (offlineQueueIdentity.value ? null : effectiveSendBlockedReason.value)
+  || (offlineQueueIdentity.value ? '' : activeProjectComposerBlockMessage.value),
 )
 
 const sendButtonTitle = computed(() => {
@@ -6465,44 +6558,114 @@ function persistDraftHistoryState() {
   } catch { /* ignore */ }
 }
 
+function canChangeDraftProject(): boolean {
+  return isDraftRoute()
+    && pendingSessionIntent.value === 'new_chat'
+    && gatewayAccess.canChooseProject
+    && !sessionHasActiveWork.value
+    && !goalBusy.value
+    && !planModeBusy.value
+    && !modelRoutingSettingsBusy.value
+    && pendingQueue.value.length === 0
+}
+
+function cancelDraftProjectChoice() {
+  draftProjectChoice = null
+  projectPickerOpen.value = false
+  projectBindingBusy.value = false
+}
+
+function draftProjectChoiceIsCurrent(choice: DraftProjectChoice): boolean {
+  return draftProjectChoice === choice
+    && !chatViewDisposed
+    && canChangeDraftProject()
+    && sessionKey.value === choice.sessionKey
+    && draftAgentId() === choice.agentId
+    && gatewayAccess.subscriptionEpoch === choice.connectionEpoch
+    && (readProjectFromUrl() === choice.projectId
+      || (choice.target !== undefined && readProjectFromUrl() === (choice.target?.id || '')))
+}
+
+function beginDraftProjectChoice(): DraftProjectChoice | null {
+  if (projectBindingBusy.value || !canChangeDraftProject()) return null
+  const choice: DraftProjectChoice = {
+    sessionKey: sessionKey.value,
+    agentId: draftAgentId(),
+    projectId: readProjectFromUrl(),
+    connectionEpoch: gatewayAccess.subscriptionEpoch,
+  }
+  draftProjectChoice = choice
+  projectBindingBusy.value = true
+  // Choosing a directory is an explicit draft edit, not a fresh task or an
+  // invitation to recover another provisional Meta draft.
+  markProvisionalDraftUsed()
+  cancelActiveProjectValidation()
+  return choice
+}
+
+function applyDraftProjectChoice(choice: DraftProjectChoice) {
+  if (choice.target) activeProjectWorkspace.beginProjectDraft(choice.target)
+  else activeProjectWorkspace.clearDraft()
+  persistDraftHistoryState()
+}
+
+async function commitDraftProjectChoice(
+  choice: DraftProjectChoice,
+  workspace: ActiveProjectWorkspaceSnapshot | null,
+) {
+  if (!draftProjectChoiceIsCurrent(choice)) return
+  choice.target = workspace
+  const committed = await replaceDraftProject(workspace?.id || null)
+  if (!draftProjectChoiceIsCurrent(choice)) return
+  if (!committed) throw new Error('Project navigation did not complete.')
+  // Until navigation succeeds, the original route still owns its hydration.
+  // Cancelling the picker or a failed choice must let that draft finish loading.
+  draftProjectHydration.invalidate()
+  applyDraftProjectChoice(choice)
+  await nextTick()
+}
+
 async function chooseProjectPath(path: string) {
   projectPickerOpen.value = false
-  if (!gatewayAccess.canChooseProject) return
-  const trusted = await confirm({
-    title: t('workspaces.trustTitle'),
-    body: t('workspaces.trustBody', { path }),
-    primaryLabel: t('workspaces.trustConfirm'),
-    primaryClass: 'btn--primary',
-  })
-  if (!trusted) return
+  const choice = draftProjectChoice
+  if (!choice || !draftProjectChoiceIsCurrent(choice)) return
   try {
-    const workspace = await projectWorkspaces.openWorkspace(path)
-    if (!workspace) return
-    freshTaskDraft.requestFreshTask(draftAgentId(), workspace.id)
-    goToDraft({
-      agentId: draftAgentId(),
-      projectId: workspace.id,
-      replace: true,
+    const trusted = await confirm({
+      title: t('workspaces.trustTitle'),
+      body: t('workspaces.trustBody', { path }),
+      primaryLabel: t('workspaces.trustConfirm'),
+      primaryClass: 'btn--primary',
     })
+    if (!trusted || !draftProjectChoiceIsCurrent(choice)) return
+    const workspace = await projectWorkspaces.openWorkspace(path)
+    if (!workspace || !draftProjectChoiceIsCurrent(choice)) return
+    await commitDraftProjectChoice(choice, activeSnapshot(workspace))
   } catch (cause) {
+    if (!draftProjectChoiceIsCurrent(choice)) return
     const detail = cause instanceof Error ? cause.message : String(cause)
     pushToast(t('workspaces.openFailed', { error: detail }), { tone: 'warn' })
+  } finally {
+    if (draftProjectChoice === choice) cancelDraftProjectChoice()
   }
 }
 
 function openProjectPicker() {
-  if (!gatewayAccess.canChooseProject) return
+  if (!beginDraftProjectChoice()) return
   projectPickerOpen.value = true
 }
 
-function closeProjectDraft() {
-  activeProjectWorkspace.clearDraft()
-  freshTaskDraft.requestFreshTask(draftAgentId())
-  goToDraft({
-    agentId: draftAgentId(),
-    projectId: null,
-    replace: true,
-  })
+async function closeProjectDraft() {
+  const choice = beginDraftProjectChoice()
+  if (!choice) return
+  try {
+    await commitDraftProjectChoice(choice, null)
+  } catch (cause) {
+    if (!draftProjectChoiceIsCurrent(choice)) return
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    pushToast(t('workspaces.openFailed', { error: detail }), { tone: 'warn' })
+  } finally {
+    if (draftProjectChoice === choice) cancelDraftProjectChoice()
+  }
 }
 
 async function validateActiveProjectBeforeSend(): Promise<string | null> {
@@ -6635,6 +6798,12 @@ function enterDraft() {
 }
 
 let chatViewActive = false
+let initialDraftRouteMayCanonicalize = true
+onBeforeRouteLeave(() => {
+  // A lazy destination has not updated route.fullPath yet. Once the operator
+  // leaves, late draft bootstrap must not replace that pending navigation.
+  initialDraftRouteMayCanonicalize = false
+})
 
 function bindBottomIntersectionObserver() {
   bottomIntersectionObserver?.disconnect()
@@ -6830,7 +6999,7 @@ onMounted(async () => {
 
   if (initialDraftProjectGeneration !== null) {
     const synced = await initialDraftProjectSync
-    if (synced && shouldCanonicalizeInitialDraftRoute({
+    if (synced && initialDraftRouteMayCanonicalize && shouldCanonicalizeInitialDraftRoute({
       disposed: chatViewDisposed,
       initialFullPath: initialRouteFullPath,
       currentFullPath: route.fullPath,
@@ -6892,6 +7061,7 @@ watch(
 )
 
 onUnmounted(() => {
+  cancelDraftProjectChoice()
   window.removeEventListener('pointerup', onThreadPointerEnd)
   window.removeEventListener('pointercancel', onThreadPointerEnd)
   chatRouteHeaderRegistration.release()
@@ -7028,6 +7198,12 @@ watch(
 
 // Entering the draft route resets to a clean draft for the requested agent.
 watch(() => [route.path, route.query.agent, route.query.project], async () => {
+  if (
+    draftProjectChoice
+    && draftProjectChoice.target !== undefined
+    && draftProjectChoiceIsCurrent(draftProjectChoice)
+    && readProjectFromUrl() === (draftProjectChoice.target?.id || '')
+  ) return
   durableRecoveryGeneration += 1
   metaDraftRecovery.invalidate()
   draftProjectHydration.invalidate()
@@ -7062,6 +7238,7 @@ watch(() => pendingQueue.value.length, (count) => {
 // draft URL already on screen (for example, clicking the same project pencil).
 watch(freshTaskDraft.request, request => {
   if (!request) return
+  cancelDraftProjectChoice()
   draftProjectHydration.invalidate()
   landingPrefilled.value = false
   // Clear before changing sessionKey. The draft watcher then observes an empty
@@ -7081,6 +7258,27 @@ watch(freshTaskDraft.request, request => {
   startDraftSession(request.agentId)
   if (isDesktopViewport.value) composerRef.value?.focusTextarea()
 })
+
+watch(
+  () => [
+    sessionKey.value,
+    route.fullPath,
+    gatewayAccess.subscriptionEpoch,
+    gatewayAccess.canChooseProject,
+    pendingSessionIntent.value,
+    sessionHasActiveWork.value,
+    goalBusy.value,
+    planModeBusy.value,
+    modelRoutingSettingsBusy.value,
+    pendingQueue.value.length,
+  ],
+  () => {
+    if (draftProjectChoice && !draftProjectChoiceIsCurrent(draftProjectChoice)) {
+      cancelDraftProjectChoice()
+    }
+  },
+  { flush: 'sync' },
+)
 
 watch(projectWorkspaces.workspaces, workspaces => {
   if (!gatewayAccess.canManageProjectWorkspaces) return

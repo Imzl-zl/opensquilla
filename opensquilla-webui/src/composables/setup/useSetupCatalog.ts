@@ -1,5 +1,6 @@
-import { inject, ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { inject, provide, ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import i18n from '@/i18n'
+import { MODEL_CAPACITY_KEY, useModelCapacityForm } from './useModelCapacityForm'
 import { useSetupCapabilitiesForm } from '@/composables/setup/useSetupCapabilitiesForm'
 import { useSetupBehaviorForm } from '@/composables/setup/useSetupBehaviorForm'
 import {
@@ -489,6 +490,9 @@ const setupWorkflow: SetupWorkflow = injectedSetupWorkflow
 const injectedProviderConfiguration = inject(PROVIDER_CONFIGURATION_KEY)
 if (!injectedProviderConfiguration) throw new Error('ProviderConfiguration was not provided')
 const providerConfiguration: ProviderConfiguration = injectedProviderConfiguration
+const modelCapacity = useModelCapacityForm(providerConfiguration)
+provide(MODEL_CAPACITY_KEY, modelCapacity)
+let restoreProviderCapacityDrafts: (() => void) | null = null
 const { pushToast } = useToasts()
 const { confirm } = useConfirm()
 const t = i18n.global.t
@@ -549,6 +553,14 @@ const capabilitiesForm = useSetupCapabilitiesForm()
 const promotedForm = useSettingsPromotedForm()
 
 const tierModelCatalogs = ref<DiscoveredModelsByProvider>({})
+// Discovery may populate the runtime catalog after the first capacity read.
+// Re-read visible targets only; this watch never initiates discovery itself.
+watch(() => providerForm.connection.value.models, () => {
+  if (providerForm.connection.value.modelSource === 'live') modelCapacity.invalidate()
+})
+watch(tierModelCatalogs, catalogs => {
+  if (Object.values(catalogs).some(catalog => catalog.source === 'live')) modelCapacity.invalidate()
+})
 const tierModelDiscoveries = new Map<string, Promise<void>>()
 let tierModelDiscoveryEpoch = 0
 type ImageModelCatalogSource = 'live' | 'catalog' | 'none'
@@ -796,12 +808,48 @@ watch(section, value => {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
-onMounted(async () => {
-  await loadData()
-  loaded.value = true
+let catalogMounted = false
+let initialLoadPending = false
+let initialLoadRetryPending = false
+
+async function loadInitialData() {
+  if (!catalogMounted || loaded.value || !gatewayAccess.isAvailable) return
+  if (initialLoadPending) {
+    // A reconnect can finish before the previous connection's reads reject.
+    initialLoadRetryPending = true
+    return
+  }
+  initialLoadPending = true
+  try {
+    await loadData({ throwOnError: true })
+    if (catalogMounted) loaded.value = true
+  } catch (err) {
+    // Connection recovery will retry. A failed read must not render the empty
+    // provider state or turn a normal startup connection into an error toast.
+    if (catalogMounted && gatewayAccess.isAvailable && !initialLoadRetryPending) {
+      pushToast(t('setup.toast.loadFailed', { error: err instanceof Error ? err.message : String(err) }), { tone: 'danger' })
+    }
+  } finally {
+    initialLoadPending = false
+    if (initialLoadRetryPending) {
+      initialLoadRetryPending = false
+      void loadInitialData()
+    }
+  }
+}
+
+onMounted(() => {
+  catalogMounted = true
+  void loadInitialData()
+})
+
+watch(() => gatewayAccess.isAvailable, available => {
+  // Only recover initial loading; reconnecting must not overwrite form drafts.
+  if (available) void loadInitialData()
 })
 
 onUnmounted(() => {
+  catalogMounted = false
   providerForm.cancelProbe()
   for (const run of configuredProviderProbeRuns.values()) run.controller.abort()
   configuredProviderProbeRuns.clear()
@@ -853,6 +901,7 @@ async function loadData(options: {
     catalog.value = (cat || {}) as OnboardingCatalog
     status.value = (st || {}) as OnboardingStatus
     config.value = (cfg || {}) as ConfigData
+    modelCapacity.invalidate()
     effectiveConfig.value = (effective || {}) as EffectiveConfigData
     // A probe result describes one exact saved deployment. Any successful
     // reload may follow a key, endpoint, model, activation, or deletion
@@ -2325,6 +2374,8 @@ function sectionForDetailName(name: string): SettingsSectionId | null {
 // ---------------------------------------------------------------------------
 
 const providerDirty = computed(() => (
+  modelCapacity.dirty(`provider:${normalizeProviderId(providerForm.selectedProvider.value)}`)
+  ||
   providerForm.isDirty.value
   || (providerOwnsFixedModelDraft.value && modelStrategyForm.fixedModelDirty.value)
   || (editingPrimaryProvider.value && promotedForm.timeoutDirty.value)
@@ -2334,6 +2385,8 @@ const behaviorDirty = computed(() => behaviorForm.isDirty.value)
 const securityPrivacyDirty = computed(() => privacyDirty.value)
 const memorySettingsDirty = computed(() => promotedForm.captureDirty.value)
 const modelStrategyDirty = computed(() => (
+  modelCapacity.dirty('modelStrategy')
+  ||
   routerForm.isDirty.value
   || ensembleForm.isDirty.value
   || modelStrategyForm.fixedProviderDirty.value
@@ -2428,6 +2481,8 @@ async function saveDirtySections() {
 async function discardChanges() {
   if (saveAllRequestPending || modelStrategyRoutingBusy.value) return
   if (providerInteractionLocked()) return
+  restoreProviderCapacityDrafts = null
+  for (const draft of [...modelCapacity.drafts.values()]) modelCapacity.discard(draft.scope)
   await loadData()
 }
 
@@ -2506,6 +2561,7 @@ async function requestSelectConfiguredProvider(value: string) {
   if (providerInteractionLocked()) return
   const next = normalizeProviderId(value)
   if (!next) return
+  restoreProviderCapacityDrafts ??= modelCapacity.captureProviderDrafts(next)
   if (providerFixedModelDraftSnapshot.value == null) {
     providerFixedModelDraftSnapshot.value = {
       provider: modelStrategyForm.fixedProvider.value,
@@ -2525,12 +2581,16 @@ async function requestAddProvider(value: string) {
   if (providerInteractionLocked()) return
   const next = normalizeProviderId(value)
   if (!next || !(await confirmProviderDraftDiscard())) return
+  restoreProviderCapacityDrafts ??= modelCapacity.captureProviderDrafts(next)
   providerForm.selectProvider(next)
   onProviderChange()
 }
 
 function cancelProviderEdit() {
   if (providerInteractionLocked()) return
+  if (restoreProviderCapacityDrafts) restoreProviderCapacityDrafts()
+  else modelCapacity.discard(`provider:${normalizeProviderId(providerForm.selectedProvider.value)}`)
+  restoreProviderCapacityDrafts = null
   if (providerOwnsFixedModelDraft.value && providerFixedModelDraftSnapshot.value != null) {
     modelStrategyForm.setFixedProvider(providerFixedModelDraftSnapshot.value.provider)
     modelStrategyForm.setFixedModel(providerFixedModelDraftSnapshot.value.model)
@@ -2738,9 +2798,18 @@ function acceptPrimaryRouterAction(action?: string) {
 }
 
 function pushPrimaryRouterOutcome(action: string | undefined, previousBinding: string) {
-  pushToast(t(action === 'disable' ? 'setup.provider.routerOutcomeDisabled'
-    : action === 'use_recommended' || previousBinding === 'follow_primary' ? 'setup.provider.routerOutcomeSynchronized'
-      : 'setup.provider.routerOutcomePreserved'))
+  const synchronized = action === 'use_recommended' || previousBinding === 'follow_primary'
+  const message = t(action === 'disable' ? 'setup.provider.routerOutcomeDisabled'
+    : synchronized ? 'setup.provider.routerOutcomeSynchronized'
+      : 'setup.provider.routerOutcomePreserved')
+  // The synchronized outcome is emitted by both the direct activation and the
+  // save-and-activate paths. Keep that completion feedback to one visible card
+  // when a user moves between the two controls quickly.
+  if (synchronized) {
+    pushToast(message, { dedupeKey: 'setup.provider.router-outcome' })
+  } else {
+    pushToast(message)
+  }
 }
 
 function cancelConfiguredProviderProbe(value: string) {
@@ -3816,6 +3885,32 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
     pushToast(t('setup.toast.chooseProvider'), { tone: 'danger' })
     return false
   }
+  const capacityScope = `provider:${normalizeProviderId(providerForm.selectedProvider.value)}`
+  if (!modelCapacity.valid(capacityScope)) {
+    pushToast(t('setup.capacity.invalid'), { tone: 'danger' })
+    return false
+  }
+  const capacityOnly = modelCapacity.dirty(capacityScope)
+    && !providerForm.isDirty.value
+    && !(providerOwnsFixedModelDraft.value && modelStrategyForm.fixedModelDirty.value)
+    && !promotedForm.timeoutDirty.value && !promotedForm.contextWindowDirty.value
+    && !options.activate
+  if (capacityOnly) {
+    providerSavePending.value = true
+    primaryMutationPending.value = true
+    try {
+      await modelCapacity.save(capacityScope, deepPatchConfig)
+      restoreProviderCapacityDrafts = null
+      pushToast(t('setup.capacity.saved'))
+      return true
+    } catch {
+      pushToast(t('setup.capacity.saveFailed'), { tone: 'danger' })
+      return false
+    } finally {
+      providerSavePending.value = false
+      primaryMutationPending.value = false
+    }
+  }
   // A saved identity with an unavailable primary is still a first usable
   // configuration. The primary action is labelled “Save and start using” in
   // that state, so route it through the same atomic upsert+activate RPC as the
@@ -3912,6 +4007,8 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
         await setupWorkflow.profile.upsertProfile(payload)
       }
       primaryAcknowledged = true
+      await modelCapacity.save(capacityScope, deepPatchConfig)
+      restoreProviderCapacityDrafts = null
       if (options.reload !== false) {
         // Saving a routing-only profile refreshes its persisted status without
         // discarding drafts in any other Settings section. Provider-owned
@@ -3947,6 +4044,8 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
     // deliberately preserves the saved primary model until Model Routing is
     // saved), and skip the patch entirely when no model is selected.
     if (contextPatch) await deepPatchConfig(contextPatch)
+    await modelCapacity.save(capacityScope, deepPatchConfig)
+    restoreProviderCapacityDrafts = null
     if (options.reload !== false) {
       // Replacing the primary deployment on a legacy Gateway changes the
       // identity that Router and the fixed fallback are based on. Rebuild that
@@ -3964,6 +4063,15 @@ async function saveProvider(options: SaveOptions = {}): Promise<boolean> {
     return true
   } catch (err) {
     if (primaryAcknowledged) {
+      if (!refreshStarted && modelCapacity.dirty(capacityScope)) {
+        try {
+          const selected = normalizeProviderId(providerForm.selectedProvider.value)
+          await reloadProviderData(true)
+          if (selected !== normalizeProviderId(currentProvider.value)) applyConfiguredProviderSelection(selected)
+        } catch { /* Keep drafts when the read-back itself is unavailable. */ }
+        pushToast(t('setup.capacity.providerPartialSaved'), { tone: 'danger' })
+        return false
+      }
       pushToast(t(refreshStarted ? 'setup.modelStrategy.savedRefreshFailed' : 'setup.provider.primarySavedAdditionalFailed'), { tone: 'danger' })
     } else await reportPrimaryMutationFailure(err)
     return false
@@ -4095,7 +4203,12 @@ async function saveModelStrategy(options: SaveOptions & {
   const hasRouterWork = Boolean(routerRoutingPayload) || Object.keys(routerVisualPatches).length > 0
   const hasFixedModelWork = fixedProviderChanged || Object.keys(fixedModelPatches).length > 0
   const hasEnsembleWork = Object.keys(ensemblePayload).length > 0
-  if (!hasRouterWork && !hasFixedModelWork && !hasEnsembleWork) return true
+  const hasCapacityWork = modelCapacity.dirty('modelStrategy')
+  if (!modelCapacity.valid('modelStrategy')) {
+    pushToast(t('setup.capacity.invalid'), { tone: 'danger' })
+    return false
+  }
+  if (!hasRouterWork && !hasFixedModelWork && !hasEnsembleWork && !hasCapacityWork) return true
   if (hasFixedModelWork && !fixedModel) {
     pushToast(t('setup.toast.chooseFixedModel'), { tone: 'danger' })
     return false
@@ -4120,11 +4233,26 @@ async function saveModelStrategy(options: SaveOptions & {
   let routerSaved = false
   let visualSaved = false
   let ensembleSaved = false
+  let fixedSaved = false
   let primaryActivationAttempted = false
   const refreshPartialSave = async (unknownPrimaryResult = false) => {
+    const savedSections: string[] = []
+    const pendingSections: string[] = []
+    for (const [changed, acknowledged, label] of [
+      [Boolean(routerRoutingPayload), routerSaved, 'setup.modelStrategy.cards.router.title'],
+      [Object.keys(routerVisualPatches).length > 0, visualSaved, 'setup.modelStrategy.visualModeLabel'],
+      [hasEnsembleWork, ensembleSaved, 'setup.modelStrategy.cards.ensemble.title'],
+      [hasFixedModelWork, fixedSaved, 'setup.modelStrategy.cards.single.title'],
+      [hasCapacityWork, !modelCapacity.dirty('modelStrategy'), 'setup.capacity.title'],
+    ] as const) {
+      if (changed) (acknowledged ? savedSections : pendingSections).push(t(label))
+    }
     const message = t(unknownPrimaryResult
       ? 'setup.toast.modelStrategyPartialSaveUncertain'
-      : 'setup.toast.modelStrategyPartialSaved')
+      : hasCapacityWork && modelCapacity.dirty('modelStrategy')
+        ? 'setup.capacity.partialSaved' : 'setup.toast.modelStrategyPartialSaved', {
+      saved: savedSections.join(', '), pending: pendingSections.join(', '),
+    })
     try {
       await loadData({ preserveFormDrafts: true, throwOnError: true })
     } catch (refreshError) {
@@ -4132,6 +4260,11 @@ async function saveModelStrategy(options: SaveOptions & {
       pushToast(saveFailedMessage(refreshError), { tone: 'danger' })
       pushToast(message, { tone: 'danger' })
       return
+    }
+    if (fixedSaved) {
+      modelStrategyForm.initFixedModel(config.value.llm?.model || '', config.value.llm?.provider || '')
+      providerOwnsFixedModelDraft.value = false
+      providerFixedModelDraftSnapshot.value = null
     }
     if (ensembleSaved) {
       const detail = (status.value.sectionDetails || {}).ensemble || {}
@@ -4207,6 +4340,13 @@ async function saveModelStrategy(options: SaveOptions & {
       savedAny = true
     }
 
+    fixedSaved = hasFixedModelWork
+
+    if (hasCapacityWork) {
+      await modelCapacity.save('modelStrategy', deepPatchConfig)
+      savedAny = true
+      pushToast(t('setup.capacity.saved'))
+    }
     if (savedAny && options.reload !== false) await loadData({ preserveProviderDraft: true, preserveDirtySectionDrafts: true, forceResetModelStrategy: true, throwOnError: true })
     return savedAny
   } catch (err) {
@@ -4351,6 +4491,7 @@ async function copyConfigPath() {
 }
 
   return {
+    modelCapacity,
     status,
     config,
     section,

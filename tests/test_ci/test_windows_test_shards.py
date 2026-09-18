@@ -37,6 +37,8 @@ pytest_file_selection_arg = SHARD_MODULE["_pytest_file_selection_arg"]
 
 OFFLINE_MARKER_EXCLUSIONS = SHARD_MODULE["OFFLINE_MARKER_EXCLUSIONS"]
 RECENTLY_ADDED_ACTIVE_TESTS = {
+    # Generator provenance checks use the provisional floor pending Windows samples.
+    "tests/contracts/test_codegen_versions.py",
     # Security inventory, rendering, and functional probes use measured Windows
     # testcase totals until the next comparable three-run duration refresh.
     "tests/test_desktop/test_gateway_functional_probes.py",
@@ -112,6 +114,13 @@ RECENTLY_ADDED_ACTIVE_TESTS = {
     "tests/test_engine/test_router_configured_image_policy.py",
     "tests/test_provider/test_image_projection.py",
     "tests/test_session/test_attachment_manifest.py",
+    # Title refusal and archived first-message regressions use the declared
+    # provisional floor until a comparable three-run Windows duration refresh.
+    "tests/test_gateway/test_compacted_title_recovery.py",
+    "tests/test_gateway/test_session_title_recovery.py",
+    "tests/test_session/test_canonical_title_inputs.py",
+    "tests/test_session/test_naming_refusal.py",
+    "tests/test_session/test_title_quality.py",
     "tests/contracts/test_approval_center_contract.py",
     "tests/test_gateway/test_chat_history_characterization.py",
     "tests/contracts/test_conversation_events_contract.py",
@@ -163,6 +172,9 @@ RECENTLY_ADDED_ACTIVE_TESTS = {
     "tests/test_channels/test_channel_mock_certification.py",
     "tests/test_channels/test_channel_pairing.py",
     "tests/test_channels/test_discord_gateway_lifecycle.py",
+    # Real Feishu SDK coverage uses the provisional floor until a comparable
+    # three-run Windows refresh supplies measured timings.
+    "tests/test_channels/test_feishu_sdk_websocket.py",
     "tests/test_channels/test_length_declaration_conformance.py",
     "tests/test_channels/test_manager_status_telemetry.py",
     "tests/test_channels/test_matrix_contract_repairs.py",
@@ -209,7 +221,6 @@ RECENTLY_ADDED_ACTIVE_TESTS = {
     "tests/test_gateway/test_config_persist_corruption.py",
     "tests/test_gateway/test_config_profile_paths.py",
     "tests/test_gateway/test_cron_result_payload.py",
-    "tests/test_gateway/test_memory_repair_storage_gate.py",
     "tests/test_gateway/test_p1a_exact_abort_contract.py",
     "tests/test_gateway/test_rpc_ingress_validation.py",
     "tests/test_gateway/test_sessions_list_contract_adapter.py",
@@ -329,6 +340,11 @@ RECENTLY_ADDED_ACTIVE_TESTS = {
     "tests/test_telemetry_server/test_product_active_pipeline.py",
     "tests/test_telemetry_server/test_product_activity_pipeline.py",
     "tests/test_telemetry_server/test_protocol_upgrade_pipeline.py",
+    # Workspace MD retirement suites use the declared provisional floor until
+    # a comparable three-run Windows refresh supplies measured timings.
+    "tests/test_gateway/test_workspace_md_retirement_rpc.py",
+    "tests/test_identity/test_workspace_md_retirement.py",
+    "tests/test_scheduler/test_heartbeat_retirement.py",
 }
 
 
@@ -452,6 +468,10 @@ def test_task_runtime_leak_smoke_is_marked_ci_serial() -> None:
 
 
 def test_runner_saturated_subprocess_contracts_are_marked_ci_serial() -> None:
+    assert "pytest.mark.ci_serial" in _function_decorators(
+        Path("tests/test_live_provider_profile_gateway_e2e.py"),
+        "test_attachment_capacity_runner_bounds_provider_http_failures_to_one_call",
+    )
     assert "pytest.mark.ci_serial" in _function_decorators(
         Path("tests/test_ci/test_windows_signed_update_audit.py"),
         "test_real_node_and_frozen_python_complete_only_in_new_temporary_parent",
@@ -633,6 +653,7 @@ def test_prebuilt_core_wheel_environment_is_content_verified(
 def test_windows_shard_responsibilities_cover_high_risk_surfaces() -> None:
     expected = {
         "tests/test_ci/test_router_artifact_manifest.py": "core",
+        "tests/test_channels/test_feishu_sdk_websocket.py": "gateway-sqlite",
         "tests/test_gateway/test_task_runtime_terminal_cleanup.py": "gateway-sqlite",
         "tests/test_persistence/test_migrator.py": "gateway-sqlite",
         "tests/test_session/test_manager.py": "gateway-sqlite",
@@ -670,7 +691,6 @@ def test_windows_assignment_snapshot_governs_reviewed_rebalancing() -> None:
 
     expected_moved_paths = {
         "tests/test_gateway/test_goal_rpc.py",
-        "tests/test_gateway/test_project_workspace_execution.py",
         "tests/test_gateway/test_rpc_meta_runs.py",
         "tests/test_gateway/test_rpc_router_decisions.py",
         "tests/test_live_long_task_case_driver.py",
@@ -687,7 +707,7 @@ def test_windows_assignment_snapshot_governs_reviewed_rebalancing() -> None:
     assert moved_paths == expected_moved_paths
     assert set(assignments) == set(historical_test_weights())
     assert {str(override["path"]) for override in overrides} == expected_moved_paths
-    assert sum(override.get("affinity_exception") is True for override in overrides) == 6
+    assert sum(override.get("affinity_exception") is True for override in overrides) == 5
     assert guardrails == {
         "max_moved_files": 10,
         "max_moved_fraction": 0.02,
@@ -870,9 +890,6 @@ def test_affinity_overflow_moves_only_environment_independent_tests() -> None:
         "tests/contracts/test_gateway_contract_parallel.py": "core",
         "tests/test_ci/test_migrations_packaged.py": "core",
         "tests/test_gateway/test_goal_rpc.py": "desktop-installer-contracts",
-        "tests/test_gateway/test_project_workspace_execution.py": (
-            "desktop-installer-contracts"
-        ),
         "tests/test_gateway/test_rpc_meta_runs.py": "desktop-installer-contracts",
         "tests/test_gateway/test_rpc_router_decisions.py": (
             "desktop-installer-contracts"

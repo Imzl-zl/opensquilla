@@ -94,6 +94,11 @@ from opensquilla.engine.session_sanitize import (
 )
 from opensquilla.engine.thinking import drop_reasoning
 from opensquilla.engine.tokenjuice_adapter import reduce_tool_result_with_tokenjuice
+from opensquilla.engine.tool_failure_recovery import (
+    FAILURE_RECOVERY_CODE,
+    FAILURE_RECOVERY_INSTRUCTION,
+    ToolFailureRecovery,
+)
 from opensquilla.engine.tool_result_store import (
     TOOL_RESULT_META_NAME,
     ToolResultRecord,
@@ -122,7 +127,6 @@ from opensquilla.engine.web_search_projection import (
 )
 from opensquilla.execution_status import (
     mark_execution_status_truncated,
-    normalize_execution_status,
     runtime_execution_status,
 )
 from opensquilla.git_runtime import GitRunState, run_git
@@ -194,8 +198,12 @@ from opensquilla.provider.protocol import (
 )
 from opensquilla.provider.request_proof import (
     ProviderRequestBudgetExceededError,
+    effective_proof_token_budget,
     project_provider_payload,
+    projected_generation_budget,
     prove_provider_payload,
+    provider_request_character_budget,
+    provider_request_token_budget,
 )
 from opensquilla.provider.types import (
     ContentBlockImage,
@@ -236,9 +244,7 @@ from opensquilla.session.compaction import (
     build_compaction_config_from_provider,
     compact_context,
     compaction_prompt_layout,
-    compaction_remaining_seconds,
     compaction_replay_summary,
-    require_compaction_time,
 )
 from opensquilla.session.compaction_lifecycle import (
     COMPACTION_CHUNK_SUMMARIZED_EVENT,
@@ -249,11 +255,7 @@ from opensquilla.session.compaction_lifecycle import (
     compaction_effect_payload,
     compaction_lifecycle_payload,
     compaction_result_payload,
-    flush_receipt_allows_destructive_compaction,
-    flush_receipt_is_successful_flush,
-    flush_trigger_enabled,
     new_compaction_id,
-    pre_compaction_flush_requires_safe_receipt,
 )
 from opensquilla.session.context_view import format_compaction_summary_context
 from opensquilla.session.terminal_reply import (
@@ -2361,7 +2363,6 @@ class Agent:
         session_key: str | None = None,
         turn_call_logger: TurnCallLogger | None = None,
         memory_sync_manager: Any | None = None,
-        session_flush_service: Any | None = None,
         tool_registry: ToolRegistry | None = None,
         tool_context: ToolContext | None = None,
         failure_injector: FailureInjector | None = None,
@@ -2475,13 +2476,6 @@ class Agent:
         # internal slot.
         self._memory_sync_manager: Any | None = memory_sync_manager
 
-        # Memory flush state (sub-agent based, re-entrant per compaction cycle)
-        self._flush_done_this_cycle: bool = False
-        self._active_flush_task: asyncio.Task | None = None
-        self._flush_wait_timed_out_task: asyncio.Task | None = None
-        self._flush_backoff_until: float = 0.0
-        self._flush_backoff_seconds: float = 0.0
-        self._session_flush_service = session_flush_service
         self._last_compaction_refusal_reason: str | None = None
         self._compaction_failed_this_turn = False
         self._pending_durable_compaction_event: CompactionEvent | None = None
@@ -2493,6 +2487,7 @@ class Agent:
         self._durable_consumer_provider: Any = self.provider
         self._durable_consumer_model_id = self.config.model_id
         self._durable_consumer_window_tokens = self.config.context_window_tokens
+        self._durable_consumer_window_known = self.config.context_window_known
         self._durable_consumer_max_output_tokens = self.config.max_tokens
         self._durable_consumer_model_capabilities = self.config.model_capabilities
         self._durable_consumer_provider_request_max_chars = (
@@ -2692,24 +2687,29 @@ class Agent:
                 error_type=type(exc).__name__,
             )
 
+    def _context_capacity_details(self) -> dict[str, Any] | None:
+        from opensquilla.provider.model_catalog import (
+            resolve_effective_context_window,
+            shared_catalog,
+        )
+
+        provider = str(self.config.provider_id or "").strip()
+        model = str(self.config.model_id or "").strip()
+        if not provider or not model:
+            return None
+        window, source = resolve_effective_context_window(
+            shared_catalog(), model, provider,
+            self.config.context_window_tokens_global_override,
+        )
+        # Only attach a model setting when its resolved window is the actual
+        # window that rejected this request. A wrapper's different physical
+        # member must not be misidentified as the outer model.
+        if window != self.config.context_window_tokens:
+            return None
+        return {"provider": provider, "model": model, "contextWindow": window, "source": source}
+
     def _context_overflow_error(self) -> ErrorEvent:
         reason = self._last_compaction_refusal_reason
-        if reason == "memory_flush_timeout_before_compaction":
-            return ErrorEvent(
-                message=(
-                    "Context compaction could not run because the pre-compaction "
-                    "memory flush timed out."
-                ),
-                code="compaction_refused_flush_timeout",
-            )
-        if reason == "memory_flush_degraded_before_compaction":
-            return ErrorEvent(
-                message=(
-                    "Context compaction could not run because the pre-compaction "
-                    "memory flush did not produce a verified summary."
-                ),
-                code="compaction_refused_memory_flush",
-            )
         if reason == "empty_summary_rejected":
             return ErrorEvent(
                 message="Context compaction produced no replacement summary.",
@@ -2729,6 +2729,7 @@ class Agent:
             return ErrorEvent(
                 message=CONTEXT_PAYLOAD_TOO_LARGE_MESSAGES[reason],
                 code="provider_request_too_large",
+                model_capacity=self._context_capacity_details(),
             )
         if reason in {
             "provider_native_overflow_after_admission",
@@ -2741,6 +2742,7 @@ class Agent:
                     "a narrower current request or a larger-context model."
                 ),
                 code="provider_request_too_large",
+                model_capacity=self._context_capacity_details(),
             )
         if reason == "provider_request_budget_exhausted":
             return ErrorEvent(
@@ -2750,6 +2752,7 @@ class Agent:
                     "tools, or choose a larger-context model."
                 ),
                 code="provider_request_too_large",
+                model_capacity=self._context_capacity_details(),
             )
         return ErrorEvent(
             message="Context overflow persists after compaction",
@@ -2936,6 +2939,7 @@ class Agent:
         model_id: str | None,
         context_window_tokens: int,
         max_output_tokens: int,
+        context_window_known: bool = True,
         model_capabilities: ModelCapabilities | None = None,
         provider_request_proof_max_chars: int = 0,
     ) -> None:
@@ -2943,6 +2947,7 @@ class Agent:
 
         self._durable_consumer_provider = provider
         self._durable_consumer_model_id = model_id
+        self._durable_consumer_window_known = context_window_known
         self._durable_consumer_window_tokens = max(
             1,
             int(context_window_tokens or 0),
@@ -2969,6 +2974,7 @@ class Agent:
         active_user_message: str,
         *,
         context_window_tokens: int,
+        context_window_known: bool | None = None,
         max_output_tokens: int | None = None,
         model_capabilities: ModelCapabilities | None = None,
         provider_request_proof_max_chars: int | None = None,
@@ -3059,6 +3065,12 @@ class Agent:
                 self.config.thinking if isinstance(self.config.thinking, ThinkingLevel) else None
             ),
             provider_request_max_chars=proof_budget,
+            provider_context_window_tokens=(
+                max(0, int(context_window_tokens))
+                if (self.config.context_window_known
+                    if context_window_known is None else context_window_known)
+                else 0
+            ),
             context_window_tokens_global_override=(
                 self.config.context_window_tokens_global_override
             ),
@@ -3148,7 +3160,13 @@ class Agent:
                 "max_tokens": max_output_tokens,
                 "model_capabilities": self._durable_consumer_model_capabilities,
                 "provider_request_max_chars": proof_budget,
-                "provider_request_max_chars_explicit_cap": proof_budget,
+                "provider_request_max_chars_explicit_cap": (
+                    self._durable_consumer_provider_request_max_chars
+                ),
+                "provider_context_window_tokens": (
+                    self._durable_consumer_window_tokens
+                    if self._durable_consumer_window_known else 0
+                ),
             }
         )
         return project_provider_final_request(
@@ -3314,6 +3332,11 @@ class Agent:
         chat_config = self._provider_admission_chat_config(
             active_user_message,
             context_window_tokens=context_window_tokens,
+            context_window_known=(
+                self._durable_consumer_window_known
+                if consumer_provider is self._durable_consumer_provider
+                else self.config.context_window_known
+            ),
             max_output_tokens=max_output_tokens,
             model_capabilities=consumer_model_capabilities,
             provider_request_proof_max_chars=(consumer_provider_request_max_chars),
@@ -3584,34 +3607,37 @@ class Agent:
         }
         if self.config.output_json_schema is not None:
             payload["response_format"] = self._live_request_jsonable(self.config.output_json_schema)
-        proof_budget = self._provider_request_proof_max_chars()
-        if context_window_tokens is not None:
-            try:
-                thinking_enabled, thinking_budget = self.config.resolve_thinking(
-                    active_user_message
-                )
-            except Exception:  # noqa: BLE001 - lightweight config compatibility
-                thinking_enabled = False
-                thinking_budget = 0
-            proof_budget = (
-                ContextBudgetGovernor.from_values(
-                    context_window_tokens=context_window_tokens,
-                    max_output_tokens=(consumer_max_output_tokens or self.config.max_tokens),
-                    thinking_budget_tokens=thinking_budget if thinking_enabled else 0,
-                    context_overflow_threshold=self.config.context_overflow_threshold,
-                    provider_request_proof_max_chars=max(
-                        0,
-                        int(consumer_provider_request_max_chars or 0),
-                    ),
-                )
-                .snapshot()
-                .provider_request_max_chars
+        fallback_config = self._provider_admission_chat_config(
+            active_user_message,
+            context_window_tokens=effective_window,
+            context_window_known=(
+                self._durable_consumer_window_known
+                if exact_provider is self._durable_consumer_provider
+                else self.config.context_window_known
+            ),
+            max_output_tokens=consumer_max_output_tokens,
+            model_capabilities=consumer_model_capabilities,
+            provider_request_proof_max_chars=consumer_provider_request_max_chars,
+        )
+        # Raw ingress attachments cannot enter an exact wire projection yet.
+        # The typed envelope can still reveal the adapter's actual generation
+        # cap, including provider-specific reasoning reserves, without I/O.
+        generation_projection = project_provider_final_request(
+            exact_provider, fixed_messages, self.tool_definitions, fallback_config
+        )
+        payload["max_tokens"] = (
+            projected_generation_budget(generation_projection.payload, fallback_config.max_tokens)
+            if generation_projection is not None
+            else fallback_config.max_tokens + (
+                fallback_config.thinking_budget_tokens if fallback_config.thinking else 0
             )
+        )
         try:
             proof = prove_provider_payload(
                 payload,
                 projection_adapter="preflight_history_capacity",
-                proof_budget=proof_budget,
+                proof_budget=provider_request_character_budget(payload, fallback_config),
+                token_budget=provider_request_token_budget(payload, fallback_config),
             )
         except ProviderRequestBudgetExceededError as exc:
             proof = exc.proof
@@ -3833,6 +3859,9 @@ class Agent:
             model_vision_support=self.config.model_vision_support,
             physical_attempt_limit=1,
             provider_request_max_chars=self._provider_request_proof_max_chars(),
+            provider_context_window_tokens=(
+                self.config.context_window_tokens if self.config.context_window_known else 0
+            ),
             context_window_tokens_global_override=(
                 self.config.context_window_tokens_global_override
             ),
@@ -4059,6 +4088,18 @@ class Agent:
             or str(getattr(self.provider, "provider_name", "") or "").strip()
             or type(self.provider).__name__
         )
+
+    def _provider_activity_model(self, observed_model: str = "") -> str:
+        """Resolve the current physical model without mutating the route plan."""
+
+        if str(observed_model or "").strip():
+            return str(observed_model).strip()
+        active_model = getattr(self.provider, "active_model_id", None)
+        if active_model is not None:
+            # A composite can explicitly have no single physical model while
+            # its members run. Its configured fallback is not an observation.
+            return str(active_model or "").strip()
+        return str(self.config.model_id or "").strip()
 
     def _log_reasoning_output_budget_exhausted(
         self,
@@ -6400,6 +6441,8 @@ class Agent:
         )
         turn_llm_calls = 0
         turn_tool_errors = 0
+        tool_failure_recovery = ToolFailureRecovery()
+        tool_failure_finalization_pending = False
         # Whole-turn replay is safe only while no provider admission has
         # completed and no tool execution has crossed an external-effect
         # boundary. The usage call index supplies the durable half of this
@@ -7034,6 +7077,7 @@ class Agent:
                     self.config.max_iterations > 0
                     and iterations >= self.config.max_iterations
                     and not goal_terminal_final_response_pending
+                    and not tool_failure_finalization_pending
                 ):
                     max_iterations_source = str(
                         self.config.metadata.get("agent_max_iterations_source", "agent_config")
@@ -7225,6 +7269,10 @@ class Agent:
                         # one ordinary summary. Do not splice work/recovery
                         # directives after the durable terminal decision.
                         request_suffix_messages = []
+                    elif tool_failure_finalization_pending:
+                        request_suffix_messages = [
+                            Message(role="user", content=FAILURE_RECOVERY_INSTRUCTION)
+                        ]
                     elif (
                         max_iterations_finalization_pending
                         and max_iterations_finalization_message is not None
@@ -7273,6 +7321,9 @@ class Agent:
                                     (self.tool_definitions or None) if tools_supported else None
                                 )
                                 self.config.model_vision_support = chat_cfg.model_vision_support
+                                self.config.context_window_known = (
+                                    chat_cfg.provider_context_window_tokens > 0
+                                )
                                 self.config.max_tokens = chat_cfg.max_tokens
                                 self.config.provider_request_proof_max_chars = (
                                     chat_cfg.provider_request_max_chars
@@ -7306,6 +7357,7 @@ class Agent:
                         None
                         if goal_terminal_final_response_pending
                         or max_iterations_finalization_pending
+                        or tool_failure_finalization_pending
                         else provider_tool_definitions
                     )
                     if plan_run_delivery_only:
@@ -7316,6 +7368,7 @@ class Agent:
                         tools_supported
                         and not goal_terminal_final_response_pending
                         and not max_iterations_finalization_pending
+                        and not tool_failure_finalization_pending
                     )
                     base_recovery_available = self._tool_result_recovery_available()
                     call_retrieval_available = bool(
@@ -7609,6 +7662,10 @@ class Agent:
                         break
 
                     call_chat_cfg = chat_cfg
+                    if tool_failure_finalization_pending:
+                        call_chat_cfg = call_chat_cfg.model_copy(
+                            update={"tool_choice": None, "physical_attempt_limit": 1}
+                        )
                     if goal_terminal_final_response_pending:
                         call_chat_cfg = call_chat_cfg.model_copy(update={"tool_choice": None})
                     forced_tool_choice = self.config.metadata.get("meta_match_tool_choice")
@@ -7711,9 +7768,8 @@ class Agent:
                                 config=call_chat_cfg,
                             )
                             budget = self._context_budget_governor().snapshot()
-                            token_limit = max(
-                                1,
-                                int(budget.usable_tokens * budget.threshold),
+                            token_limit, _ = effective_proof_token_budget(
+                                budget.usable_tokens,
                             )
                             char_limit = budget.provider_request_max_chars
                             restored_request_fits = bool(
@@ -7853,6 +7909,7 @@ class Agent:
 
                     yield ProviderActivityEvent(
                         activity_id=provider_activity_id,
+                        model=self._provider_activity_model(),
                         phase="requesting",
                         reason=next_provider_activity_reason,
                         retry_attempt=_connection_wait_attempt or _retry_attempt,
@@ -8191,6 +8248,9 @@ class Agent:
                                 yield ProviderActivityEvent(
                                     schema_version=1,
                                     activity_id=provider_activity_id,
+                                    model=self._provider_activity_model(
+                                        getattr(raw_ev, "model", "")
+                                    ),
                                     phase=activity_phase,
                                     reason=_normalize_provider_activity_reason(raw_ev.reason),
                                     retry_attempt=max(0, raw_ev.retry_attempt),
@@ -8284,6 +8344,7 @@ class Agent:
                                 ):
                                     yield ProviderActivityEvent(
                                         activity_id=provider_activity_id,
+                                        model=self._provider_activity_model(),
                                         phase="reasoning",
                                         reason="initial",
                                         retry_attempt=_retry_attempt,
@@ -8310,6 +8371,7 @@ class Agent:
                                     if (
                                         goal_terminal_final_response_pending
                                         or max_iterations_finalization_pending
+                                        or tool_failure_finalization_pending
                                     ):
                                         ignored_post_delivery_tool_use = True
                                     continue
@@ -8431,6 +8493,7 @@ class Agent:
                                     if (
                                         goal_terminal_final_response_pending
                                         or max_iterations_finalization_pending
+                                        or tool_failure_finalization_pending
                                     ):
                                         ignored_post_delivery_tool_use = True
                                     continue
@@ -8817,6 +8880,12 @@ class Agent:
 
                             elif isinstance(raw_ev, ProviderErrorEvent):
                                 provider_error_for_log = raw_ev
+                                ensemble_trace = getattr(raw_ev, "ensemble_trace", None)
+                                if isinstance(ensemble_trace, dict):
+                                    ensemble_request_count_baseline = _merge_ensemble_request_count(
+                                        ensemble_trace,
+                                        ensemble_request_count_baseline,
+                                    )
                                 pending_tool_events.clear()
                                 usage_unknown_reason = provider_error_usage_reason(raw_ev.code)
                                 known_usage_receipt = has_known_provider_usage_receipt(raw_ev)
@@ -9207,6 +9276,16 @@ class Agent:
                         yield terminal_error
                         break
                     response_text = "".join(assistant_text_parts)
+                    if tool_failure_finalization_pending and (
+                        _got_error or not _got_done_event or not response_text.strip()
+                    ):
+                        terminal_error = ErrorEvent(
+                            message=tool_failure_recovery.terminal_message,
+                            code=FAILURE_RECOVERY_CODE,
+                        )
+                        yield self._transition(AgentState.ERROR)
+                        yield terminal_error
+                        break
                     if (
                         ignored_post_delivery_tool_use
                         and not response_text.strip()
@@ -9276,6 +9355,17 @@ class Agent:
                         reasoning_tokens=iter_reasoning_tokens,
                         user_visible_emitted=attempt_user_visible_emitted,
                     )
+                    if (
+                        tool_failure_finalization_pending
+                        and attempt_classification.kind != _ProviderAttemptKind.OK
+                    ):
+                        terminal_error = ErrorEvent(
+                            message=tool_failure_recovery.terminal_message,
+                            code=FAILURE_RECOVERY_CODE,
+                        )
+                        yield self._transition(AgentState.ERROR)
+                        yield terminal_error
+                        break
                     if not _got_error and attempt_classification.kind != _ProviderAttemptKind.OK:
                         if goal_terminal_final_response_pending:
                             fallback_text = _goal_terminal_final_response_text()
@@ -9516,6 +9606,7 @@ class Agent:
                                 next_provider_activity_reason = fallback_reason
                                 yield ProviderActivityEvent(
                                     activity_id=provider_activity_id,
+                                    model=self._provider_activity_model(),
                                     phase="fallback",
                                     reason=fallback_reason,
                                     retry_attempt=_call_attempt + 1,
@@ -9623,6 +9714,7 @@ class Agent:
                                 next_provider_activity_reason = "reasoning_only"
                                 yield ProviderActivityEvent(
                                     activity_id=provider_activity_id,
+                                    model=self._provider_activity_model(),
                                     phase="retrying",
                                     reason="reasoning_only",
                                     retry_attempt=_attempt_retries_used[
@@ -9736,6 +9828,7 @@ class Agent:
                             next_provider_activity_reason = "reasoning_only"
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retrying",
                                 reason="reasoning_only",
                                 retry_attempt=_attempt_retries_used[
@@ -9769,6 +9862,7 @@ class Agent:
                             )
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retry_wait",
                                 reason="invalid_response",
                                 retry_attempt=_attempt_retries_used[
@@ -9784,6 +9878,7 @@ class Agent:
                             next_provider_activity_reason = "invalid_response"
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retrying",
                                 reason="invalid_response",
                                 retry_attempt=_attempt_retries_used[
@@ -9820,6 +9915,7 @@ class Agent:
                             )
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retry_wait",
                                 reason="stream_incomplete",
                                 retry_attempt=_attempt_retries_used[
@@ -9835,6 +9931,7 @@ class Agent:
                             next_provider_activity_reason = "stream_incomplete"
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retrying",
                                 reason="stream_incomplete",
                                 retry_attempt=_attempt_retries_used[
@@ -9915,6 +10012,7 @@ class Agent:
                             next_provider_activity_reason = fallback_reason
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="fallback",
                                 reason=fallback_reason,
                                 retry_attempt=_call_attempt + 1,
@@ -10416,6 +10514,7 @@ class Agent:
                             )
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retry_wait",
                                 reason="empty_response",
                                 retry_attempt=_retry_attempt + 1,
@@ -10428,6 +10527,7 @@ class Agent:
                             next_provider_activity_reason = "empty_response"
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retrying",
                                 reason="empty_response",
                                 retry_attempt=_retry_attempt,
@@ -11129,6 +11229,7 @@ class Agent:
                             _connection_wait_attempt += 1
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retry_wait",
                                 reason="transport_transient",
                                 retry_attempt=_connection_wait_attempt,
@@ -11141,6 +11242,7 @@ class Agent:
                             next_provider_activity_reason = "transport_transient"
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="retrying",
                                 reason="transport_transient",
                                 retry_attempt=_connection_wait_attempt,
@@ -11163,6 +11265,7 @@ class Agent:
                             next_provider_activity_reason = "rate_limited"
                             yield ProviderActivityEvent(
                                 activity_id=provider_activity_id,
+                                model=self._provider_activity_model(),
                                 phase="fallback",
                                 reason="rate_limited",
                                 retry_attempt=_call_attempt + 1,
@@ -11232,6 +11335,7 @@ class Agent:
                                 next_provider_activity_reason = reason
                                 yield ProviderActivityEvent(
                                     activity_id=provider_activity_id,
+                                    model=self._provider_activity_model(),
                                     phase="fallback",
                                     reason=reason,
                                     retry_attempt=_retry_attempt + 1,
@@ -11263,6 +11367,7 @@ class Agent:
                         )
                         yield ProviderActivityEvent(
                             activity_id=provider_activity_id,
+                            model=self._provider_activity_model(),
                             phase="retry_wait",
                             reason=reason,
                             retry_attempt=_retry_attempt + 1,
@@ -11276,6 +11381,7 @@ class Agent:
                         next_provider_activity_reason = reason
                         yield ProviderActivityEvent(
                             activity_id=provider_activity_id,
+                            model=self._provider_activity_model(),
                             phase="retrying",
                             reason=reason,
                             retry_attempt=_retry_attempt,
@@ -11462,6 +11568,18 @@ class Agent:
 
                 # No tool calls → we're done
                 if not tool_calls:
+                    if tool_failure_finalization_pending:
+                        if await self._unfinished_plan_run_reconciliation_message() is not None:
+                            terminal_error = ErrorEvent(
+                                message=(
+                                    "Tool recovery ended before the attached PlanRun reached "
+                                    "a terminal checkpoint. The plan is still incomplete."
+                                ),
+                                code="plan_run_checkpoint_required",
+                            )
+                            yield self._transition(AgentState.ERROR)
+                            yield terminal_error
+                        break
                     if goal_terminal_final_response_pending:
                         goal_terminal_final_response_pending = False
                         goal_terminal_final_status = None
@@ -11702,6 +11820,8 @@ class Agent:
                     preflight_result = (
                         preflight_tool_results.get(tc.tool_use_id) or snapshot_failure
                     )
+                    if preflight_result is None:
+                        preflight_result = tool_failure_recovery.before_call(execution_tc)
                     if tool_timeout is not None and tool_timeout <= 0:
                         preflight_result = ToolResult(
                             tool_use_id=tc.tool_use_id,
@@ -11817,6 +11937,13 @@ class Agent:
                                     timed_out=True,
                                 ),
                             )
+                    tool_failure_recovery.observe(
+                        execution_tc, res,
+                        repair_observed=(
+                            self._tool_effect_observation()
+                            != tool_effect_observations_by_id[tc.tool_use_id]
+                        ),
+                    )
                     duration_ms = int((time.monotonic() - started) * 1000)
                     self._end_tool_reliability_attempt(
                         tool_use_id=tc.tool_use_id,
@@ -12046,7 +12173,7 @@ class Agent:
                             )
 
                         async def _run_after_policy_locks() -> ToolResult:
-                            async with semaphore:
+                            async with tool_failure_recovery.dispatch_slot(tc), semaphore:
                                 return await _run_one(tc)
 
                         async def _run_after_key_lock() -> ToolResult:
@@ -12102,9 +12229,15 @@ class Agent:
                         async for event in _flush_parallel_batch(parallel_batch):
                             yield event
                         parallel_batch = []
+                        recovery_denial = tool_failure_recovery.before_call(tc)
+                        if recovery_denial is not None:
+                            results_by_id[tc.tool_use_id] = recovery_denial
+                            _record_completed_tool_result(recovery_denial)
+                            continue
                         active_ctx = (
                             current_tool_context.get() or self._tool_context or ToolContext()
                         )
+                        meta_effects_before = self._tool_effect_observation()
                         meta_reliability_started = self._begin_tool_reliability_attempt(
                             tool_use_id=tc.tool_use_id,
                             tool_name=tc.tool_name,
@@ -12112,6 +12245,12 @@ class Agent:
                         try:
                             async for ev in self._run_one_streaming(tc, active_ctx):
                                 if isinstance(ev, ToolResult):
+                                    tool_failure_recovery.observe(
+                                        tc, ev,
+                                        repair_observed=(
+                                            self._tool_effect_observation() != meta_effects_before
+                                        ),
+                                    )
                                     results_by_id[tc.tool_use_id] = ev
                                     _record_completed_tool_result(ev)
                                 else:
@@ -12624,6 +12763,12 @@ class Agent:
                     )
                 if turn_yielded:
                     break
+                if tool_failure_recovery.exhausted:
+                    tool_failure_finalization_pending = True
+                    self._write_turn_call_log(
+                        "turn_policy_decision", action="finalize_without_tools",
+                        reason=FAILURE_RECOVERY_CODE, iteration=iterations,
+                    )
                 # ------ TOOL_CALLING → THINKING ------
                 yield self._transition(AgentState.THINKING)
                 # Loop continues
@@ -13971,55 +14116,24 @@ class Agent:
 
     @staticmethod
     def _tool_result_requires_raw_preservation(message: Message) -> bool:
+        """Keep active protocol state; completed errors may leave a request window."""
+        from opensquilla.session.compaction import _execution_status_is_live
+
         if not isinstance(message.content, list):
             return False
-        unresolved_markers = {
-            "pending",
-            "queued",
-            "running",
-            "in_progress",
-            "requires_action",
-            "awaiting_approval",
-        }
         for block in message.content:
             if not isinstance(block, ContentBlockToolResult):
                 continue
-            if bool(getattr(block, "is_error", False)):
+            if _execution_status_is_live(block.execution_status):
                 return True
-            raw_status = getattr(block, "execution_status", None)
-            if isinstance(raw_status, dict):
-                raw_status_name = str(raw_status.get("status") or "").strip().lower()
-                if raw_status_name in unresolved_markers | {
-                    "error",
-                    "failed",
-                    "failure",
-                    "timeout",
-                    "timed_out",
-                    "cancelled",
-                    "unresolved",
-                }:
-                    return True
-                normalized_status = normalize_execution_status(raw_status)
-                normalized_name = normalized_status["status"]
-                if normalized_name in {"error", "timeout", "cancelled"}:
-                    return True
-                if normalized_name == "unknown" and (
-                    normalized_status["source"] != "legacy"
-                    or normalized_status["reason"] not in {None, "legacy_missing_status"}
-                    or normalized_status["preservation_class"] == "ephemeral"
-                ):
-                    return True
-            raw = block.content
-            if not isinstance(raw, str):
+            if not isinstance(block.content, str):
                 continue
             try:
-                parsed = json.loads(raw)
+                parsed = json.loads(block.content)
             except (TypeError, json.JSONDecodeError):
                 continue
-            if (
-                isinstance(parsed, dict)
-                and str(parsed.get("status") or parsed.get("execution_status") or "").lower()
-                in unresolved_markers
+            if isinstance(parsed, dict) and _execution_status_is_live(
+                parsed.get("execution_status") or parsed
             ):
                 return True
         return False
@@ -15232,8 +15346,7 @@ class Agent:
     ) -> CompactionOutcome | None:
         """Check if estimated live context tokens exceed the overflow threshold.
 
-        Uses sub-agent flush instead of prompt injection.
-        The flush is re-entrant: it can trigger on every approach to threshold.
+        Preserve canonical history while selecting a provider-compatible request view.
         """
         self._last_compaction_refusal_reason = None
         window_tokens = compaction_window_tokens or self.config.context_window_tokens
@@ -15399,6 +15512,32 @@ class Agent:
                 )
                 return _local_after_failure("provider_recent_tail_too_large")
 
+        history_window_tokens = window_tokens
+        history_window_chars: int | None = None
+        if durable_consumer_overflow_proven is True and (
+            request_window_tokens is not None or request_window_chars is not None
+        ):
+            # The core compacts history, whereas the overflow proof includes
+            # the complete request. Reserve the stable consumer's fixed
+            # envelope and generation budget before selecting its history.
+            # A routed member's smaller request cap must not rewrite durable
+            # history. The active user/tool tail already belongs to entries.
+            history_window_tokens, history_window_chars = self.preflight_history_capacity(
+                active_user_message="",
+                active_user_in_history=False,
+                context_window_tokens=self._durable_consumer_window_tokens,
+                consumer_provider=self._durable_consumer_provider,
+                consumer_max_output_tokens=self._durable_consumer_max_output_tokens,
+                consumer_model_id=self._durable_consumer_model_id,
+                consumer_model_capabilities=self._durable_consumer_model_capabilities,
+                consumer_provider_request_max_chars=(
+                    self._durable_consumer_provider_request_max_chars
+                ),
+            )
+            if history_window_tokens <= 0 or history_window_chars <= 0:
+                self._last_compaction_refusal_reason = "provider_request_budget_exhausted"
+                return _local_after_failure("provider_request_budget_exhausted")
+
         protected_start: int | None = None
         compaction_id = new_compaction_id()
         compaction_config = self._build_compaction_config()
@@ -15422,6 +15561,13 @@ class Agent:
                 status="started",
                 tokens_before=estimated_context_tokens,
                 context_window_tokens=window_tokens,
+                request_capacity_tokens=pressure_window_tokens,
+                request_capacity_chars=request_window_chars,
+                request_tokens=estimated_context_tokens,
+                request_chars=estimated_context_chars,
+                threshold=threshold,
+                char_threshold=char_threshold,
+                ratio=self.config.context_overflow_threshold,
                 heartbeat_interval_seconds=compaction_config.heartbeat_interval_seconds,
                 **compaction_effect_payload(status="started"),
                 **compaction_lifecycle_payload(
@@ -15429,188 +15575,6 @@ class Agent:
                     COMPACTION_TRIGGERED_EVENT,
                 ),
             )
-        # --- Pre-compaction flush; inline compaction can continue on degraded flush. ---
-        flush_task: asyncio.Task | None = None
-        self._consume_completed_flush_task()
-
-        async def _await_flush_task() -> Any | None:
-            # Give flush a grace period to complete instead of cancelling immediately.
-            # Adds up to flush_timeout_seconds (default 15s) of latency, but without
-            # this the flush is effectively dead code (always cancelled before finishing).
-            if flush_task is not None and not flush_task.done():
-                if flush_task is self._flush_wait_timed_out_task:
-                    return None
-                try:
-                    require_compaction_time(compaction_config, phase="flushing")
-                    remaining = compaction_remaining_seconds(compaction_config)
-                    wait_timeout = self.config.flush_timeout_seconds
-                    if remaining is not None:
-                        wait_timeout = min(wait_timeout, remaining)
-                    receipt = await asyncio.wait_for(
-                        asyncio.shield(flush_task),
-                        timeout=wait_timeout,
-                    )
-                    logger.info("memory_flush.completed_after_compaction")
-                    self._flush_wait_timed_out_task = None
-                    self._mark_flush_task_completed(flush_task)
-                    return receipt
-                except TimeoutError:
-                    require_compaction_time(compaction_config, phase="flushing")
-                    self._flush_wait_timed_out_task = flush_task
-                    next_retry_seconds = self._record_flush_timeout_backoff()
-                    logger.warning(
-                        "memory_flush.timed_out",
-                        timeout_seconds=self.config.flush_timeout_seconds,
-                        next_retry_seconds=next_retry_seconds,
-                    )
-                except CompactionTimeoutError:
-                    raise
-                except Exception as exc:
-                    logger.warning("memory_flush.await_failed", error=str(exc))
-                    self._mark_flush_task_completed(flush_task)
-                    return None
-            if flush_task is not None and flush_task.done():
-                try:
-                    receipt = flush_task.result()
-                    self._flush_wait_timed_out_task = None
-                    self._mark_flush_task_completed(flush_task)
-                    return receipt
-                except Exception as exc:
-                    logger.warning("memory_flush.await_failed", error=str(exc))
-                    self._flush_wait_timed_out_task = None
-                    self._mark_flush_task_completed(flush_task)
-                    return None
-            return None
-
-        pre_compaction_flush_enabled = flush_trigger_enabled(
-            self.config,
-            "pre_compaction",
-        )
-
-        if not self._flush_done_this_cycle and pre_compaction_flush_enabled:
-            try:
-                from opensquilla.memory.flush import (
-                    resolve_flush_plan,
-                    should_flush,
-                )
-
-                now = time.monotonic()
-                if self._active_flush_task is not None and not self._active_flush_task.done():
-                    logger.debug("memory_flush.skipped", reason="already_running")
-                    flush_task = self._active_flush_task
-                elif now < self._flush_backoff_until:
-                    logger.warning(
-                        "memory_flush.skipped",
-                        reason="backoff",
-                        retry_after_seconds=round(self._flush_backoff_until - now, 3),
-                    )
-                else:
-                    transcript_bytes = sum(
-                        len(m.content.encode("utf-8")) if isinstance(m.content, str) else 0
-                        for m in messages
-                    )
-
-                    if should_flush(
-                        total_tokens=estimated_context_tokens,
-                        threshold_tokens=int(threshold),
-                        transcript_bytes=transcript_bytes,
-                    ):
-                        plan = resolve_flush_plan(
-                            workspace_dir=self.config.flush_workspace_dir,
-                            archive_max_bytes=self.config.flush_archive_max_bytes,
-                        )
-                        logger.info(
-                            "memory_flush.triggered",
-                            path=plan.relative_path,
-                            total_tokens=estimated_context_tokens,
-                            threshold=int(threshold),
-                        )
-                        flush_task = asyncio.create_task(self._run_flush(plan, list(messages)))
-                        flush_task.add_done_callback(self._on_flush_task_done)
-                        self._active_flush_task = flush_task
-                        self._flush_done_this_cycle = True
-            except Exception:
-                logger.debug("memory_flush.skipped", reason="flush module unavailable")
-
-        if pre_compaction_flush_enabled:
-            if (
-                flush_task is not None
-                and not flush_task.done()
-                and time.monotonic() < self._flush_backoff_until
-            ):
-                logger.warning(
-                    "memory_flush.skipped",
-                    reason="backoff",
-                    retry_after_seconds=round(self._flush_backoff_until - time.monotonic(), 3),
-                )
-                self._flush_done_this_cycle = False
-            try:
-                receipt = await _await_flush_task()
-            except asyncio.CancelledError:
-                if self._session_key:
-                    notify_compaction(
-                        self._session_key,
-                        source="automatic",
-                        phase="flushing",
-                        status="cancelled",
-                        reason="cancelled",
-                        **compaction_effect_payload(status="cancelled"),
-                        **compaction_lifecycle_payload(
-                            compaction_id,
-                            COMPACTION_TRIGGERED_EVENT,
-                        ),
-                    )
-                raise
-            except CompactionTimeoutError as exc:
-                self._last_compaction_refusal_reason = "compaction_deadline_exceeded"
-                if self._session_key:
-                    notify_compaction(
-                        self._session_key,
-                        source="automatic",
-                        phase=exc.phase,
-                        status="timed_out",
-                        reason=self._last_compaction_refusal_reason,
-                        **compaction_effect_payload(status="timed_out"),
-                        **compaction_lifecycle_payload(
-                            compaction_id,
-                            COMPACTION_TRIGGERED_EVENT,
-                        ),
-                    )
-                return _local_after_failure("compaction_deadline_exceeded")
-            if not flush_receipt_allows_destructive_compaction(receipt):
-                reason = "memory_flush_degraded_before_compaction"
-                if flush_task is not None and self._flush_wait_timed_out_task is flush_task:
-                    reason = "memory_flush_timeout_before_compaction"
-                logger.warning(
-                    "memory_flush.degraded_before_compaction",
-                    reason=reason,
-                    mode=getattr(receipt, "mode", None),
-                    integrity_status=getattr(receipt, "integrity_status", None),
-                    indexed_chunk_count=getattr(receipt, "indexed_chunk_count", None),
-                )
-                self._flush_done_this_cycle = False
-                if pre_compaction_flush_requires_safe_receipt(self.config):
-                    self._last_compaction_refusal_reason = reason
-                    if self._session_key:
-                        notify_compaction(
-                            self._session_key,
-                            source="automatic",
-                            phase="agent_inline_overflow",
-                            status="skipped",
-                            reason=reason,
-                            tokens_before=estimated_context_tokens,
-                            context_window_tokens=window_tokens,
-                            **compaction_effect_payload(
-                                status="skipped",
-                                reason=reason,
-                            ),
-                            **compaction_lifecycle_payload(
-                                compaction_id,
-                                COMPACTION_TRIGGERED_EVENT,
-                            ),
-                        )
-                    return _local_after_failure(reason)
-
         # --- Compaction ---
         # Summaries consume flattened text; retention and cut decisions use
         # the original structured message's text and native-media estimate.
@@ -15619,7 +15583,8 @@ class Agent:
         request = CompactionRequest(
             session_id="agent-turn",
             entries=entries,
-            context_window_tokens=window_tokens,
+            context_window_tokens=history_window_tokens,
+            context_window_chars=history_window_chars,
             config=compaction_config,
             provider_request_correlation=derive_provider_request_correlation(
                 self._provider_request_correlation,
@@ -15794,40 +15759,6 @@ class Agent:
                     )
                 return None
             has_structured_content = any(not isinstance(m.content, str) for m in messages)
-            try:
-                await _await_flush_task()
-            except asyncio.CancelledError:
-                if self._session_key:
-                    notify_compaction(
-                        self._session_key,
-                        source="automatic",
-                        phase="flushing",
-                        status="cancelled",
-                        reason="cancelled",
-                        **compaction_effect_payload(status="cancelled"),
-                        **compaction_lifecycle_payload(
-                            compaction_id,
-                            COMPACTION_TRIGGERED_EVENT,
-                        ),
-                    )
-                raise
-            except CompactionTimeoutError as exc:
-                self._last_compaction_refusal_reason = "compaction_deadline_exceeded"
-                if self._session_key:
-                    notify_compaction(
-                        self._session_key,
-                        source="automatic",
-                        phase=exc.phase,
-                        status="timed_out",
-                        reason=self._last_compaction_refusal_reason,
-                        **compaction_effect_payload(status="timed_out"),
-                        **compaction_lifecycle_payload(
-                            compaction_id,
-                            COMPACTION_TRIGGERED_EVENT,
-                        ),
-                    )
-                return _local_after_failure("compaction_deadline_exceeded")
-            self._flush_done_this_cycle = False
             skip_reason = getattr(result, "skip_reason", None) or (
                 "structured_content_noop" if has_structured_content else "noop"
             )
@@ -15871,42 +15802,6 @@ class Agent:
             )
         compacted.extend(messages[kept_start_index:])
 
-        try:
-            await _await_flush_task()
-        except asyncio.CancelledError:
-            if self._session_key:
-                notify_compaction(
-                    self._session_key,
-                    source="automatic",
-                    phase="flushing",
-                    status="cancelled",
-                    reason="cancelled",
-                    **compaction_effect_payload(status="cancelled"),
-                    **compaction_lifecycle_payload(
-                        compaction_id,
-                        COMPACTION_TRIGGERED_EVENT,
-                    ),
-                )
-            raise
-        except CompactionTimeoutError as exc:
-            self._last_compaction_refusal_reason = "compaction_deadline_exceeded"
-            if self._session_key:
-                notify_compaction(
-                    self._session_key,
-                    source="automatic",
-                    phase=exc.phase,
-                    status="timed_out",
-                    reason=self._last_compaction_refusal_reason,
-                    **compaction_effect_payload(status="timed_out"),
-                    **compaction_lifecycle_payload(
-                        compaction_id,
-                        COMPACTION_TRIGGERED_EVENT,
-                    ),
-                )
-            return _local_after_failure("compaction_deadline_exceeded")
-
-        # Reset flush flag so it can trigger again after next compaction
-        self._flush_done_this_cycle = False
 
         # Trigger 6: post-compaction sync
         if self._memory_sync_manager is not None:
@@ -15958,65 +15853,6 @@ class Agent:
             runtime_compaction_config=compaction_config,
         )
 
-    def _consume_completed_flush_task(self) -> None:
-        task = self._active_flush_task
-        if task is None or not task.done():
-            return
-        self._mark_flush_task_completed(task)
-
-    def _on_flush_task_done(self, task: asyncio.Task) -> None:
-        self._mark_flush_task_completed(task)
-
-    def _mark_flush_task_completed(self, task: asyncio.Task) -> None:
-        if self._flush_wait_timed_out_task is task:
-            self._flush_wait_timed_out_task = None
-        if self._active_flush_task is not task:
-            return
-        try:
-            receipt = task.result()
-        except asyncio.CancelledError:
-            logger.debug("memory_flush.cancelled")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("memory_flush.background_failed", error=str(exc))
-        else:
-            mode = getattr(receipt, "mode", None)
-            if not flush_receipt_is_successful_flush(receipt):
-                next_retry_seconds = self._ensure_flush_degraded_backoff()
-                logger.warning(
-                    "memory_flush.degraded",
-                    mode=mode,
-                    result_status=getattr(receipt, "result_status", None),
-                    integrity_status=getattr(receipt, "integrity_status", None),
-                    output_coverage_status=getattr(receipt, "output_coverage_status", None),
-                    obligation_status=getattr(receipt, "obligation_status", None),
-                    raw_reason=getattr(receipt, "raw_reason", None),
-                    next_retry_seconds=next_retry_seconds,
-                )
-            else:
-                self._flush_backoff_seconds = 0.0
-                self._flush_backoff_until = 0.0
-        self._active_flush_task = None
-
-    def _record_flush_timeout_backoff(self) -> float:
-        initial = max(0.0, float(self.config.flush_backoff_initial_seconds))
-        maximum = max(initial, float(self.config.flush_backoff_max_seconds))
-        if initial == 0:
-            self._flush_backoff_seconds = 0.0
-            self._flush_backoff_until = 0.0
-            return 0.0
-        if self._flush_backoff_seconds <= 0:
-            next_retry_seconds = initial
-        else:
-            next_retry_seconds = min(self._flush_backoff_seconds * 2, maximum)
-        self._flush_backoff_seconds = next_retry_seconds
-        self._flush_backoff_until = time.monotonic() + next_retry_seconds
-        return next_retry_seconds
-
-    def _ensure_flush_degraded_backoff(self) -> float:
-        remaining = self._flush_backoff_until - time.monotonic()
-        if remaining > 0:
-            return remaining
-        return self._record_flush_timeout_backoff()
 
     @staticmethod
     def _adjust_index_after_prefix_compaction(
@@ -16031,64 +15867,6 @@ class Agent:
         summary_prefix = 2 if summary_present and original_index > 0 else 0
         return summary_prefix + max(0, original_index - kept_start_index)
 
-    async def _run_flush(
-        self,
-        plan: Any,
-        messages: list[Message],
-    ) -> Any | None:
-        """Run memory flush before compaction; delegates to SessionFlushService.
-
-        When a ``SessionFlushService`` is injected, this method forwards the
-        call and returns its receipt. When no service is injected (standalone
-        Agent instances in unit tests or legacy paths), it falls back to an
-        inline raw-dump so we don't silently drop data.
-        """
-        service = getattr(self, "_session_flush_service", None)
-        if service is not None:
-            try:
-                from opensquilla.session.keys import parse_agent_id
-
-                sk = getattr(self, "_session_key", None) or "agent:main:legacy"
-                return await service.execute(
-                    messages,
-                    session_key=sk,
-                    agent_id=parse_agent_id(sk),
-                    timeout=self.config.flush_background_timeout_seconds,
-                    message_window=0,
-                    segment_mode="auto",
-                    provider_request_correlation=derive_provider_request_correlation(
-                        self._provider_request_correlation,
-                        execution_id=uuid.uuid4().hex,
-                        call_kind="auxiliary.session_flush",
-                    ),
-                )
-            except asyncio.CancelledError:
-                logger.debug("memory_flush.cancelled")
-                raise
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("memory_flush.service_failed", error=str(exc))
-            return None
-
-        # Legacy fallback — only hit when no service is injected.
-        from opensquilla.memory.flush import dump_transcript_excerpt
-
-        if self.provider is None and self.tool_handler is not None:
-            excerpt = dump_transcript_excerpt(messages)
-            if excerpt.strip():
-                from opensquilla.tool_boundary import ToolCall as _FlushToolCall
-
-                await self.tool_handler(
-                    _FlushToolCall(
-                        tool_use_id="flush-fallback",
-                        tool_name="memory_save",
-                        arguments={
-                            "content": excerpt,
-                            "path": plan.relative_path,
-                            "mode": "append",
-                        },
-                    )
-                )
-        return None
 
     @staticmethod
     def _has_provider_context_replay_marker(arguments: dict[str, Any]) -> bool:
@@ -18115,19 +17893,8 @@ class Agent:
             max_turn_tool_errors=self.config.max_turn_tool_errors,
             length_capped_continuations=self.config.length_capped_continuations,
             context_window_tokens=child_target.context_window_tokens,
+            context_window_known=child_target.context_window_known,
             workspace_dir=spec.workspace_dir or self.config.workspace_dir,
-            flush_enabled=self.config.flush_enabled,
-            flush_triggers=list(self.config.flush_triggers),
-            flush_pre_compaction=self.config.flush_pre_compaction,
-            flush_timeout_seconds=self.config.flush_timeout_seconds,
-            flush_background_timeout_seconds=self.config.flush_background_timeout_seconds,
-            flush_backoff_initial_seconds=self.config.flush_backoff_initial_seconds,
-            flush_backoff_max_seconds=self.config.flush_backoff_max_seconds,
-            flush_archive_max_bytes=self.config.flush_archive_max_bytes,
-            flush_compaction_requires_safe_receipt=(
-                self.config.flush_compaction_requires_safe_receipt
-            ),
-            flush_compaction_safety_mode=self.config.flush_compaction_safety_mode,
             compaction_profile=self.config.compaction_profile,
             compaction_protected_recent_messages=(self.config.compaction_protected_recent_messages),
             compaction_total_timeout_seconds=self.config.compaction_total_timeout_seconds,

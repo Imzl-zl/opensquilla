@@ -81,13 +81,30 @@ function modelCallSegments(value: unknown): ConversationEventData['model_call_se
   })
 }
 
+function executionLegs(value: unknown): ConversationUsage['execution_legs'] {
+  if (!Array.isArray(value)) return undefined
+  return value.flatMap(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return []
+    const source = object(item)
+    const result: NonNullable<ConversationUsage['execution_legs']>[number] = {}
+    for (const key of ['kind', 'provider', 'model', 'plan_id', 'execution_id', 'call_kind', 'reason'] as const) {
+      const value = alias(source, key)
+      if (typeof value === 'string') result[key] = value
+    }
+    if (typeof source.index === 'number' && Number.isSafeInteger(source.index) && source.index >= 0) {
+      result.index = source.index
+    }
+    return [result]
+  })
+}
+
 function terminalUsage(source: Record<string, unknown>): ConversationUsage {
   const nested = object(source.usage)
   const raw = { ...(source.usage ? nested : source) }
   // Preserve the established merge before collapsing spellings: an outer
   // canonical field can outrank a nested camel-only field, but never replaces
   // an already-present nested field of the same spelling.
-  for (const key of ['model_usage_breakdown', 'modelUsageBreakdown', 'ensemble_trace', 'ensembleTrace', 'coverage_status', 'coverageStatus', 'usage_unknown', 'usageUnknown', 'unknown_usage_events', 'unknownUsageEvents']) {
+  for (const key of ['model_usage_breakdown', 'modelUsageBreakdown', 'ensemble_trace', 'ensembleTrace', 'execution_legs', 'executionLegs', 'coverage_status', 'coverageStatus', 'usage_unknown', 'usageUnknown', 'unknown_usage_events', 'unknownUsageEvents']) {
     if (source[key] != null && raw[key] == null) raw[key] = source[key]
   }
   const result: Record<string, unknown> = {}
@@ -109,6 +126,8 @@ function terminalUsage(source: Record<string, unknown>): ConversationUsage {
       ? Array.isArray(item) : item && typeof item === 'object' && !Array.isArray(item))
     if (value !== undefined) result[key] = value
   }
+  const legs = executionLegs([raw.execution_legs, raw.executionLegs].find(Array.isArray))
+  if (legs) result.execution_legs = legs
   // The outer persisted route plan overrides the smaller nested usage receipt.
   const route = alias(source, 'route_plan') ?? alias(raw, 'route_plan')
   if (route && typeof route === 'object' && !Array.isArray(route)) result.route_plan = route
@@ -303,7 +322,23 @@ export function projectConversationContent(payload: unknown, kind?: Conversation
     if (typeof turnId === 'string') result.completedTurnId = turnId.trim()
   }
   if (kind === 'turn-failed' || kind === 'task-failed' || kind === 'task-timed-out' || kind === 'task-abandoned') {
-    result.terminalOutcome = normalizeTurnOutcome({ ...source, turn_id: taskId, status: 'failed' })
+    const capacity = object(source.model_capacity)
+    if (typeof capacity.provider === 'string' && capacity.provider.trim() && capacity.provider.length <= 1024
+      && typeof capacity.model === 'string' && capacity.model.trim() && capacity.model.length <= 1024
+      && Number.isSafeInteger(capacity.contextWindow) && Number(capacity.contextWindow) > 0
+      && ['default', 'catalog', 'config', 'override'].includes(String(capacity.source))) {
+      result.modelCapacity = { provider: capacity.provider, model: capacity.model,
+        contextWindow: Number(capacity.contextWindow), source: capacity.source as import('@/modules/providerConfiguration').ModelCapacitySource }
+    }
+    result.terminalOutcome = normalizeTurnOutcome({
+      ...source,
+      turn_id: source.turn_id ?? source.turnId ?? taskId,
+      status: kind === 'task-timed-out' ? 'timeout' : kind === 'task-abandoned' ? 'abandoned' : 'failed',
+      ...(kind !== 'turn-failed' ? {
+        statusSource: 'task',
+        reason: source.terminal_reason ?? source.terminalReason ?? source.reason,
+      } : {}),
+    })
     const errorCode = usageAccountingErrorCode(source)
     if (errorCode) result.error_class = errorCode
   }

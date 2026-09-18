@@ -22,6 +22,7 @@ import { SESSIONS_MESSAGES_UNSUBSCRIBE_METHOD } from '@/contracts/generated/v4/s
 import {
   SessionReadContractError,
   SessionReadFailure,
+  SessionReadHistoryCursorError,
   SessionReadSessionMissingError,
   type SessionReadMetadata,
 } from '@/modules/sessionReadLifecycle'
@@ -303,6 +304,7 @@ describe('v4 SessionReadPort Adapter', () => {
     const events = createConversationEventsTestHarness()
     const interruptState = ref<ReadonlyMap<string, InterruptViewState>>(new Map())
     const approvals = scope.run(() => useChatApprovals({
+      gatewayAvailability: ref('available'),
       approvalCenter: {
         snapshot: vi.fn(async () => ({ pending: [], mode: 'prompt' as const })),
         subscribe: vi.fn(() => ({ close: vi.fn() })),
@@ -407,6 +409,33 @@ describe('v4 SessionReadPort Adapter', () => {
     expect(harness.calls).toHaveLength(0)
   })
 
+  it('restores physical provider models independently of the router selection', async () => {
+    const harness = makeHarness()
+    const routerDecision = { model: 'deepseek-v4-pro', tier: 'c2', decision_id: 'decision-A' }
+    const activities = [
+      { phase: 'requesting', model: 'deepseek-v4-pro' },
+      { phase: 'fallback', model: 'kimi-k2.7-code' },
+      { phase: 'retrying', model: 'kimi-k2.7-code', retry_attempt: 1 },
+      { phase: 'fallback', model: 'deepseek-v4-pro-0813' },
+      { phase: 'reasoning', model: 'deepseek-v4-pro-0813' },
+      { phase: 'reasoning', heartbeat: true },
+    ]
+    harness.results.set(SESSIONS_MESSAGES_SNAPSHOT_METHOD, snapshotResult({ events: [
+      { event: 'session.event.router_decision', payload: routerDecision },
+      ...activities.map(payload => ({ event: 'session.event.provider_activity', payload })),
+    ] }))
+    const lease = createV4SessionReadPort(harness.rpc).open(openRequest())
+    try {
+      const live = await lease.live
+      expect(live.snapshot?.events).toEqual([
+        { semanticKind: 'router-decision', payload: routerDecision },
+        ...activities.map(payload => ({ semanticKind: 'provider-activity', payload })),
+      ])
+    } finally {
+      await lease.close()
+    }
+  })
+
   it.each([
     {
       name: 'an empty canonical key',
@@ -506,6 +535,21 @@ describe('v4 SessionReadPort Adapter', () => {
       kind: 'unavailable',
       retryable: true,
     } satisfies Partial<SessionReadFailure>)
+  })
+
+  it.each([
+    ['HISTORY_CURSOR_INVALID', 'invalid'],
+    ['history_cursor_invalidated', 'stale'],
+  ] as const)('maps %s to reload-latest cursor recovery', (code, reason) => {
+    const cause = Object.assign(new Error('cursor rejected'), { code })
+
+    expect(mapSessionReadError(cause)).toMatchObject({
+      name: 'SessionReadHistoryCursorError',
+      code: 'history-cursor-rejected',
+      reason,
+      recovery: 'reload-latest',
+      cause,
+    } satisfies Partial<SessionReadHistoryCursorError>)
   })
 
   it('queues critical frames in order while live, metadata and history settle independently', async () => {

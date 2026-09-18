@@ -15,9 +15,9 @@
     "compatibility": "exact-json-tree"
   },
   "x-opensquilla-codegen": {
-    "python": { "tool": "datamodel-code-generator", "version": "0.75.1", "target": "pydantic_v2.BaseModel" },
-    "typescript": { "tool": "json-schema-to-typescript", "version": "15.0.4" },
-    "runtimeValidation": { "tool": "ajv", "version": "8.17.1", "mode": "standalone-adapter-only" }
+    "python": { "tool": "datamodel-code-generator", "version": "0.81.0", "target": "pydantic_v2.BaseModel" },
+    "typescript": { "tool": "json-schema-to-typescript", "version": "16.0.0" },
+    "runtimeValidation": { "tool": "ajv", "version": "8.20.0", "mode": "standalone-adapter-only" }
   },
   "x-opensquilla-method": {
     "name": "sessions.reset",
@@ -36,8 +36,6 @@
       { "code": "NOT_FOUND" },
       { "code": "UNAUTHORIZED" },
       { "code": "PERMISSION_DENIED" },
-      { "code": "FLUSH_UNAVAILABLE", "retryable": true, "details": true },
-      { "code": "FLUSH_DISK_ERROR", "retryable": true, "details": true },
       { "code": "STORAGE_BUSY", "retryable": true, "retryAfterMs": true, "details": true },
       { "code": "INTERNAL_ERROR" }
     ]
@@ -73,8 +71,7 @@
         "rotated": { "type": "boolean" },
         "previous_session_id": { "type": "string" },
         "session_id": { "type": "string" },
-        "epoch": { "type": "integer" },
-        "flush_receipt": { "type": ["object", "null"], "additionalProperties": true }
+        "epoch": { "type": "integer" }
       }
     },
     "RpcError": {

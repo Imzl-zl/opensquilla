@@ -232,6 +232,78 @@ async def test_validated_workspace_returns_canonical_guard(
     )
 
 
+async def test_open_workspace_preserves_decomposed_unicode_path(
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+    tmp_path: Path,
+) -> None:
+    ctx, storage = workspace_ctx
+    project = tmp_path / "Cafe\u0301"
+    project.mkdir()
+
+    opened = await _handle_workspaces_open(
+        {"path": str(project), "trusted": True}, ctx,
+    )
+
+    assert opened["workspace"]["available"] is True
+    assert opened["workspace"]["path"] == str(project.resolve())
+    resolved = await resolve_validated_project_workspace(storage, opened["workspace"]["id"])
+    assert Path(resolved.canonical_path).samefile(project)
+
+
+async def test_unicode_workspace_reopen_preserves_existing_binding_after_restart(
+    workspace_ctx: tuple[RpcContext, SessionStorage],
+    tmp_path: Path,
+) -> None:
+    ctx, storage = workspace_ctx
+    composed = tmp_path / "Caf\u00e9"
+    decomposed = tmp_path / "Cafe\u0301"
+    composed.mkdir()
+    decomposed.mkdir(exist_ok=True)
+    if composed.samefile(decomposed):
+        pytest.skip("filesystem treats Unicode normalization variants as the same directory")
+
+    # Seed the path/key spelling written by older versions. Its original
+    # selection cannot be reconstructed, so opening NFD must not rebind it.
+    old_path = str(composed.resolve())
+    old = await storage.create_or_restore_project_workspace(
+        path=old_path,
+        path_key=os.path.normcase(old_path).replace("\\", "/"),
+        display_name=decomposed.name,
+        trusted_at=1,
+    )
+    old_session = SessionNode(
+        session_key="agent:main:webchat:old-unicode-project",
+        workspace_id=old.workspace_id,
+    )
+    await storage.upsert_session(old_session)
+
+    opened = await _handle_workspaces_open(
+        {"path": str(decomposed), "trusted": True}, ctx,
+    )
+    new_id = opened["workspace"]["id"]
+    assert new_id != old.workspace_id
+    assert opened["workspace"]["path"] == str(decomposed.resolve())
+    await storage.close()
+    await storage.connect()
+
+    reopened = await _handle_workspaces_open(
+        {"path": str(decomposed), "trusted": True}, ctx,
+    )
+    assert reopened["workspace"]["id"] == new_id
+    old_reopened = await _handle_workspaces_open(
+        {"path": str(composed), "trusted": True}, ctx,
+    )
+    assert old_reopened["workspace"]["id"] == old.workspace_id
+    assert await storage.get_project_workspace(old.workspace_id) == old
+    retained = await storage.get_session(old_session.session_key)
+    assert retained is not None
+    assert retained.session_id == old_session.session_id
+    assert retained.workspace_id == old.workspace_id
+    assert (await resolve_validated_project_workspace(storage, new_id)).canonical_path == str(
+        decomposed.resolve()
+    )
+
+
 @pytest.mark.asyncio
 async def test_validated_workspace_rejects_not_found(
     workspace_ctx: tuple[RpcContext, SessionStorage],
@@ -1211,11 +1283,6 @@ async def test_history_delete_orders_all_fences_drains_and_identity_eviction(
         for session in sessions
     }
 
-    async def drain_turn_runner(keys: list[str]) -> None:
-        assert keys == sorted(session.session_key for session in sessions)
-        assert {"background", "runtime", "direct"} <= active_fences
-        assert all(lock.locked() for lock in locks.values())
-        order.append("turn-drain")
 
     async def drain_router(keys: list[str]) -> None:
         assert keys == sorted(session.session_key for session in sessions)
@@ -1226,7 +1293,6 @@ async def test_history_delete_orders_all_fences_drains_and_identity_eviction(
     ctx.task_runtime = SimpleNamespace(quiesce_sessions=runtime_fence)
     ctx.turn_runner = SimpleNamespace(
         get_session_lock=locks.__getitem__,
-        drain_session_background_writes=drain_turn_runner,
     )
     evicted: list[tuple[str, str | None]] = []
 
@@ -1295,7 +1361,6 @@ async def test_history_delete_orders_all_fences_drains_and_identity_eviction(
     assert order.index("background:enter") < order.index("runtime:enter")
     assert order.index("runtime:enter") < order.index("direct:enter")
     assert order.index("router-drain") < order.index("delete")
-    assert order.index("turn-drain") < order.index("delete")
     assert max(order.index(f"evict:{key}") for key in sorted_keys) < order.index(
         "direct:exit"
     )
@@ -1367,7 +1432,6 @@ async def test_history_delete_repeated_cancellation_waits_for_whole_fenced_opera
     ctx.task_runtime = SimpleNamespace(quiesce_sessions=runtime_fence)
     ctx.turn_runner = SimpleNamespace(
         get_session_lock=lambda _key: lock,
-        drain_session_background_writes=AsyncMock(return_value=None),
     )
     ctx.session_manager.evict_session_runtime_state = lambda *_args, **_kwargs: None
     registry = SimpleNamespace(quiesce_sessions=direct_fence)
@@ -1524,13 +1588,10 @@ async def test_history_delete_real_quiescers_leave_no_late_rows_after_cancellati
     )
     manager.attach_task_runtime(runtime)
 
-    async def no_turn_background_writes(_keys: list[str]) -> None:
-        return
 
     ctx.task_runtime = runtime
     ctx.turn_runner = SimpleNamespace(
         get_session_lock=runtime._get_session_lock_for_turn,
-        drain_session_background_writes=no_turn_background_writes,
     )
     runtime_handle = await runtime.enqueue(
         RouteEnvelope(

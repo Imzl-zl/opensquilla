@@ -25,7 +25,8 @@ def _workflow(name: str) -> dict:
 
 
 def _trigger_keys(data: dict) -> set[str]:
-    triggers = data.get("on", {})
+    # PyYAML's YAML 1.1 reader also accepts the unquoted Actions `on` key as True.
+    triggers = data.get("on", data.get(True, {}))
     if triggers is None:
         return set()
     if isinstance(triggers, str):
@@ -169,6 +170,107 @@ def test_partial_queue_wiring_preserves_canary_gate_and_does_not_mint_root_evide
     )["if"]
 
 
+@pytest.mark.parametrize("workflow_name,job_name", [
+    ("windows-nsis-upgrade-regression.yml", "build"),
+    ("ci.yml", "desktop-check"),
+])
+def test_packaged_contract_probes_run_after_desktop_compilation(
+    workflow_name: str, job_name: str,
+) -> None:
+    job = _workflow(workflow_name)["jobs"][job_name]
+    # The helpers import compiled desktop modules. An earlier WebUI build does
+    # not satisfy that dependency on a fresh checkout.
+    commands = [
+        line.strip()
+        for step in job["steps"]
+        if step.get("working-directory") == "desktop/electron"
+        for line in step.get("run", "").splitlines()
+    ]
+    assert commands.count("npm run build") == 1
+    build_index = commands.index("npm run build")
+    for probe in (
+        "node scripts/test-packaged-first-send-cleanup.mjs",
+        "node --test scripts/test-packaged-first-send-evidence.mjs",
+    ):
+        assert commands.count(probe) == 1
+        assert build_index < commands.index(probe), f"{job_name}: {probe} needs desktop dist"
+
+
+def test_windows_acceptance_is_required_through_the_caller_and_all_native_jobs() -> None:
+    jobs = _workflow("ci.yml")["jobs"]
+    call = jobs["windows-nsis-regression"]
+    assert call["uses"] == "./.github/workflows/windows-nsis-upgrade-regression.yml"
+    assert call["needs"] == "plan-ci"
+    assert "needs.plan-ci.result == 'success'" in call["if"]
+    assert "'windows-nsis-regression'" in call["if"]
+    assert not call.get("continue-on-error")
+    gate = jobs["ci-result"]
+    assert "windows-nsis-regression" in gate["needs"]
+    step = next(s for s in gate["steps"] if s.get("name") == "Check required CI results")
+    assert step["env"]["RESULT_WINDOWS_NSIS"] == "${{ needs.windows-nsis-regression.result }}"
+
+    native = _workflow("windows-nsis-upgrade-regression.yml")
+    assert _trigger_keys(native) == {"workflow_call", "workflow_dispatch"}
+    assert "concurrency" not in native  # Caller owns cancellation, never cancel the caller.
+    result = native["jobs"]["acceptance-result"]
+    assert result["if"] == "always()"
+    assert set(result["needs"]) == {"build", "wheelhouse-security", "upgrade-and-start"}
+    for job in native["jobs"].values():
+        assert not job.get("continue-on-error")
+    guard = result["steps"][-1]
+    assert guard["env"] == {
+        "BUILD_RESULT": "${{ needs.build.result }}",
+        "WHEELHOUSE_RESULT": "${{ needs.wheelhouse-security.result }}",
+        "UPGRADE_RESULT": "${{ needs.upgrade-and-start.result }}",
+    }
+
+
+@pytest.mark.parametrize("failed_job", ["BUILD_RESULT", "WHEELHOUSE_RESULT", "UPGRADE_RESULT"])
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancelled", "skipped", "", "neutral"])
+def test_windows_acceptance_executes_fail_closed_aggregate(failed_job: str, outcome: str) -> None:
+    job = _workflow("windows-nsis-upgrade-regression.yml")["jobs"]["acceptance-result"]
+    guard = job["steps"][-1]
+    env = {**os.environ, "BUILD_RESULT": "success", "WHEELHOUSE_RESULT": "success",
+           "UPGRADE_RESULT": "success", failed_job: outcome}
+    result = subprocess.run(
+        [_bash_executable(), "-euo", "pipefail", "-c", guard["run"]],
+        env=env, capture_output=True, text=True,
+    )
+    assert (result.returncode == 0) is (outcome == "success"), result.stderr
+
+
+def test_cancelled_windows_acceptance_fails_even_with_successful_children() -> None:
+    job = _workflow("windows-nsis-upgrade-regression.yml")["jobs"]["acceptance-result"]
+    guard = next(s for s in job["steps"] if s.get("name") == "Reject cancelled acceptance")
+    assert guard["if"] == "${{ cancelled() }}"
+    assert not guard.get("continue-on-error")
+    result = subprocess.run(
+        [_bash_executable(), "-euo", "pipefail", "-c", guard["run"]],
+        env={**os.environ, "BUILD_RESULT": "success", "WHEELHOUSE_RESULT": "success",
+             "UPGRADE_RESULT": "success"},
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+
+
+def test_windows_acceptance_checks_out_and_verifies_the_callers_immutable_candidate() -> None:
+    jobs = _workflow("windows-nsis-upgrade-regression.yml")["jobs"]
+    for name in ("build", "wheelhouse-security", "upgrade-and-start"):
+        checkout = next(s for s in jobs[name]["steps"] if s.get("uses") == "actions/checkout@v4")
+        assert checkout["with"]["ref"] == "${{ github.sha }}"
+        assert checkout["with"]["persist-credentials"] is False
+    verify_name = "Verify fresh first interaction or retained upgrade and restart"
+    verify = next(s for s in jobs["upgrade-and-start"]["steps"] if s.get("name") == verify_name)
+    assert "(git rev-parse HEAD).Trim() -ne $env:GITHUB_SHA" in verify["run"]
+    assert "$manifest.sourceSha -ne (git rev-parse HEAD).Trim()" in verify["run"]
+    assert "$manifest.installerSha256" in verify["run"]
+    policy = json.loads(Path(".github/ci/trust-policy.v1.json").read_text(encoding="utf-8"))
+    assert {
+        ".github/workflows/windows-nsis-upgrade-regression.yml",
+        ".github/scripts/verify-nsis-upgrade-regression.py",
+    } <= set(policy["merge_critical_inputs"])
+
+
 def test_dependency_audit_runs_outside_planner_and_reuse_on_every_ci_trigger() -> None:
     workflow = _workflow("ci.yml")
     assert _trigger_keys(workflow) == {
@@ -251,7 +353,22 @@ def test_dependabot_keeps_major_version_updates_separate_from_weekly_compatible_
     }
     for item in config["updates"]:
         assert item["schedule"] == {"interval": "weekly"}
-        assert "ignore" not in item
+        if item["package-ecosystem"] == "uv":
+            assert item.get("ignore") == [{
+                "dependency-name": "datamodel-code-generator",
+                "update-types": [
+                    "version-update:semver-major",
+                    "version-update:semver-minor",
+                    "version-update:semver-patch",
+                ],
+            }]
+        elif item["directory"] == "/desktop/electron":
+            assert item.get("ignore") == [{
+                "dependency-name": "electron",
+                "update-types": ["version-update:semver-major"],
+            }]
+        else:
+            assert "ignore" not in item
         assert "target-branch" not in item
         groups = item["groups"]
         assert groups["compatible-updates"] == {
@@ -1634,6 +1751,7 @@ def test_ci_result_gate_covers_every_conditional_job_without_legacy_flags() -> N
         "managed-toolchain-artifacts",
         "queue-attestation",
         "main-canary",
+        "windows-nsis-regression",
     }
     assert gate_step["run"] == "python .github/scripts/check_ci_results.py"
     assert gate_step["env"]["RESULT_PLANNER"] == "${{ needs.plan-ci.result }}"
@@ -1680,8 +1798,45 @@ def test_ci_result_gate_covers_every_conditional_job_without_legacy_flags() -> N
         "RESULT_RELEASE",
         "RESULT_MANAGED_TOOLCHAIN_ARTIFACTS",
         "RESULT_SKILL_HUB",
+        "RESULT_WINDOWS_NSIS",
         "REQUIRED_SUITES",
     }
+
+
+@pytest.mark.parametrize("runner_os,name", [
+    ("macOS", "window-background-flow"),
+    ("macOS", "onboarding-flow"),
+    ("Linux", "window-background-flow"),
+    ("Windows", "window-background-flow"),
+])
+def test_desktop_case_arguments_work_with_nounset(
+    tmp_path: Path, runner_os: str, name: str,
+) -> None:
+    steps = _workflow("ci.yml")["jobs"]["desktop-recovery-e2e"]["steps"]
+    flow = next(s["run"] for s in steps
+                if s.get("name") == "Run compiled Desktop recovery flows")
+    definition = flow.split("classify_retryable_infrastructure_failure()", 1)[0]
+    definition = definition.replace("${{ matrix.shard }}", "profiles")
+    # Execute the real shell entry point while recording, rather than launching,
+    # its Node command. macOS's system Bash rejects empty arrays under nounset.
+    script = definition + '\nnode() { printf "%s\\n" "$@"; }\n'
+    script += 'run_case "$CASE_NAME" "scripts/synthetic-flow.mjs" 1\n'
+    shell = "/bin/bash" if sys.platform == "darwin" else _bash_executable()
+    result = subprocess.run(
+        [shell, "-euo", "pipefail", "-c", script],
+        env={**os.environ, "CI_REPORT_DIR": tmp_path.as_posix(),
+             "RUNNER_OS": runner_os, "CASE_NAME": name},
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    arguments = result.stdout.splitlines()
+    command = arguments[arguments.index("--") + 1:]
+    expected = ["xvfb-run", "-a"] if runner_os == "Linux" else []
+    expected += ["node", "scripts/synthetic-flow.mjs"]
+    if runner_os == "macOS" and name == "window-background-flow":
+        expected += ["--connection-faults", "--flow-control", "--idle-send",
+                     "--background-ms=65000"]
+    assert command == expected
 
 
 def test_desktop_recovery_e2e_runs_compiled_flows_on_all_release_platforms() -> None:
@@ -2141,12 +2296,16 @@ def test_ci_evidence_artifacts_are_replaceable_across_rerun_attempts() -> None:
 
 def test_webui_chat_recovery_runs_the_verified_dist_through_gateway() -> None:
     job = _workflow("ci.yml")["jobs"]["webui-chat-recovery"]
+    assert job["runs-on"] == "ubuntu-22.04"
     steps = job["steps"]
     download = next(
         step for step in steps if step.get("name") == "Download verified frontend artifact"
     )
     install_gateway = next(
         step for step in steps if step.get("name") == "Install Gateway dependencies"
+    )
+    sandbox = next(
+        step for step in steps if step.get("name") == "Install and verify Linux guest sandbox"
     )
     run = next(
         step
@@ -2165,6 +2324,16 @@ def test_webui_chat_recovery_runs_the_verified_dist_through_gateway() -> None:
     )
     assert stage["working-directory"] == "opensquilla-webui"
     assert steps.index(download) < steps.index(install_gateway) < steps.index(run)
+    assert steps.index(install_gateway) < steps.index(sandbox) < steps.index(run)
+    assert "if" not in sandbox
+    assert not sandbox.get("continue-on-error")
+    assert "apt-get install --yes bubblewrap" in sandbox["run"]
+    assert (
+        "bwrap --unshare-user --unshare-net --ro-bind / / --proc /proc /bin/true"
+        in sandbox["run"]
+    )
+    assert "probe_bwrap()" in sandbox["run"]
+    assert "not probe.available or not probe.supports_perms" in sandbox["run"]
     assert install_gateway["run"] == "uv sync --frozen"
     assert job["env"]["OPENSQUILLA_PLAYWRIGHT_MANAGE_WEBUI"] == "gateway"
     assert job["env"]["OPENSQUILLA_WEBUI_BASE_URL"].endswith(":18791")
@@ -2176,16 +2345,23 @@ def test_webui_chat_recovery_runs_the_verified_dist_through_gateway() -> None:
     }
     required_specs = {
         "assistant-activity.spec.ts",
+        "auth-connection-recovery.spec.ts",
+        "chat-send-lifecycle.spec.ts",
+        "chat-send-lifecycle.real.spec.ts",
         "composer-paste.spec.ts",
         "ensemble-new-task-legacy-turn.spec.ts",
         "goal-mode.spec.ts",
         "history-hydration.spec.ts",
+        "idle-chat-recovery.spec.ts",
         "new-task-ensemble-race.spec.ts",
         "plan-questionnaire-lifecycle.spec.ts",
+        "provider-error-experience.spec.ts",
+        "router-physical-model.spec.ts",
         "queue-steer.spec.ts",
         "session-created-card.spec.ts",
         "session-switch-transport.spec.ts",
         "share.spec.ts",
+        "user-message-newlines.spec.ts",
     }
     assert selected_specs == required_specs
     for spec in required_specs:

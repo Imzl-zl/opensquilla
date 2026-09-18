@@ -805,6 +805,47 @@
     }
   },
   "setup": {
+    "capacity": {
+      "customOpenAI": "Benutzerdefiniert · OpenAI-kompatibel",
+      "customAnthropic": "Benutzerdefiniert · Anthropic-kompatibel",
+      "partialSaved": "Gespeichert: {saved}. Nicht gespeichert: {pending}. Ungespeicherte Werte bleiben erhalten.",
+      "providerPartialSaved": "Der Anbieter wurde gespeichert. Die Modellgrenzen wurden nicht gespeichert; Ihre Eingaben bleiben erhalten.",
+      "backToRouting": "Zurück zum intelligenten Routing",
+      "editSharedEnsemble": "Gemeinsames Ensemble bearbeiten",
+      "sharedEnsemble": "C3 und das Modellensemble verwenden diese gemeinsame Zusammenstellung.",
+      "title": "Modelleinstellungen",
+      "forModel": "Modelleinstellungen — {model}",
+      "unknown": "Grenzen unbestätigt",
+      "contextWindow": "Kontextfenster",
+      "maxOutputTokens": "Maximale Ausgabelänge",
+      "scope": "Gilt überall, wo dieses Modell mit diesem Anbieter verwendet wird.",
+      "current": "Aktuell {value} Tokens · {source}",
+      "source": {
+        "catalog": "Modellkatalog",
+        "default": "Systemstandard",
+        "config": "Globale Konfiguration",
+        "override": "Manueller Wert"
+      },
+      "autoValue": "Automatisch ({value})",
+      "autoHint": "Leer lassen für Automatik; zum Überschreiben eine positive ganze Zahl eingeben.",
+      "requestHint": "Ausgabegrenze des Modells; tatsächliche Antworten können kürzer sein.",
+      "localHint": "Der Wert muss zum konfigurierten Kontext Ihres lokalen Modellservers passen.",
+      "serverControlled": "Die Ausgabelänge wird vom Server gesteuert.",
+      "restore": "Automatische Werte wiederherstellen",
+      "positiveInteger": "Positive ganze Zahl eingeben oder für Automatik leer lassen.",
+      "upgrade": "Aktualisieren Sie das Gateway, um die Modellgrenzen anzuzeigen und zu bearbeiten. Bestehende Modelleinstellungen bleiben verfügbar.",
+      "loadFailed": "Modellgrenzen konnten nicht geladen werden. Ihre Änderungen bleiben erhalten.",
+      "retry": "Erneut versuchen",
+      "draftHint": "Nach Fertig auf der Einstellungsseite Änderungen speichern wählen.",
+      "done": "Fertig",
+      "invalid": "Prüfen Sie die Modellgrenzen vor dem Speichern.",
+      "saved": "Modellgrenzen gespeichert.",
+      "saveFailed": "Modellgrenzen konnten nicht gespeichert werden. Ungespeicherte Werte bleiben erhalten.",
+      "unknownHint": "Eine oder beide Modellgrenzen sind unbestätigt. Systemstandardwerte werden verwendet; Sie können die Grenzen hier einstellen.",
+      "automaticSource": "Automatisch · {source}",
+      "unsaved": "Nicht gespeichert",
+      "effective": "Wirksame Grenze: {value} Tokens"
+    },
     "cli": {
       "advancedTitle": "Erweitert · integrierte CLI",
       "hintBundled": "Diese Befehle verwenden die in der App integrierte CLI; zum Ausführen in ein Terminal einfügen.",
@@ -1255,7 +1296,7 @@
       "openrouterFixedDesc": "Wenn der Modelldienst {provider} nutzt, verwendet Ensemble-Routing vier Vorschlagsmodelle und einen Aggregator.",
       "openrouterFixedProposer": "Vorschlagsmodell",
       "openrouterFixedAggregator": "Aggregator",
-      "credentialReady": "Verbunden",
+      "credentialReady": "Zugangsdaten verfügbar",
       "credentialNeeded": "{provider}-Zugangsdaten erforderlich",
       "credentialMissingEnv": "{envKey} erforderlich",
       "credentialUnknown": "Zugangsdaten nicht geprüft",
@@ -1286,7 +1327,7 @@
       "aggregatorNote": "Verschmilzt alle Entwürfe zur endgültigen Antwort; einziges Mitglied mit Tool-Zugriff",
       "aggregatorSectionLabel": "Aggregator",
       "aggregatorSectionDesc": "Genau ein Aggregator erzeugt die endgültige Antwort. Wählen Sie das stärkste Modell der Aufstellung.",
-      "aggregatorInheritedNote": "Kein Aggregator zugewiesen — das aktuelle Chat-Modell verschmilzt die Entwürfe",
+      "aggregatorInheritedNote": "Folgt dem aktuellen Modell",
       "proposerSectionLabel": "Entwürfe",
       "proposerRoleLabel": "Entwurf",
       "aggregatorRoleLabel": "Aggregation",
@@ -1304,7 +1345,7 @@
       "replaceCandidateConfirm": "Ersetzen",
       "candidateDuplicate": "Dieses Modell ist bereits in der Liste der Entwurfsmodelle enthalten.",
       "addProposer": "Entwurf hinzufügen",
-      "chooseAggregator": "Aggregator auswählen",
+      "chooseAggregator": "Modell ändern",
       "aggregatorPickerTitle": "Aggregator auswählen",
       "aggregatorFromProposers": "Vorhandenen Entwurf verwenden",
       "aggregatorOtherModel": "Oder ein anderes Modell auswählen",
@@ -1323,7 +1364,8 @@
       "proposerRetriesDesc": "Nur wiederholbare Fehler; die erste Anfrage zählt nicht als Wiederholung.",
       "proposerRetriesOption": "Höchstens {count} Wiederholungen nach der ersten Anfrage",
       "runtimeLimitsLabel": "Zeitlimits",
-      "runtimeLimits": "Entwürfe insgesamt {proposerTimeout}s · Aggregator-Leerlauf zwischen Anbieterereignissen {aggregatorTimeout}s (konfiguriert {configuredAggregatorTimeout}s) · separates Gesamtlimit der Runde"
+      "runtimeLimits": "Entwürfe insgesamt {proposerTimeout}s · Aggregator-Leerlauf zwischen Anbieterereignissen {aggregatorTimeout}s (konfiguriert {configuredAggregatorTimeout}s) · separates Gesamtlimit der Runde",
+      "fallbackModelLabel": "Fallback-Modell"
     },
     "behavior": {
       "title": "Sitzungsverhalten",
@@ -1603,6 +1645,8 @@
       "tokenLabel": "Token",
       "optional": "optional",
       "tokenDesc": "Bearer-Token für Gateways, die eine Authentifizierung erfordern. Wird nur in diesem Tab gespeichert.",
+      "tokenRequired": "Token erforderlich",
+      "reasonTokenRequired": "Authentifizierung fehlgeschlagen. Automatische Versuche sind pausiert. Geben Sie ein gültiges Gateway-Token ein und wählen Sie Verbinden.",
       "reconnect": "Erneut verbinden",
       "connect": "Verbinden",
       "disconnect": "Trennen"
@@ -1822,7 +1866,9 @@
       "dataMaintenanceAria": "Datenpflege öffnen",
       "runTraceLabel": "Run-Trace-Schublade in Protokollen",
       "runTraceDesc": "Macht Protokollzeilen interaktiv und öffnet eine zeilenweise Detailschublade für Knotenschritte in der Protokollansicht.",
-      "runTraceAria": "Run-Trace-Schublade in Protokollen (wird nach dem Neuladen wirksam)"
+      "runTraceAria": "Run-Trace-Schublade in Protokollen (wird nach dem Neuladen wirksam)",
+      "configFileLabel": "Konfigurationsdatei",
+      "configFileDesc": "Weitere Optionen lassen sich in der Konfigurationsdatei anpassen."
     },
     "privacy": {
       "statusDisabledByEnv": "Durch eine Umgebungseinstellung deaktiviert.",
@@ -2018,10 +2064,98 @@
           "label": "Entprellfenster (s)"
         },
         "transport_name": {
+          "label": "Verbindungsart",
           "choices": {
             "polling": "Polling",
             "webhook": "Webhook"
           }
+        },
+        "access_token": {
+          "label": "Zugriffs-Token"
+        },
+        "agent_id_int": {
+          "label": "Agent-ID (int)"
+        },
+        "app_password": {
+          "label": "App-Passwort"
+        },
+        "app_token": {
+          "label": "Token auf App-Ebene (xapp-...)"
+        },
+        "application_id": {
+          "label": "Anwendungs-ID"
+        },
+        "cool_app_code": {
+          "label": "Cool App Code"
+        },
+        "corp_id": {
+          "label": "Unternehmens-ID"
+        },
+        "default_channel_id": {
+          "label": "Standardkanal-ID"
+        },
+        "device_id": {
+          "label": "Geräte-ID"
+        },
+        "domain": {
+          "label": "Domain"
+        },
+        "drop_pending_updates": {
+          "label": "Ausstehende Updates verwerfen"
+        },
+        "encoding_aes_key": {
+          "label": "Encoding-AES-Schlüssel"
+        },
+        "encrypt_key": {
+          "label": "Verschlüsselungsschlüssel"
+        },
+        "encryption": {
+          "label": "Verschlüsselung"
+        },
+        "gateway_url": {
+          "label": "Gateway-URL"
+        },
+        "intents": {
+          "label": "Intents-Bitmaske"
+        },
+        "password": {
+          "label": "Passwort"
+        },
+        "poll_idle_sleep_s": {
+          "label": "Polling-Leerlaufwartezeit (s)"
+        },
+        "poll_limit": {
+          "label": "Polling-Limit"
+        },
+        "poll_timeout_s": {
+          "label": "Polling-Timeout (s)"
+        },
+        "reply_in_thread": {
+          "label": "Im Thread antworten"
+        },
+        "robot_code": {
+          "label": "Roboter-Code"
+        },
+        "slack_channel_id": {
+          "label": "Standardkanal-ID"
+        },
+        "token": {
+          "label": "Bot-Token (xoxb-...)"
+        },
+        "verification_token": {
+          "label": "Verifizierungs-Token"
+        },
+        "webhook_path": {
+          "label": "Webhook-Pfad"
+        },
+        "webhook_secret_token": {
+          "label": "Webhook-Geheimtoken"
+        },
+        "webhook_url": {
+          "label": "Webhook-URL (nur Webhook)"
+        },
+        "websocket_url": {
+          "label": "WebSocket-URL"
         }
       },
       "groups": {
@@ -2457,6 +2591,13 @@
       "enable": "Aktivieren",
       "disable": "Deaktivieren",
       "notReported": "Nicht gemeldet",
+      "transport": {
+        "polling": "Polling",
+        "webhook": "Webhook",
+        "websocket": "WebSocket",
+        "http_sync": "HTTP-Sync",
+        "mixed": "Mehrere Verbindungsarten"
+      },
       "tabs": {
         "overview": "Übersicht",
         "pairings": "Mitglieder",
@@ -3520,6 +3661,7 @@
       "autoPauseLabel": "Automatische Pause",
       "states": { "off": "Aus", "waiting": "Wartet auf stabilen Präfix", "scheduled": "Geplant", "probing": "Prüfung läuft", "paused": "Leerlauflimit erreicht; wartet auf nächste Nachricht", "stopped": "Nach Fehlschlag gestoppt" }
     },
+    "sendPending": "Wird gesendet…",
     "send": "Senden",
     "sendQueues": "Senden (wird nach der aktuellen Antwort in die Warteschlange gestellt)",
     "sendSteers": "Senden (lenkt die aktuelle Antwort jetzt)",
@@ -3679,6 +3821,24 @@
     "subagentPrefix": "Subagent: ",
     "subagentCompletion": "Subagent-Abschluss",
     "turnFailed": "Durchlauf fehlgeschlagen",
+    "copyDiagnosticId": "Diagnose-ID kopieren",
+    "copiedDiagnosticId": "Diagnose-ID kopiert",
+    "copyDiagnosticFailed": "Kopieren fehlgeschlagen. Markieren und kopieren Sie die ID oben manuell.",
+    "partialFailureNote": "Die Antwort oben bleibt erhalten, aber dieser Durchlauf endete mit einem Fehler.",
+    "providerFailure": {
+      "rate_limited": "Der Modellanbieter begrenzt die Anfragerate. Versuchen Sie es später erneut.",
+      "provider_overloaded": "Der Modellanbieter ist vorübergehend ausgelastet. Versuchen Sie es später erneut.",
+      "auth_invalid": "Der Modellanbieter hat die Zugangsdaten abgelehnt. Prüfen Sie diese in den Einstellungen.",
+      "context_overflow": "Die Anfrage überschreitet das Kontextfenster. Kürzen Sie sie oder wählen Sie ein Modell mit größerem Kontext.",
+      "unsupported_feature": "Der Modellanbieter unterstützt diese Anfrage nicht. Prüfen Sie die Fähigkeiten des gewählten Modells.",
+      "insufficient_credits": "Das Guthaben beim Anbieter reicht nicht aus. Prüfen Sie Guthaben oder Abrechnungseinstellungen.",
+      "model_not_found": "Das konfigurierte Modell ist nicht verfügbar. Prüfen Sie Modellname und Zugriffsrechte.",
+      "transport_transient": "Die Verbindung zum Modellanbieter wurde unterbrochen. Prüfen Sie Ihre Verbindung und den Anbieterstatus.",
+      "policy_refusal": "Der Anbieter hat die Anfrage aufgrund seiner Richtlinien abgelehnt. Prüfen Sie Anfrage und Richtlinien.",
+      "empty_response": "Der Modellanbieter hat keine Antwort geliefert. Versuchen Sie es erneut oder wählen Sie ein anderes Modell.",
+      "malformed_response": "Der Modellanbieter hat eine ungültige Antwort geliefert. Versuchen Sie es erneut oder wählen Sie ein anderes Modell.",
+      "bad_request": "Der Modellanbieter hat die Anfrage abgelehnt. Prüfen Sie Anfrage und Modelleinstellungen."
+    },
     "restartInterruptedTitle": "Ein Neustart von OpenSquilla hat diese Aufgabe unterbrochen.",
     "restartInterruptedGuidance": "Diese Aufgabe wird nicht automatisch fortgesetzt. Prüfen Sie vorhandene Ergebnisse oder Werkzeugaktionen und bearbeiten Sie anschließend die ursprüngliche Anfrage oder setzen Sie die Unterhaltung fort.",
     "usageAccountingBlockedTitle": "Nutzungserfassung vorübergehend nicht verfügbar",
@@ -3729,6 +3889,8 @@
     "aiModelEnsembleRouter": "AI-Modell-Ensemble-Router",
     "routerFx": {
       "selectedModel": "Router hat {model} ausgewählt",
+      "executionModel": "Aktuell ausgeführtes Modell: {model}",
+      "executionModelCompleted": "Ausgeführt von {model}",
       "ensembleModel": "Multi-Modell-Fusion",
       "ensembleSelecting": "AI-Modell-Ensemble-Router · Kandidaten werden gewählt",
       "ensembleHandedOff": "AI-Modell-Ensemble-Router · an Agent übergeben",
@@ -4151,6 +4313,9 @@
       },
       "clearQueue": "Warteschlange leeren",
       "removeMessage": "Ausstehende Nachricht {index} entfernen",
+      "offlineRejected": "Die Nachricht wurde nicht angenommen. Bearbeite sie, um es erneut zu versuchen, oder entferne sie.",
+      "offlineQueued": "Lokal gespeichert. Die Nachricht wird gesendet, sobald die Verbindung wiederhergestellt ist.",
+      "identityChanged": "Die Verbindungsidentität hat sich geändert. Verbinde dich zum Senden wieder mit dem ursprünglichen Gateway und Konto.",
       "annotationUpgradeRequired": "Diese Anmerkung verwendet den alten Editor. Bearbeiten Sie die Nachricht und wählen Sie die Seite vor dem Senden erneut aus."
     },
     "metaRuns": {
@@ -4341,6 +4506,7 @@
       "waitCompactionBeforeCommand": "Warten Sie auf die Kontextverdichtung, bevor Sie {command} ausführen.",
       "waitResponseBeforeCommand": "Warten Sie auf die aktuelle Antwort, bevor Sie {command} ausführen.",
       "promptAnnotationBusy": "Warten Sie, bis die aktuelle Antwort abgeschlossen ist, bevor Sie Artefaktanweisungen senden.",
+      "offlineQueueFailed": "Die Nachricht konnte nicht zur Warteschlange hinzugefügt werden. Dein Entwurf wurde beibehalten.",
       "queueFull": "Warteschlange ist voll — warten Sie, bis die aktuelle Antwort abgeschlossen ist.",
       "queuePersistenceUnavailable": "Behalten Sie diese Nachricht im Eingabefeld, bis die Verzweigung abgeschlossen ist; dauerhafte Wiederherstellung ist nicht verfügbar.",
       "messageStillSaving": "Diese Nachricht ist noch nicht gespeichert — versuchen Sie es gleich erneut.",

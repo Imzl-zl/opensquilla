@@ -805,6 +805,47 @@
     }
   },
   "setup": {
+    "capacity": {
+      "customOpenAI": "カスタム · OpenAI 互換",
+      "customAnthropic": "カスタム · Anthropic 互換",
+      "partialSaved": "保存済み：{saved}。未保存：{pending}。未保存の入力は保持されています。",
+      "providerPartialSaved": "プロバイダーは保存されました。モデル上限は保存されていません。入力は保持されています。",
+      "backToRouting": "スマートルーティングに戻る",
+      "editSharedEnsemble": "共有アンサンブルを編集",
+      "sharedEnsemble": "C3 とモデル融合はこの構成を共有します。",
+      "title": "モデル設定",
+      "forModel": "モデル設定 — {model}",
+      "unknown": "上限未確認",
+      "contextWindow": "コンテキストウィンドウ",
+      "maxOutputTokens": "最大出力長",
+      "scope": "このプロバイダーで同じモデルを使用するすべての場所に適用されます。",
+      "current": "現在 {value} トークン · {source}",
+      "source": {
+        "catalog": "モデルカタログ",
+        "default": "システムの既定値",
+        "config": "全体設定",
+        "override": "手動設定"
+      },
+      "autoValue": "自動（{value}）",
+      "autoHint": "空欄で自動値を使用します。変更するには正の整数を入力してください。",
+      "requestHint": "モデルの出力上限です。実際の応答は短くなる場合があります。",
+      "localHint": "ローカルモデルサーバーのコンテキスト設定と一致させてください。",
+      "serverControlled": "出力の長さはサーバーが制御します。",
+      "restore": "自動設定に戻す",
+      "positiveInteger": "正の整数を入力するか、空欄にして自動値を使用してください。",
+      "upgrade": "モデル上限を表示・編集するには Gateway を更新してください。既存のモデル設定は引き続き利用できます。",
+      "loadFailed": "モデル上限を読み込めませんでした。変更内容は保持されています。",
+      "retry": "再試行",
+      "draftHint": "完了後、設定ページの「変更を保存」で反映されます。",
+      "done": "完了",
+      "invalid": "保存する前にモデル上限の値を確認してください。",
+      "saved": "モデル上限を保存しました。",
+      "saveFailed": "モデル上限を保存できませんでした。未保存の入力は保持されています。",
+      "unknownHint": "モデル上限の一方または両方が未確認です。既定値が使用されています。ここで上限を設定できます。",
+      "automaticSource": "自動 · {source}",
+      "unsaved": "未保存",
+      "effective": "実際の上限：{value} トークン"
+    },
     "cli": {
       "advancedTitle": "詳細 · 内蔵 CLI",
       "hintBundled": "これらのコマンドはアプリ内蔵の CLI を使用します。ターミナルに貼り付けて実行できます。",
@@ -1255,7 +1296,7 @@
       "openrouterFixedDesc": "モデルサービスで {provider} を使用する場合、集約ルーティングは 4 つの提案モデルと 1 つの集約モデルを使います。",
       "openrouterFixedProposer": "提案モデル",
       "openrouterFixedAggregator": "集約モデル",
-      "credentialReady": "接続済み",
+      "credentialReady": "認証情報あり",
       "credentialNeeded": "{provider} の認証情報が必要",
       "credentialMissingEnv": "{envKey} が必要",
       "credentialUnknown": "認証情報は未確認",
@@ -1286,7 +1327,7 @@
       "aggregatorNote": "全ドラフトを集約して最終回答を生成。ツールを呼び出せる唯一のメンバー",
       "aggregatorSectionLabel": "集約モデル",
       "aggregatorSectionDesc": "最終回答を生成する集約モデルは 1 つだけです。編成内で最も強力なモデルを選んでください。",
-      "aggregatorInheritedNote": "集約モデル未指定 — 現在のチャットモデルがドラフトを集約します",
+      "aggregatorInheritedNote": "現在のモデルを使用",
       "proposerSectionLabel": "提案モデル",
       "proposerRoleLabel": "提案",
       "aggregatorRoleLabel": "集約",
@@ -1304,7 +1345,7 @@
       "replaceCandidateConfirm": "置き換え",
       "candidateDuplicate": "このモデルは提案モデルの一覧に既にあります。",
       "addProposer": "提案モデルを追加",
-      "chooseAggregator": "集約モデルを選択",
+      "chooseAggregator": "モデルを変更",
       "aggregatorPickerTitle": "集約モデルを選択",
       "aggregatorFromProposers": "既存の提案モデルから選択",
       "aggregatorOtherModel": "または別のモデルを選択",
@@ -1323,7 +1364,8 @@
       "proposerRetriesDesc": "再試行可能な失敗のみ。最初のリクエストは再試行に含みません。",
       "proposerRetriesOption": "最初のリクエスト後に最大 {count} 回再試行",
       "runtimeLimitsLabel": "制限時間",
-      "runtimeLimits": "提案モデルは合計 {proposerTimeout} 秒 · 集約モデルはプロバイダーイベント間のアイドル {aggregatorTimeout} 秒（設定値 {configuredAggregatorTimeout} 秒）· ターン全体の期限は別管理"
+      "runtimeLimits": "提案モデルは合計 {proposerTimeout} 秒 · 集約モデルはプロバイダーイベント間のアイドル {aggregatorTimeout} 秒（設定値 {configuredAggregatorTimeout} 秒）· ターン全体の期限は別管理",
+      "fallbackModelLabel": "フォールバックモデル"
     },
     "behavior": {
       "title": "セッションの動作",
@@ -1603,6 +1645,8 @@
       "tokenLabel": "トークン",
       "optional": "任意",
       "tokenDesc": "認証が必要なゲートウェイ向けのベアラートークンです。このタブにのみ保存されます。",
+      "tokenRequired": "トークンが必要です",
+      "reasonTokenRequired": "認証に失敗しました。自動再試行を一時停止しました。有効なゲートウェイトークンを入力し、接続を選択してください。",
       "reconnect": "再接続",
       "connect": "接続",
       "disconnect": "切断"
@@ -1822,7 +1866,9 @@
       "dataMaintenanceAria": "データメンテナンスを開く",
       "runTraceLabel": "ログの実行トレースドロワー",
       "runTraceDesc": "ログ行を操作可能にし、ログビューで行ごとのノードステップ詳細ドロワーを開きます。",
-      "runTraceAria": "ログの実行トレースドロワー（再読み込み後に有効）"
+      "runTraceAria": "ログの実行トレースドロワー（再読み込み後に有効）",
+      "configFileLabel": "設定ファイル",
+      "configFileDesc": "その他のオプションは設定ファイルで変更できます。"
     },
     "privacy": {
       "statusDisabledByEnv": "環境設定により無効になっています。",
@@ -2018,10 +2064,98 @@
           "label": "デバウンス期間（秒）"
         },
         "transport_name": {
+          "label": "接続方式",
           "choices": {
             "polling": "ポーリング",
             "webhook": "Webhook"
           }
+        },
+        "access_token": {
+          "label": "アクセストークン"
+        },
+        "agent_id_int": {
+          "label": "エージェント ID（整数）"
+        },
+        "app_password": {
+          "label": "アプリパスワード"
+        },
+        "app_token": {
+          "label": "アプリレベルトークン（xapp-...）"
+        },
+        "application_id": {
+          "label": "アプリケーション ID"
+        },
+        "cool_app_code": {
+          "label": "Cool App Code"
+        },
+        "corp_id": {
+          "label": "企業 ID"
+        },
+        "default_channel_id": {
+          "label": "デフォルトチャンネル ID"
+        },
+        "device_id": {
+          "label": "デバイス ID"
+        },
+        "domain": {
+          "label": "ドメイン"
+        },
+        "drop_pending_updates": {
+          "label": "未処理のアップデートを破棄"
+        },
+        "encoding_aes_key": {
+          "label": "Encoding AES キー"
+        },
+        "encrypt_key": {
+          "label": "暗号化キー"
+        },
+        "encryption": {
+          "label": "暗号化方式"
+        },
+        "gateway_url": {
+          "label": "ゲートウェイ URL"
+        },
+        "intents": {
+          "label": "Intents ビットマスク"
+        },
+        "password": {
+          "label": "パスワード"
+        },
+        "poll_idle_sleep_s": {
+          "label": "ポーリングアイドル待機（秒）"
+        },
+        "poll_limit": {
+          "label": "1回のポーリング取得上限"
+        },
+        "poll_timeout_s": {
+          "label": "ポーリングタイムアウト（秒）"
+        },
+        "reply_in_thread": {
+          "label": "スレッドで返信"
+        },
+        "robot_code": {
+          "label": "ロボットコード"
+        },
+        "slack_channel_id": {
+          "label": "デフォルトチャンネル ID"
+        },
+        "token": {
+          "label": "ボットトークン（xoxb-...）"
+        },
+        "verification_token": {
+          "label": "検証トークン"
+        },
+        "webhook_path": {
+          "label": "Webhook パス"
+        },
+        "webhook_secret_token": {
+          "label": "Webhook シークレットトークン"
+        },
+        "webhook_url": {
+          "label": "Webhook URL（Webhook のみ）"
+        },
+        "websocket_url": {
+          "label": "WebSocket URL"
         }
       },
       "groups": {
@@ -2457,6 +2591,13 @@
       "enable": "有効化",
       "disable": "無効化",
       "notReported": "報告なし",
+      "transport": {
+        "polling": "ポーリング",
+        "webhook": "Webhook",
+        "websocket": "WebSocket",
+        "http_sync": "HTTP同期",
+        "mixed": "複数の接続方式"
+      },
       "tabs": {
         "overview": "概要",
         "pairings": "メンバー",
@@ -3520,6 +3661,7 @@
       "autoPauseLabel": "自動一時停止",
       "states": { "off": "オフ", "waiting": "安定したプレフィックスを待機", "scheduled": "予定済み", "probing": "プローブ中", "paused": "アイドル上限に到達；次のメッセージを待機中", "stopped": "失敗後に停止" }
     },
+    "sendPending": "送信中…",
     "send": "送信",
     "sendQueues": "送信（現在の応答後にキューへ追加）",
     "sendSteers": "送信（現在の応答を今すぐ誘導）",
@@ -3679,6 +3821,24 @@
     "subagentPrefix": "サブエージェント: ",
     "subagentCompletion": "サブエージェントの完了",
     "turnFailed": "ターンが失敗しました",
+    "copyDiagnosticId": "診断番号をコピー",
+    "copiedDiagnosticId": "診断番号をコピーしました",
+    "copyDiagnosticFailed": "コピーできませんでした。上の番号を選択して手動でコピーしてください。",
+    "partialFailureNote": "上の回答は保持されていますが、このターンはエラーで終了しました。",
+    "providerFailure": {
+      "rate_limited": "モデル提供元がリクエストを制限しています。しばらくしてから再試行してください。",
+      "provider_overloaded": "モデル提供元が一時的に混雑しています。しばらくしてから再試行してください。",
+      "auth_invalid": "モデル提供元が認証情報を拒否しました。設定で提供元の認証情報を確認してください。",
+      "context_overflow": "リクエストがモデルのコンテキスト長を超えています。短くするか、より長いコンテキストに対応するモデルを選んでください。",
+      "unsupported_feature": "モデル提供元はこのリクエストに対応していません。選択したモデルの機能を確認してください。",
+      "insufficient_credits": "提供元アカウントの残高が不足しています。残高または課金設定を確認してください。",
+      "model_not_found": "設定されたモデルは利用できません。モデル名とアクセス権を確認してください。",
+      "transport_transient": "モデル提供元との接続が中断されました。接続と提供元の稼働状況を確認してください。",
+      "policy_refusal": "提供元がポリシーに基づきリクエストを拒否しました。リクエストと提供元のポリシーを確認してください。",
+      "empty_response": "モデル提供元から回答が返されませんでした。再試行するか別のモデルを選んでください。",
+      "malformed_response": "モデル提供元から無効な応答が返されました。再試行するか別のモデルを選んでください。",
+      "bad_request": "モデル提供元がリクエストを拒否しました。リクエストとモデル設定を確認してください。"
+    },
     "restartInterruptedTitle": "OpenSquilla の再起動によりタスクが中断されました。",
     "restartInterruptedGuidance": "このタスクは自動的には続行されません。既存の結果やツール操作を確認してから、元のリクエストを編集するか、会話を続けてください。",
     "usageAccountingBlockedTitle": "使用量の記録を一時的に利用できません",
@@ -3729,6 +3889,8 @@
     "aiModelEnsembleRouter": "AI モデル集約ルーター",
     "routerFx": {
       "selectedModel": "ルーターが {model} を選択しました",
+      "executionModel": "現在の実行モデル：{model}",
+      "executionModelCompleted": "実際に実行したモデル：{model}",
       "ensembleModel": "マルチモデル融合",
       "ensembleSelecting": "AI モデル集約ルーター · 候補を選択中",
       "ensembleHandedOff": "AI モデル集約ルーター · エージェントへ引き継ぎ済み",
@@ -4151,6 +4313,9 @@
       },
       "clearQueue": "キューをクリア",
       "removeMessage": "保留中のメッセージ {index} を削除",
+      "offlineRejected": "メッセージは受け付けられませんでした。編集して再試行するか、削除してください。",
+      "offlineQueued": "ローカルに保存しました。接続が復旧すると送信します。",
+      "identityChanged": "接続の認証情報が変わりました。元のゲートウェイとアカウントに再接続して送信してください。",
       "annotationUpgradeRequired": "この保留中の注釈は旧エディターの形式です。メッセージを編集し、ページを選び直して送信してください。"
     },
     "metaRuns": {
@@ -4341,6 +4506,7 @@
       "waitCompactionBeforeCommand": "{command} を実行する前にコンテキストの圧縮が完了するまでお待ちください。",
       "waitResponseBeforeCommand": "{command} を実行する前に現在の応答が完了するまでお待ちください。",
       "promptAnnotationBusy": "現在の応答が完了してから、成果物の編集指示を送信してください。",
+      "offlineQueueFailed": "送信待ちに追加できませんでした。下書きは保持されています。",
       "queueFull": "キューがいっぱいです — 現在の応答が完了するまでお待ちください。",
       "queuePersistenceUnavailable": "分岐が完了するまでこのメッセージを入力欄に残してください。永続的な復旧は現在利用できません。",
       "messageStillSaving": "このメッセージはまだ保存が完了していません — しばらくしてからもう一度お試しください。",

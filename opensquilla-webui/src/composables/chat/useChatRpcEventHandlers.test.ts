@@ -96,6 +96,7 @@ function createHarness(options: {
     setStreamActivity: stream.setStreamActivity,
     scrollToBottom: vi.fn(),
   }) : undefined
+  const updateRouterExecutionModel = vi.fn(routerRuntime?.updateRouterExecutionModel)
   const markEnsembleHandoff = vi.fn(routerRuntime?.markEnsembleHandoff)
   const bindRouterDecisionToModelCall = vi.fn(routerRuntime?.bindRouterDecisionToModelCall)
   const queueRouterDecision = vi.fn(routerRuntime?.queueRouterDecision)
@@ -141,6 +142,7 @@ function createHarness(options: {
     sessionRunStatus: options.sessionRunStatus || (() => ({ status: 'idle', label: 'Idle', task: null })),
     applySessionRunState,
     queueRouterDecision,
+    updateRouterExecutionModel,
     bindRouterDecisionToModelCall,
     appendEnsembleProgress: vi.fn(routerRuntime?.appendEnsembleProgress),
     markEnsembleHandoff,
@@ -200,6 +202,7 @@ function createHarness(options: {
     pendingQueue,
     applySessionRunState,
     markEnsembleHandoff,
+    updateRouterExecutionModel,
     bindRouterDecisionToModelCall,
     queueRouterDecision,
     schedulePendingDrainAfterTerminal,
@@ -217,6 +220,112 @@ function createHarness(options: {
 }
 
 describe('live tool result actions', () => {
+  it.each(['task.timeout', 'session.event.error'])('settles %s after history restored its authoritative timeout', event => {
+    const h = createHarness({ messages: [{
+      role: 'error', text: 'The task timed out.', ts: null, turnId: 'provider-turn',
+      terminalNotice: true,
+      turnOutcome: { turnId: 'provider-turn', status: 'timeout', statusSource: 'task', failureKind: 'overloaded', errorId: 'abcdef01' },
+    }], endStreaming: messages => { messages.push({ role: 'assistant', text: 'Partial answer', ts: null }) } })
+    try {
+      h.activeStreamTaskId.value = 'provider-turn'
+      h.api.handlers.onWireEventFixture(event, {
+        key: h.sessionKey.value, task_id: 'provider-turn', turn_id: 'provider-turn', stream_seq: 1,
+        turn_outcome: { failure_kind: 'overloaded', error_id: 'abcdef01' },
+      })
+      expect(h.messages.value.filter(message => message.role === 'error')).toHaveLength(1)
+      expect(h.stream.endStreaming).toHaveBeenCalledOnce()
+      expect(h.onTaskSettled).toHaveBeenCalledOnce()
+      expect(h.activeStreamTaskId.value).toBe(FINISHED_STREAM_TASK_ID)
+      expect(h.messages.value.find(message => message.role === 'assistant')?.turnOutcome?.status).toBe('timeout')
+      expect(h.applySessionRunState.mock.lastCall?.[0].run_status).toBe('timeout')
+    } finally { h.stop() }
+  })
+
+  it.each([
+    ['session.event.error', 'task.timeout'],
+    ['task.timeout', 'session.event.error'],
+  ])('preserves authoritative timeout for %s then %s', (first, second) => {
+    const h = createHarness({ endStreaming: messages => {
+      messages.push({ role: 'assistant', text: 'Partial answer', ts: null })
+    } })
+    h.activeStreamTaskId.value = 'provider-turn'
+    const payload = {
+      key: h.sessionKey.value, task_id: 'provider-turn', turn_id: 'provider-turn', code: 'llm_timeout',
+      terminal_reason: 'timeout', terminal_message: 'The task timed out before it could finish.',
+      turn_outcome: { failure_kind: 'transport_transient', error_id: 'abcdef01', kind: 'interrupted' },
+    }
+    try {
+      h.api.handlers.onWireEventFixture(first!, { ...payload, stream_seq: 1 })
+      h.stream.isStreaming.value = false
+      h.api.handlers.onWireEventFixture(second!, { ...payload, stream_seq: 2 })
+      expect(h.messages.value.filter(message => message.role === 'error')).toHaveLength(1)
+      expect(h.messages.value.find(message => message.role === 'error')?.turnOutcome?.status).toBe('timeout')
+      expect(h.messages.value.find(message => message.role === 'assistant')?.turnOutcome?.status).toBe('timeout')
+      expect(h.applySessionRunState.mock.lastCall?.[0].run_status).toBe('timeout')
+      expect(h.stream.endStreaming).toHaveBeenCalledOnce()
+    } finally { h.stop() }
+  })
+
+  it('does not let an old terminal update change a successor run state', () => {
+    const h = createHarness()
+    const payload = {
+      key: h.sessionKey.value, task_id: 'old-turn', turn_id: 'old-turn', code: '429',
+      turn_outcome: { failure_kind: 'rate_limited', error_id: 'abcdef01' },
+    }
+    try {
+      h.activeStreamTaskId.value = 'old-turn'
+      h.api.handlers.onWireEventFixture('session.event.error', { ...payload, stream_seq: 1 })
+      h.activeStreamTaskId.value = 'new-turn'
+      const calls = h.applySessionRunState.mock.calls.length
+      h.api.handlers.onWireEventFixture('task.timeout', { ...payload, terminal_reason: 'timeout', stream_seq: 2 })
+      expect(h.applySessionRunState).toHaveBeenCalledTimes(calls)
+      expect(h.stream.endStreaming).toHaveBeenCalledOnce()
+      expect(h.activeStreamTaskId.value).toBe('new-turn')
+    } finally { h.stop() }
+  })
+
+  it.each([
+    ['session.event.error', 'task.failed'],
+    ['task.failed', 'session.event.error'],
+    ['task.failed', 'task.failed'],
+  ])('merges provider error delivery %s then %s into one card', (first, second) => {
+    const h = createHarness({ endStreaming: messages => {
+      messages.push({ role: 'assistant', text: 'Partial answer', ts: null })
+    } })
+    h.activeStreamTaskId.value = 'provider-turn'
+    const payload = {
+      key: h.sessionKey.value, task_id: 'provider-turn', turn_id: 'provider-turn', code: '429',
+      terminal_message: 'Safe provider error',
+      turn_outcome: { failure_kind: 'rate_limited', error_id: 'abcdef01', kind: 'failed' },
+    }
+    try {
+      h.api.handlers.onWireEventFixture(first!, { ...payload, stream_seq: 1 })
+      h.stream.isStreaming.value = false
+      h.api.handlers.onWireEventFixture(second!, { ...payload, stream_seq: 2 })
+      expect(h.messages.value.filter(message => message.role === 'error')).toHaveLength(1)
+      expect(h.messages.value.find(message => message.role === 'error')?.turnOutcome).toMatchObject({
+        turnId: 'provider-turn', failureKind: 'rate_limited', errorId: 'abcdef01', status: 'failed',
+      })
+      expect(h.messages.value.find(message => message.role === 'assistant')?.text).toBe('Partial answer')
+      expect(h.stream.endStreaming).toHaveBeenCalledOnce()
+      expect(h.applySessionRunState.mock.calls.some(([state]) => state.run_status === 'idle')).toBe(false)
+    } finally { h.stop() }
+  })
+
+  it('renders a task failure fallback for its turn even without an active stream', () => {
+    const h = createHarness()
+    h.activeStreamTaskId.value = 'provider-turn'
+    h.stream.isStreaming.value = false
+    try {
+      h.api.handlers.onWireEventFixture('task.failed', {
+        key: h.sessionKey.value, task_id: 'provider-turn', turn_id: 'provider-turn', stream_seq: 1,
+        code: '401', terminal_message: 'Safe provider error',
+        turn_outcome: { failure_kind: 'auth_invalid', error_id: 'abcdef01', kind: 'failed' },
+      })
+      expect(h.messages.value.filter(message => message.role === 'error')).toHaveLength(1)
+    } finally { h.stop() }
+  })
+
   const payload = {
     key: 'agent:main:test', task_id: 'turn-preview', epoch: 0, stream_seq: 1,
     id: 'preview-1', name: 'open_workspace_preview', result: '{}',
@@ -3214,7 +3323,7 @@ describe('useChatRpcEventHandlers ensemble activity', () => {
   })
 
   it('maps structured provider activity without rendering provider error text', () => {
-    const { api, stream, stop } = createHarness()
+    const { api, stream, updateRouterExecutionModel, stop } = createHarness()
 
     try {
       api.handlers.onWireEventFixture('session.event.provider_activity', {
@@ -3223,6 +3332,7 @@ describe('useChatRpcEventHandlers ensemble activity', () => {
         phase: 'requesting',
         reason: 'initial',
         activity_id: 'activity-safe',
+        model: 'deepseek-v4-pro',
       })
       api.handlers.onWireEventFixture('session.event.provider_activity', {
         stream_seq: 2,
@@ -3230,6 +3340,7 @@ describe('useChatRpcEventHandlers ensemble activity', () => {
         phase: 'reasoning',
         reason: 'reasoning_only',
         activity_id: 'activity-safe',
+        model: 'deepseek-v4-pro',
       })
       api.handlers.onWireEventFixture('session.event.provider_activity', {
         stream_seq: 3,
@@ -3238,6 +3349,7 @@ describe('useChatRpcEventHandlers ensemble activity', () => {
         reason: 'rate_limited',
         retry_after_ms: 8_000,
         activity_id: 'activity-safe',
+        model: 'kimi-k2.7-code',
         message: 'secret provider body',
       })
       api.handlers.onWireEventFixture('session.event.provider_activity', {
@@ -3248,6 +3360,7 @@ describe('useChatRpcEventHandlers ensemble activity', () => {
         retry_attempt: 2,
         retry_limit: 3,
         activity_id: 'activity-safe',
+        model: 'kimi-k2.7-code',
       })
       api.handlers.onWireEventFixture('session.event.provider_activity', {
         stream_seq: 5,
@@ -3255,6 +3368,7 @@ describe('useChatRpcEventHandlers ensemble activity', () => {
         phase: 'fallback',
         reason: 'provider_overloaded',
         activity_id: 'activity-safe',
+        model: 'deepseek-v4-pro-0813',
       })
 
       expect(stream.setStreamActivity).toHaveBeenNthCalledWith(
@@ -3284,6 +3398,69 @@ describe('useChatRpcEventHandlers ensemble activity', () => {
       )
       expect(JSON.stringify(vi.mocked(stream.setStreamActivity).mock.calls))
         .not.toContain('secret provider body')
+      expect(updateRouterExecutionModel.mock.calls).toEqual([
+        ['deepseek-v4-pro', undefined],
+        ['deepseek-v4-pro', undefined],
+        ['kimi-k2.7-code', undefined],
+        ['kimi-k2.7-code', undefined],
+        ['deepseek-v4-pro-0813', undefined],
+      ])
+    } finally {
+      stop()
+    }
+  })
+
+  it('rejects stale physical activity after a generation reset without advancing the cursor', () => {
+    const h = createHarness()
+    h.activeStreamTaskId.value = 'task-live'
+    const identity = { key: 'agent:main:test', task_id: 'task-live', turn_id: 'task-live' }
+    try {
+      h.api.handlers.onWireEventFixture('session.event.provider_activity', {
+        ...identity, stream_seq: 1, phase: 'requesting', model: 'deepseek-v4-pro',
+        generation_epoch: 0, assistant_message_id: 'assistant-1',
+      })
+      h.api.handlers.onAnswerGenerationReset({
+        ...identity, stream_seq: 2, assistant_message_id: 'assistant-1',
+        old_generation_epoch: 0, new_generation_epoch: 1,
+        authoritative_text_snapshot: '', authoritative_reasoning_snapshot: '',
+        preserve_completed_tools: true,
+      })
+      for (const stale of [
+        { generation_epoch: 0, assistant_message_id: 'assistant-1' },
+        { generation_epoch: 1, assistant_message_id: 'other-assistant' },
+      ]) {
+        h.api.handlers.onWireEventFixture('session.event.provider_activity', {
+          ...identity, ...stale, stream_seq: 99, phase: 'fallback', model: 'stale-model',
+        })
+      }
+      expect(h.lastStreamSeq.value).toBe(2)
+      h.api.handlers.onWireEventFixture('session.event.provider_activity', {
+        ...identity, generation_epoch: 1, assistant_message_id: 'assistant-1',
+        stream_seq: 3, phase: 'fallback', model: 'deepseek-v4-pro-0813',
+      })
+      expect(h.updateRouterExecutionModel.mock.calls).toEqual([
+        ['deepseek-v4-pro', 'task-live'], ['deepseek-v4-pro-0813', 'task-live'],
+      ])
+    } finally { h.stop() }
+  })
+
+  it('keeps provider activity compatible when an older gateway omits model', () => {
+    const { api, stream, updateRouterExecutionModel, stop } = createHarness()
+
+    try {
+      api.handlers.onWireEventFixture('session.event.provider_activity', {
+        stream_seq: 1,
+        schema_version: 1,
+        phase: 'requesting',
+        reason: 'initial',
+        activity_id: 'legacy-activity',
+      })
+
+      expect(updateRouterExecutionModel).not.toHaveBeenCalled()
+      expect(stream.setStreamActivity).toHaveBeenCalledWith(
+        'Waiting for model',
+        'provider:requesting',
+      )
     } finally {
       stop()
     }

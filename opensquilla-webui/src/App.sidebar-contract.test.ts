@@ -59,7 +59,7 @@ describe('App sidebar chrome contract', () => {
 
   it('admits the app-wide cron lease after critical chat bootstrap traffic', () => {
     const subscribeStart = appSource.indexOf('function subscribeCronEventsWhenAdmitted')
-    const subscribeEnd = appSource.indexOf('function resumeAutomaticAppRpc', subscribeStart)
+    const subscribeEnd = appSource.indexOf('watch(optionalSessionRpcAllowed', subscribeStart)
     const subscribeCron = appSource.slice(subscribeStart, subscribeEnd)
     expect(subscribeCron).toContain('optionalSessionRpcAllowed.value')
     expect(subscribeCron).toContain('cronFinishedSubscription = cronScheduler.subscribe')
@@ -71,6 +71,19 @@ describe('App sidebar chrome contract', () => {
     )
   })
 
+  it('routes automatic refreshes through the mounted, admitted Gateway lifecycle', () => {
+    expect(appSource).toContain('available: () => gatewayAccess.isAvailable')
+    expect(appSource).toContain('admitted: () => optionalSessionRpcAllowed.value')
+    expect(appSource).toContain('loadSidebar: performSidebarLoad')
+    expect(appSource).toContain('cancelSidebar: cancelPendingRequests')
+    expect(appSource).toContain('return automaticAppRpc.load()')
+    expect(appSource).toContain('automaticAppRpc.schedule()')
+    expect(appSource).toContain('automaticAppRpc.mount()')
+    expect(appSource).toContain('automaticAppRpc.availabilityChanged()')
+    expect(appSource).toContain('automaticAppRpc.admissionChanged()')
+    expect(appSource).toContain('automaticAppRpc.dispose()')
+  })
+
   it('keeps app-wide approval awareness behind ApprovalCenter', () => {
     expect(appSource).toContain('APPROVAL_CENTER_KEY')
     expect(appSource).toContain('approvalCenter.snapshot()')
@@ -79,5 +92,16 @@ describe('App sidebar chrome contract', () => {
     expect(appSource).not.toContain("rpcStore.on('exec.approval")
     expect(appSource).not.toContain("rpcStore.on('plugin.approval")
     expect(appSource).not.toContain("rpcStore.on('_state', onApproval")
+  })
+
+  it('admits approval hydration only after mount and Gateway readiness, rejecting stale results', () => {
+    const seed = appSource.slice(appSource.indexOf('async function seedPendingApprovals()'), appSource.indexOf('function onApprovalEvent('))
+    const request = seed.indexOf('await approvalCenter.snapshot()')
+    expect(seed.slice(0, request)).toContain("if (!appAutomaticRpcMounted || gatewayAccess.availability !== 'available') return")
+    expect(seed.slice(request)).toContain('generation !== approvalSeedGeneration')
+    expect(seed.slice(request)).toContain("gatewayAccess.availability !== 'available'")
+    const availability = appSource.slice(appSource.indexOf('function onApprovalAvailability('), appSource.indexOf('function subscribeApprovals()'))
+    expect(availability).toContain('approvalSeedGeneration++')
+    expect(availability).toContain('void seedPendingApprovals()')
   })
 })

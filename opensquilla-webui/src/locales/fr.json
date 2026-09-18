@@ -805,6 +805,47 @@
     }
   },
   "setup": {
+    "capacity": {
+      "customOpenAI": "Personnalisé · compatible OpenAI",
+      "customAnthropic": "Personnalisé · compatible Anthropic",
+      "partialSaved": "Enregistré : {saved}. Non enregistré : {pending}. Les valeurs non enregistrées sont conservées.",
+      "providerPartialSaved": "Le fournisseur a été enregistré. Les limites du modèle n’ont pas été enregistrées ; vos saisies sont conservées.",
+      "backToRouting": "Retour au routage intelligent",
+      "editSharedEnsemble": "Modifier l’ensemble partagé",
+      "sharedEnsemble": "C3 et la fusion de modèles partagent cet ensemble.",
+      "title": "Paramètres du modèle",
+      "forModel": "Paramètres du modèle — {model}",
+      "unknown": "Limites à confirmer",
+      "contextWindow": "Fenêtre de contexte",
+      "maxOutputTokens": "Longueur maximale de sortie",
+      "scope": "S’applique partout où ce modèle est utilisé avec ce fournisseur.",
+      "current": "Actuellement {value} tokens · {source}",
+      "source": {
+        "catalog": "Catalogue de modèles",
+        "default": "Valeur par défaut du système",
+        "config": "Configuration globale",
+        "override": "Valeur manuelle"
+      },
+      "autoValue": "Automatique ({value})",
+      "autoHint": "Laissez vide pour le mode automatique ; saisissez un entier positif pour modifier la valeur.",
+      "requestHint": "Limite de sortie du modèle ; les réponses peuvent être plus courtes.",
+      "localHint": "Cette valeur doit correspondre au contexte configuré sur votre serveur de modèles local.",
+      "serverControlled": "La longueur de sortie est contrôlée par le serveur.",
+      "restore": "Rétablir les valeurs automatiques",
+      "positiveInteger": "Saisissez un entier positif ou laissez vide pour une valeur automatique.",
+      "upgrade": "Mettez à jour le Gateway pour consulter et modifier les limites. Les paramètres existants restent disponibles.",
+      "loadFailed": "Impossible de charger les limites du modèle. Vos modifications sont conservées.",
+      "retry": "Réessayer",
+      "draftHint": "Après Terminé, cliquez sur Enregistrer les modifications dans les paramètres.",
+      "done": "Terminé",
+      "invalid": "Vérifiez les valeurs des limites avant d’enregistrer.",
+      "saved": "Limites du modèle enregistrées.",
+      "saveFailed": "Impossible d’enregistrer les limites du modèle. Les valeurs non enregistrées sont conservées.",
+      "unknownHint": "Une ou deux limites du modèle restent à confirmer. Les valeurs par défaut sont utilisées ; vous pouvez définir les limites ici.",
+      "automaticSource": "Automatique · {source}",
+      "unsaved": "Non enregistré",
+      "effective": "Limite effective : {value} tokens"
+    },
     "cli": {
       "advancedTitle": "Avancé · CLI intégrée",
       "hintBundled": "Ces commandes utilisent la CLI intégrée à l'application ; collez-les dans un terminal pour les exécuter.",
@@ -1255,7 +1296,7 @@
       "openrouterFixedDesc": "Quand le service de modèles utilise {provider}, le routage agrégé utilise quatre modèles proposants et un agrégateur.",
       "openrouterFixedProposer": "Modèle proposant",
       "openrouterFixedAggregator": "Agrégateur",
-      "credentialReady": "Connecté",
+      "credentialReady": "Identifiants disponibles",
       "credentialNeeded": "Identifiants {provider} requis",
       "credentialMissingEnv": "{envKey} requis",
       "credentialUnknown": "Identifiants non vérifiés",
@@ -1286,7 +1327,7 @@
       "aggregatorNote": "Fusionne tous les brouillons en réponse finale ; seul membre pouvant appeler des outils",
       "aggregatorSectionLabel": "Agrégateur",
       "aggregatorSectionDesc": "Un seul agrégateur produit la réponse finale. Choisissez le modèle le plus puissant de la composition.",
-      "aggregatorInheritedNote": "Aucun agrégateur assigné — le modèle de chat actuel fusionne les brouillons",
+      "aggregatorInheritedNote": "Utilise le modèle actuel",
       "proposerSectionLabel": "Proposants",
       "proposerRoleLabel": "Proposant",
       "aggregatorRoleLabel": "Agrégateur",
@@ -1304,7 +1345,7 @@
       "replaceCandidateConfirm": "Remplacer",
       "candidateDuplicate": "Ce modèle figure déjà dans la liste des proposants.",
       "addProposer": "Ajouter un proposant",
-      "chooseAggregator": "Choisir l'agrégateur",
+      "chooseAggregator": "Changer de modèle",
       "aggregatorPickerTitle": "Choisir l'agrégateur",
       "aggregatorFromProposers": "Utiliser un proposant existant",
       "aggregatorOtherModel": "Ou choisir un autre modèle",
@@ -1323,7 +1364,8 @@
       "proposerRetriesDesc": "Uniquement les échecs réessayables ; la requête initiale ne compte pas comme nouvelle tentative.",
       "proposerRetriesOption": "Au plus {count} nouvelles tentatives après la requête initiale",
       "runtimeLimitsLabel": "Limites de temps",
-      "runtimeLimits": "Proposants {proposerTimeout}s au total · inactivité de l'agrégateur entre événements {aggregatorTimeout}s (configurée {configuredAggregatorTimeout}s) · délai total du tour séparé"
+      "runtimeLimits": "Proposants {proposerTimeout}s au total · inactivité de l'agrégateur entre événements {aggregatorTimeout}s (configurée {configuredAggregatorTimeout}s) · délai total du tour séparé",
+      "fallbackModelLabel": "Modèle de secours"
     },
     "behavior": {
       "title": "Comportement des sessions",
@@ -1603,6 +1645,8 @@
       "tokenLabel": "Jeton",
       "optional": "facultatif",
       "tokenDesc": "Jeton Bearer pour les passerelles qui requièrent une authentification. Stocké dans cet onglet uniquement.",
+      "tokenRequired": "Jeton requis",
+      "reasonTokenRequired": "Échec de l’authentification. Les tentatives automatiques sont suspendues. Saisissez un jeton de passerelle valide, puis choisissez Connecter.",
       "reconnect": "Reconnecter",
       "connect": "Connecter",
       "disconnect": "Déconnecter"
@@ -1822,7 +1866,9 @@
       "dataMaintenanceAria": "Ouvrir la maintenance des données",
       "runTraceLabel": "Tiroir de trace d'exécution dans les Journaux",
       "runTraceDesc": "Rend les lignes de journal interactives et ouvre un tiroir de détail par étape de nœud dans la vue Journaux.",
-      "runTraceAria": "Tiroir de trace d'exécution dans les Journaux (prend effet après rechargement)"
+      "runTraceAria": "Tiroir de trace d'exécution dans les Journaux (prend effet après rechargement)",
+      "configFileLabel": "Fichier de configuration",
+      "configFileDesc": "D’autres options sont disponibles dans le fichier de configuration."
     },
     "privacy": {
       "statusDisabledByEnv": "Désactivés par un paramètre d’environnement.",
@@ -2018,10 +2064,98 @@
           "label": "Fenêtre de regroupement (s)"
         },
         "transport_name": {
+          "label": "Mode de connexion",
           "choices": {
             "polling": "Interrogation (polling)",
             "webhook": "Webhook"
           }
+        },
+        "access_token": {
+          "label": "Jeton d'accès"
+        },
+        "agent_id_int": {
+          "label": "ID d'agent (entier)"
+        },
+        "app_password": {
+          "label": "Mot de passe d'application"
+        },
+        "app_token": {
+          "label": "Jeton au niveau de l'app (xapp-...)"
+        },
+        "application_id": {
+          "label": "ID d'application"
+        },
+        "cool_app_code": {
+          "label": "Cool App Code"
+        },
+        "corp_id": {
+          "label": "ID d'entreprise"
+        },
+        "default_channel_id": {
+          "label": "ID de canal par défaut"
+        },
+        "device_id": {
+          "label": "ID d'appareil"
+        },
+        "domain": {
+          "label": "Domaine"
+        },
+        "drop_pending_updates": {
+          "label": "Ignorer les mises à jour en attente"
+        },
+        "encoding_aes_key": {
+          "label": "Clé AES d'encodage"
+        },
+        "encrypt_key": {
+          "label": "Clé de chiffrement"
+        },
+        "encryption": {
+          "label": "Chiffrement"
+        },
+        "gateway_url": {
+          "label": "URL de la passerelle"
+        },
+        "intents": {
+          "label": "Masque de bits d'intents"
+        },
+        "password": {
+          "label": "Mot de passe"
+        },
+        "poll_idle_sleep_s": {
+          "label": "Veille d'inactivité du polling (s)"
+        },
+        "poll_limit": {
+          "label": "Limite de polling"
+        },
+        "poll_timeout_s": {
+          "label": "Délai d'expiration du polling (s)"
+        },
+        "reply_in_thread": {
+          "label": "Répondre en fil"
+        },
+        "robot_code": {
+          "label": "Code du robot"
+        },
+        "slack_channel_id": {
+          "label": "ID de canal par défaut"
+        },
+        "token": {
+          "label": "Jeton de bot (xoxb-...)"
+        },
+        "verification_token": {
+          "label": "Jeton de vérification"
+        },
+        "webhook_path": {
+          "label": "Chemin du webhook"
+        },
+        "webhook_secret_token": {
+          "label": "Jeton secret du webhook"
+        },
+        "webhook_url": {
+          "label": "URL de webhook (webhook uniquement)"
+        },
+        "websocket_url": {
+          "label": "URL WebSocket"
         }
       },
       "groups": {
@@ -2457,6 +2591,13 @@
       "enable": "Activer",
       "disable": "Désactiver",
       "notReported": "Non communiqué",
+      "transport": {
+        "polling": "Interrogation (polling)",
+        "webhook": "Webhook",
+        "websocket": "WebSocket",
+        "http_sync": "Synchro HTTP",
+        "mixed": "Plusieurs modes de connexion"
+      },
       "tabs": {
         "overview": "Vue d'ensemble",
         "pairings": "Membres",
@@ -3520,6 +3661,7 @@
       "autoPauseLabel": "Pause automatique",
       "states": { "off": "Désactivé", "waiting": "En attente d'un préfixe stable", "scheduled": "Planifié", "probing": "Sonde en cours", "paused": "Limite d'inactivité atteinte ; attente du prochain message", "stopped": "Arrêté après échec" }
     },
+    "sendPending": "Envoi en cours…",
     "send": "Envoyer",
     "sendQueues": "Envoyer (mise en file après la réponse actuelle)",
     "sendSteers": "Envoyer (réoriente la réponse actuelle maintenant)",
@@ -3679,6 +3821,24 @@
     "subagentPrefix": "Sous-agent : ",
     "subagentCompletion": "Achèvement du sous-agent",
     "turnFailed": "Échec du tour",
+    "copyDiagnosticId": "Copier l’identifiant de diagnostic",
+    "copiedDiagnosticId": "Identifiant de diagnostic copié",
+    "copyDiagnosticFailed": "Échec de la copie. Sélectionnez l’identifiant ci-dessus et copiez-le manuellement.",
+    "partialFailureNote": "La réponse ci-dessus a été conservée, mais ce tour s’est terminé par une erreur.",
+    "providerFailure": {
+      "rate_limited": "Le fournisseur limite le débit des requêtes. Réessayez plus tard.",
+      "provider_overloaded": "Le fournisseur du modèle est temporairement occupé. Réessayez plus tard.",
+      "auth_invalid": "Le fournisseur a refusé les identifiants. Vérifiez-les dans les paramètres du fournisseur.",
+      "context_overflow": "La requête dépasse la fenêtre de contexte du modèle. Raccourcissez-la ou choisissez un modèle avec un contexte plus grand.",
+      "unsupported_feature": "Le fournisseur ne prend pas en charge cette requête. Vérifiez les capacités du modèle choisi.",
+      "insufficient_credits": "Le compte du fournisseur ne dispose pas de crédits suffisants. Vérifiez le solde ou les paramètres de facturation.",
+      "model_not_found": "Le modèle configuré est indisponible. Vérifiez son nom et vos droits d’accès.",
+      "transport_transient": "La connexion au fournisseur a été interrompue. Vérifiez votre connexion et l’état du fournisseur.",
+      "policy_refusal": "Le fournisseur a refusé la requête en vertu de sa politique. Vérifiez la requête et la politique du fournisseur.",
+      "empty_response": "Le fournisseur n’a renvoyé aucune réponse. Réessayez ou choisissez un autre modèle.",
+      "malformed_response": "Le fournisseur a renvoyé une réponse non valide. Réessayez ou choisissez un autre modèle.",
+      "bad_request": "Le fournisseur a refusé la requête. Vérifiez la requête et les paramètres du modèle."
+    },
     "restartInterruptedTitle": "Le redémarrage d’OpenSquilla a interrompu cette tâche.",
     "restartInterruptedGuidance": "Cette tâche ne reprendra pas automatiquement. Vérifiez les résultats existants ou les actions des outils, puis modifiez la demande d’origine ou poursuivez la conversation.",
     "usageAccountingBlockedTitle": "Comptabilisation de l’utilisation temporairement indisponible",
@@ -3729,6 +3889,8 @@
     "aiModelEnsembleRouter": "Routeur agrégé de modèles IA",
     "routerFx": {
       "selectedModel": "Le routeur a sélectionné {model}",
+      "executionModel": "Modèle en cours d’exécution : {model}",
+      "executionModelCompleted": "Exécuté par {model}",
       "ensembleModel": "Fusion multimodèle",
       "ensembleSelecting": "Routeur agrégé de modèles IA · sélection des candidats",
       "ensembleHandedOff": "Routeur agrégé de modèles IA · transmis à l'agent",
@@ -4151,6 +4313,9 @@
       },
       "clearQueue": "Vider la file",
       "removeMessage": "Supprimer le message en attente {index}",
+      "offlineRejected": "Le message n’a pas été accepté. Modifiez-le pour réessayer, ou supprimez-le.",
+      "offlineQueued": "Enregistré localement. Le message sera envoyé au rétablissement de la connexion.",
+      "identityChanged": "L’identité de connexion a changé. Reconnectez-vous à la passerelle et au compte d’origine pour envoyer ce message.",
       "annotationUpgradeRequired": "Cette annotation utilise l’ancien éditeur. Modifiez le message et sélectionnez à nouveau la page avant de l’envoyer."
     },
     "metaRuns": {
@@ -4341,6 +4506,7 @@
       "waitCompactionBeforeCommand": "Attendez le compactage du contexte avant d'exécuter {command}.",
       "waitResponseBeforeCommand": "Attendez la réponse actuelle avant d'exécuter {command}.",
       "promptAnnotationBusy": "Attendez la fin de la réponse en cours avant d’envoyer les instructions sur le livrable.",
+      "offlineQueueFailed": "Impossible de mettre ce message en attente. Votre brouillon a été conservé.",
       "queueFull": "La file d'attente est pleine — attendez la fin de la réponse actuelle.",
       "queuePersistenceUnavailable": "Conservez ce message dans l’éditeur jusqu’à la fin de la bifurcation ; la récupération durable est indisponible.",
       "messageStillSaving": "Ce message n'est pas encore enregistré — réessayez dans un instant.",

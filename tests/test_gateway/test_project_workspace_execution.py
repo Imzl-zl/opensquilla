@@ -113,7 +113,7 @@ async def open_stack(db_path: Path) -> AsyncIterator[WorkspaceStack]:
         principal=OWNER,
         config=GatewayConfig(
             workspace_dir=str(db_path.parent / "default-workspace"),
-            memory={"flush_enabled": False},
+            memory={},
             naming={"enabled": False},
         ),
         session_manager=manager,
@@ -172,6 +172,73 @@ def create_windows_junction(link: Path, target: Path) -> subprocess.CompletedPro
         text=True,
         check=False,
     )
+
+
+async def test_unicode_project_executes_tools_in_the_selected_directory(tmp_path: Path) -> None:
+    selected = tmp_path / "Cafe\u0301"
+    sibling = tmp_path / "Caf\u00e9"
+    selected.mkdir()
+    sibling.mkdir(exist_ok=True)
+    if selected.samefile(sibling):
+        pytest.skip("filesystem treats Unicode normalization variants as the same directory")
+    (selected / "marker.txt").write_text("selected directory", encoding="utf-8")
+    (sibling / "marker.txt").write_text("other directory", encoding="utf-8")
+    outcomes: dict[str, Any] = {}
+    completed = asyncio.Event()
+
+    class Runner:
+        async def run(
+            self, message: str, session_key: str, *,
+            expected_session_id: str | None = None,
+            expected_session_epoch: int | None = None,
+            **kwargs: Any,
+        ):
+            context = kwargs["tool_context"]
+            token = current_tool_context.set(context)
+            try:
+                outcomes["workspace"] = context.workspace_dir
+                outcomes["read"] = await fs.read_file("marker.txt")
+                await fs.write_file("result.txt", "written in selected directory")
+                yield DoneEvent()
+            except BaseException as exc:
+                outcomes["error"] = exc
+            finally:
+                current_tool_context.reset(token)
+                completed.set()
+
+    async with open_stack(tmp_path / "unicode-execution.db") as stack:
+        opened = await get_dispatcher().dispatch(
+            "open-unicode-project", "workspaces.open",
+            {"path": str(selected), "trusted": True}, stack.context,
+        )
+        assert opened.ok is True
+        stack.context.task_runtime = None
+        stack.context.turn_runner = Runner()
+        response = await get_dispatcher().dispatch(
+            "send-unicode-project", "sessions.send",
+            {
+                "key": "agent:main:webchat:unicode-project",
+                "message": "read and write in the selected project",
+                "intent": "new_chat",
+                "workspaceId": opened.payload["workspace"]["id"],
+                "clientRequestId": "unicode-project-request",
+                "_source": {
+                    "caller_kind": "web", "channel_kind": "webchat", "runMode": "full",
+                },
+            },
+            stack.context,
+        )
+        assert response.ok is True
+        await asyncio.wait_for(completed.wait(), timeout=10.0)
+        await await_direct_task("agent:main:webchat:unicode-project")
+        if "error" in outcomes:
+            raise outcomes["error"]
+
+    assert outcomes["workspace"] == str(selected.resolve())
+    assert "selected directory" in outcomes["read"]
+    assert (selected / "result.txt").read_text() == "written in selected directory"
+    assert not (sibling / "result.txt").exists()
+    assert (sibling / "marker.txt").read_text() == "other directory"
 
 
 @pytest.mark.asyncio
@@ -1863,7 +1930,7 @@ async def test_runtime_send_rehydrates_unbound_session_before_real_enforcement(
 
     config = GatewayConfig(
         workspace_dir=str(workspace),
-        memory={"flush_enabled": False},
+        memory={},
         naming={"enabled": False},
         agent_stream_heartbeat_interval_seconds=0.0,
         agent_stream_idle_timeout_seconds=1.0,

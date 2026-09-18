@@ -46,6 +46,7 @@ from opensquilla.gateway.session_model_routing import (
 from opensquilla.gateway.task_runtime import TaskRuntime
 from opensquilla.gateway.turn_ingress import request_fingerprint
 from opensquilla.gateway.uploads import UploadStore, get_upload_store, set_upload_store
+from opensquilla.paths import native_io_path
 from opensquilla.session.goals import GoalCommandRequest, StartGoalMutation, new_goal
 from opensquilla.session.manager import SessionManager
 from opensquilla.session.models import (
@@ -120,7 +121,7 @@ async def _open_real_stack(
         config=GatewayConfig(
             workspace_dir=str(db_path.parent / "workspace"),
             attachments={"media_root": str(db_path.parent / "media")},
-            memory={"flush_enabled": False},
+            memory={},
             naming={"enabled": False},
         ),
         session_manager=manager,
@@ -959,11 +960,13 @@ async def test_pending_input_cancel_tombstone_blocks_delayed_enqueue(
             assert delayed.error is not None
             assert delayed.error.code == "PENDING_INPUT_CANCELLED"
             assert await stack.storage.list_pending_chat_inputs(SESSION_KEY) == []
-            assert not pending_chat_input_material_path(
-                Path(stack.context.config.attachments.media_root or ""),
-                stack.session_id,
-                "pending-rpc-cancel-first",
-                digest,
+            assert not native_io_path(
+                pending_chat_input_material_path(
+                    Path(stack.context.config.attachments.media_root or ""),
+                    stack.session_id,
+                    "pending-rpc-cancel-first",
+                    digest,
+                )
             ).exists()
     finally:
         set_upload_store(original_store)
@@ -1084,7 +1087,7 @@ async def test_pending_attachment_survives_restart_dispatches_once_and_cleans_ow
                 "pending-rpc-durable-attachment",
                 digest,
             )
-            assert owner_path.read_bytes() == payload
+            assert native_io_path(owner_path).read_bytes() == payload
 
             # The expiring upload is gone and the process-local upload store is
             # replaced, matching a Gateway restart. Dispatch must use only the
@@ -1123,12 +1126,14 @@ async def test_pending_attachment_survives_restart_dispatches_once_and_cleans_ow
             assert accepted.ok is True
             assert replayed.ok is True
             assert replayed.payload["message_id"] == accepted.payload["message_id"]
-            assert not owner_path.exists()
+            assert not native_io_path(owner_path).exists()
             assert (
-                transcript_material_path(
-                    Path(stack.context.config.attachments.media_root or ""),
-                    stack.session_id,
-                    digest,
+                native_io_path(
+                    transcript_material_path(
+                        Path(stack.context.config.attachments.media_root or ""),
+                        stack.session_id,
+                        digest,
+                    )
                 ).read_bytes()
                 == payload
             )
@@ -1185,8 +1190,8 @@ async def test_pending_attachment_cancel_removes_only_its_private_owner(
                 stack.session_id,
                 digest,
             )
-            assert owner_path.read_bytes() == payload
-            assert not canonical_path.exists()
+            assert native_io_path(owner_path).read_bytes() == payload
+            assert not native_io_path(canonical_path).exists()
 
             cancelled = await get_dispatcher().dispatch(
                 "pending-attachment-cancel",
@@ -1199,8 +1204,8 @@ async def test_pending_attachment_cancel_removes_only_its_private_owner(
                 stack.context,
             )
             assert cancelled.ok is True
-            assert not owner_path.exists()
-            assert not canonical_path.exists()
+            assert not native_io_path(owner_path).exists()
+            assert not native_io_path(canonical_path).exists()
             assert await stack.storage.list_pending_chat_inputs(SESSION_KEY) == []
     finally:
         set_upload_store(original_store)
@@ -1296,8 +1301,8 @@ async def test_pending_input_cancel_preserves_revision_preconditions(
                 media_root, stack.session_id, pending_id, digest
             )
             canonical_path = transcript_material_path(media_root, stack.session_id, digest)
-            assert owner_path.read_bytes() == payload
-            assert not canonical_path.exists()
+            assert native_io_path(owner_path).read_bytes() == payload
+            assert not native_io_path(canonical_path).exists()
             async with stack.storage.conn.execute(
                 "SELECT COUNT(*) FROM pending_chat_input_cancellations WHERE pending_input_id = ?",
                 (pending_id,),
@@ -1329,7 +1334,7 @@ async def test_pending_input_cancel_preserves_revision_preconditions(
                 assert cancelled.error.code == expected_error
                 assert remaining == before
                 assert cancellation_count == 0
-                assert owner_path.read_bytes() == payload
+                assert native_io_path(owner_path).read_bytes() == payload
                 assert len(listed.payload["items"]) == 1
                 assert listed.payload["items"][0]["pendingInputId"] == pending_id
                 assert listed.payload["items"][0]["revision"] == 2
@@ -1339,9 +1344,9 @@ async def test_pending_input_cancel_preserves_revision_preconditions(
                 assert cancelled.payload["alreadyMissing"] is False
                 assert remaining is None
                 assert cancellation_count == 1
-                assert not owner_path.exists()
+                assert not native_io_path(owner_path).exists()
                 assert listed.payload["items"] == []
-            assert not canonical_path.exists()
+            assert not native_io_path(canonical_path).exists()
     finally:
         set_upload_store(original_store)
 
@@ -1384,7 +1389,7 @@ async def test_session_delete_reclaims_pending_attachment_owner(
                 "pending-rpc-delete-attachment",
                 digest,
             )
-            assert owner_path.read_bytes() == payload
+            assert native_io_path(owner_path).read_bytes() == payload
 
             deleted = await get_dispatcher().dispatch(
                 "pending-attachment-session-delete",
@@ -1394,7 +1399,7 @@ async def test_session_delete_reclaims_pending_attachment_owner(
             )
             assert deleted.ok is True
             assert deleted.payload == {"deleted": [SESSION_KEY], "errors": []}
-            assert not owner_path.exists()
+            assert not native_io_path(owner_path).exists()
             assert (
                 await stack.storage.get_pending_chat_input("pending-rpc-delete-attachment") is None
             )
@@ -1466,7 +1471,7 @@ async def test_cancel_cleans_unreferenced_canonical_copy_after_failed_dispatch(
                 stack.session_id,
                 digest,
             )
-            assert canonical_path.read_bytes() == payload
+            assert native_io_path(canonical_path).read_bytes() == payload
 
             cancelled = await get_dispatcher().dispatch(
                 "pending-attachment-failed-cancel",
@@ -1479,7 +1484,7 @@ async def test_cancel_cleans_unreferenced_canonical_copy_after_failed_dispatch(
                 stack.context,
             )
             assert cancelled.ok is True
-            assert not canonical_path.exists()
+            assert not native_io_path(canonical_path).exists()
             await stack.runtime.abort_reservation(blocker)
     finally:
         set_upload_store(original_store)
@@ -1505,8 +1510,8 @@ async def test_cancel_preserves_canonical_material_referenced_by_transcript(
                 stack.session_id,
                 digest,
             )
-            canonical_path.parent.mkdir(parents=True, exist_ok=True)
-            canonical_path.write_bytes(payload)
+            native_io_path(canonical_path).parent.mkdir(parents=True, exist_ok=True)
+            native_io_path(canonical_path).write_bytes(payload)
             await stack.manager.append_message(
                 SESSION_KEY,
                 role="user",
@@ -1580,7 +1585,7 @@ async def test_cancel_preserves_canonical_material_referenced_by_transcript(
                 stack.context,
             )
             assert cancelled.ok is True
-            assert canonical_path.read_bytes() == payload
+            assert native_io_path(canonical_path).read_bytes() == payload
             await stack.runtime.abort_reservation(blocker)
     finally:
         set_upload_store(original_store)
@@ -1636,9 +1641,11 @@ async def test_durable_meta_control_does_not_claim_active_goal(
             },
             stack.context,
         )
-        await stack.wait_until_running()
-
         assert response.ok is True
+        # Real activation persists running/transcript state before entering
+        # the handler. Allow shared-runner SQLite setup time before checking
+        # goal ownership.
+        await asyncio.wait_for(stack.handler_started.wait(), timeout=10.0)
         accepted_control = await stack.storage.get_meta_control_intent(
             session_key=SESSION_KEY,
             control_kind=control_kind,
@@ -2081,7 +2088,7 @@ async def test_queued_meta_control_reopens_and_reactivates_exactly_once(
     hold_blocker = asyncio.Event()
     gateway_config = GatewayConfig(
         workspace_dir=str(tmp_path / "workspace"),
-        memory={"flush_enabled": False},
+        memory={},
         naming={"enabled": False},
     )
     routing_state: dict[str, Any] = {"mode": "router", "revision": 7}
@@ -2779,6 +2786,9 @@ async def test_sessions_send_fast_replay_consumes_legacy_meta_launch_draft(
         assert await stack.storage.list_meta_launch_drafts(session_key=SESSION_KEY) == []
 
 
+# Keep the SQLite-backed startup prerequisite within its scheduling budget;
+# the contract below checks replay state, not replay latency under runner load.
+@pytest.mark.ci_serial
 @pytest.mark.asyncio
 async def test_sessions_send_replay_exposes_terminal_task_status(tmp_path: Path) -> None:
     async with _open_real_stack(tmp_path / "sessions.db") as stack:

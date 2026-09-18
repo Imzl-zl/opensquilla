@@ -18,16 +18,16 @@
   "x-opensquilla-codegen": {
     "python": {
       "tool": "datamodel-code-generator",
-      "version": "0.75.1",
+      "version": "0.81.0",
       "target": "pydantic_v2.BaseModel"
     },
     "typescript": {
       "tool": "json-schema-to-typescript",
-      "version": "15.0.4"
+      "version": "16.0.0"
     },
     "runtimeValidation": {
       "tool": "ajv",
-      "version": "8.17.1",
+      "version": "8.20.0",
       "mode": "standalone-adapter-only"
     }
   },
@@ -147,6 +147,43 @@
       "type": "object",
       "additionalProperties": true,
       "properties": {
+        "model_capacity": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+            "provider",
+            "model",
+            "contextWindow",
+            "source"
+          ],
+          "properties": {
+            "provider": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "model": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            },
+            "contextWindow": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "source": {
+              "enum": [
+                "default",
+                "catalog",
+                "config",
+                "override"
+              ]
+            }
+          }
+        },
         "key": {
           "type": ["string", "null"],
           "minLength": 1

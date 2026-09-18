@@ -652,7 +652,6 @@ class _FakeServices:
         self.memory_sync_managers = {"main": object()}
         self.memory_retrievers = {"main": object()}
         self.turn_capture_services = {"main": object()}
-        self.flush_service = None
         self.model_catalog = object()
         self.provider_selector = MagicMock()
         self.tool_registry = None
@@ -761,7 +760,8 @@ async def test_standalone_repl_forwards_timeout(monkeypatch) -> None:
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return _FakeServices()
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -801,7 +801,8 @@ async def test_standalone_chat_uses_workspace_in_tool_context(
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return _FakeServices()
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -842,7 +843,8 @@ async def test_standalone_path_command_runs_as_plain_message(
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return _FakeServices()
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -917,7 +919,8 @@ async def test_standalone_repl_wires_memory_services_into_turnrunner(monkeypatch
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return services
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -933,7 +936,6 @@ async def test_standalone_repl_wires_memory_services_into_turnrunner(monkeypatch
     assert captured["memory_sync_managers"] is services.memory_sync_managers
     assert captured["memory_retrievers"] is services.memory_retrievers
     assert captured["turn_capture_services"] is services.turn_capture_services
-    assert captured["session_flush_service"] is services.flush_service
     assert captured["model_catalog"] is services.model_catalog
 
 
@@ -999,6 +1001,10 @@ async def test_standalone_streams_fence_reset_owner_before_runner_write(
     replacement = None
 
     class FakeTurnRunner:
+        # Match the real TurnRunner's timeout ownership so the legacy idle
+        # wrapper cannot cancel this owner-fencing check during SQLite reset.
+        context_bound = True
+
         async def run(
             self,
             message: str,
@@ -1274,7 +1280,8 @@ async def test_standalone_repl_uses_exact_slash_tokens(monkeypatch) -> None:
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return services
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -1313,7 +1320,8 @@ async def test_standalone_slash_compact_uses_selected_physical_deployment(monkey
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return services
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -1338,11 +1346,10 @@ async def test_standalone_slash_compact_uses_selected_physical_deployment(monkey
 
 
 @pytest.mark.asyncio
-async def test_standalone_reset_refuses_non_empty_transcript_without_flush_service(
+async def test_standalone_reset_refuses_non_empty_transcript_without_checkpoint(
     monkeypatch,
 ) -> None:
     services = _FakeServices()
-    services.flush_service = None
     session_key = "standalone:test"
     services.session_manager.transcripts[session_key] = [
         SimpleNamespace(role="user", content="persisted")
@@ -1359,7 +1366,8 @@ async def test_standalone_reset_refuses_non_empty_transcript_without_flush_servi
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return services
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -1373,11 +1381,10 @@ async def test_standalone_reset_refuses_non_empty_transcript_without_flush_servi
 
 
 @pytest.mark.asyncio
-async def test_standalone_compact_missing_flush_service_does_not_block_compaction(
+async def test_standalone_compact_runs_without_memory_extraction(
     monkeypatch,
 ) -> None:
     services = _FakeServices()
-    services.flush_service = None
     session_key = "standalone:test"
     services.session_manager.transcripts[session_key] = [
         SimpleNamespace(role="user", content="persisted")
@@ -1399,7 +1406,8 @@ async def test_standalone_compact_missing_flush_service_does_not_block_compactio
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return services
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
@@ -1408,110 +1416,6 @@ async def test_standalone_compact_missing_flush_service_does_not_block_compactio
 
     await chat_cmd._standalone_repl(model="openrouter/test", session_id=session_key)
 
-    assert len(services.session_manager.compact_calls) == 1
-
-
-class _FakeFlushService:
-    def __init__(self, receipt: object | None = None, error: Exception | None = None) -> None:
-        self.receipt = receipt or SimpleNamespace(
-            mode="llm",
-            error=None,
-            indexed_chunk_count=1,
-            integrity_status="ok",
-            output_coverage_status="ok",
-            invalid_candidate_count=0,
-            candidate_missing_ids=[],
-            obligation_status="ok",
-            obligation_missing_ids=[],
-        )
-        self.error = error
-        self.calls: list[dict[str, object]] = []
-
-    async def execute(self, transcript: object, session_key: str, **kwargs) -> object:
-        self.calls.append({"transcript": transcript, "session_key": session_key, "kwargs": kwargs})
-        if self.error is not None:
-            raise self.error
-        return self.receipt
-
-
-@pytest.mark.asyncio
-async def test_standalone_compact_flushes_before_compacting(monkeypatch) -> None:
-    services = _FakeServices()
-    session_key = "standalone:test"
-    services.session_manager.transcripts[session_key] = [
-        SimpleNamespace(role="user", content="persisted")
-    ]
-    services.flush_service = _FakeFlushService()
-    services.provider_selector = _FakeProviderSelector()
-    services.config = SimpleNamespace(
-        context_budget_tokens=1234,
-        compaction=SimpleNamespace(enabled=True, model=None, timeout_seconds=12.5),
-    )
-    inputs = iter(["/compact", "/quit"])
-
-    class FakeTurnRunner:
-        def __init__(self, **kwargs) -> None:
-            return None
-
-        async def run(self, message: str, session_key: str, **kwargs):
-            yield DoneEvent()
-
-    async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
-        return next(inputs)
-
-    async def fake_build_services() -> _FakeServices:
-        return services
-
-    monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
-    monkeypatch.setattr("opensquilla.gateway.build_services", fake_build_services)
-    _install_fake_inputs(monkeypatch, inputs)
-
-    await chat_cmd._standalone_repl(model="openrouter/test", session_id=session_key)
-
-    assert len(services.flush_service.calls) == 1
-    assert services.flush_service.calls[0]["session_key"] == session_key
-    assert services.flush_service.calls[0]["kwargs"]["message_window"] == 0
-    assert services.flush_service.calls[0]["kwargs"]["segment_mode"] == "auto"
-    assert len(services.session_manager.compact_calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_standalone_compact_continues_when_flush_fails(monkeypatch) -> None:
-    services = _FakeServices()
-    session_key = "standalone:test"
-    services.session_manager.transcripts[session_key] = [
-        SimpleNamespace(role="user", content="persisted")
-    ]
-    services.flush_service = _FakeFlushService(
-        receipt=SimpleNamespace(mode="error", error="provider down")
-    )
-    services.provider_selector = _FakeProviderSelector()
-    services.config = SimpleNamespace(
-        context_budget_tokens=1234,
-        compaction=SimpleNamespace(enabled=True, model=None, timeout_seconds=12.5),
-    )
-    inputs = iter(["/compact", "/quit"])
-
-    class FakeTurnRunner:
-        def __init__(self, **kwargs) -> None:
-            return None
-
-        async def run(self, message: str, session_key: str, **kwargs):
-            yield DoneEvent()
-
-    async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
-        return next(inputs)
-
-    async def fake_build_services() -> _FakeServices:
-        return services
-
-    monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
-    monkeypatch.setattr("opensquilla.gateway.build_services", fake_build_services)
-    _install_fake_inputs(monkeypatch, inputs)
-
-    await chat_cmd._standalone_repl(model="openrouter/test", session_id=session_key)
-
-    assert len(services.flush_service.calls) == 1
     assert len(services.session_manager.compact_calls) == 1
 
 
@@ -1538,7 +1442,8 @@ async def test_standalone_slash_compact_keeps_legacy_compact_manager_compatible(
     async def fake_prompt_user(prefix: str = "[you] ", **kwargs):
         return next(inputs)
 
-    async def fake_build_services() -> _FakeServices:
+    async def fake_build_services(*, start_standalone_telemetry: bool) -> _FakeServices:
+        assert start_standalone_telemetry is True
         return services
 
     monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)

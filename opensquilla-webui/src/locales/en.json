@@ -888,6 +888,47 @@
     }
   },
   "setup": {
+    "capacity": {
+      "customOpenAI": "Custom · OpenAI-compatible",
+      "customAnthropic": "Custom · Anthropic-compatible",
+      "partialSaved": "Saved: {saved}. Not saved: {pending}. Unsaved values are retained.",
+      "providerPartialSaved": "The provider was saved. Model limits were not saved; your input is retained.",
+      "backToRouting": "Back to smart routing",
+      "editSharedEnsemble": "Edit shared ensemble",
+      "sharedEnsemble": "C3 and multi-model fusion share this lineup.",
+      "title": "Model settings",
+      "forModel": "Model settings — {model}",
+      "unknown": "Limits unconfirmed",
+      "contextWindow": "Context window",
+      "maxOutputTokens": "Maximum output length",
+      "scope": "Applies everywhere this model is used with this provider.",
+      "current": "Currently {value} tokens · {source}",
+      "source": {
+        "catalog": "Model catalog",
+        "default": "System default",
+        "config": "Global configuration",
+        "override": "Custom value"
+      },
+      "autoValue": "Auto ({value})",
+      "autoHint": "Leave blank for automatic; enter a positive whole number to override.",
+      "requestHint": "The model’s output limit; actual replies may be shorter.",
+      "localHint": "Keep this value consistent with the context configured in your local model server.",
+      "serverControlled": "Output length is controlled by the server.",
+      "restore": "Restore automatic values",
+      "positiveInteger": "Enter a positive whole number, or leave blank for automatic.",
+      "upgrade": "Update the Gateway to view and edit model limits. Existing model settings remain available.",
+      "loadFailed": "Could not load model limits. Your changes are preserved.",
+      "retry": "Retry",
+      "draftHint": "After Done, select Save changes on the settings page to apply.",
+      "done": "Done",
+      "invalid": "Check the model limits values before saving.",
+      "saved": "Model limits saved.",
+      "saveFailed": "Could not save model limits. Unsaved values have been kept.",
+      "unknownHint": "One or both model limits are unconfirmed. System defaults remain in use; you can configure the limits here.",
+      "automaticSource": "Automatic · {source}",
+      "unsaved": "Not saved",
+      "effective": "Effective limit: {value} tokens"
+    },
     "cli": {
       "advancedTitle": "Advanced · built-in CLI",
       "hintBundled": "These commands use the CLI bundled with the app; paste into a terminal to run.",
@@ -1338,7 +1379,7 @@
       "openrouterFixedDesc": "When your Model Service uses {provider}, ensemble routing uses four proposer models and one aggregator.",
       "openrouterFixedProposer": "Proposer model",
       "openrouterFixedAggregator": "Aggregator",
-      "credentialReady": "Connected",
+      "credentialReady": "Credentials ready",
       "credentialNeeded": "{provider} credentials needed",
       "credentialMissingEnv": "Needs {envKey}",
       "credentialUnknown": "Credentials not checked",
@@ -1350,7 +1391,7 @@
       "removeCandidateAria": "Remove {model}",
       "ensembleEmpty": "No candidate models yet. Save your Model Service settings to seed model tiers, or add candidates manually.",
       "ensemblePipeline": "How it works: proposer models draft in parallel, then the aggregator fuses the drafts into the final reply. Only the aggregator can call tools.",
-      "candidateModelHint": "Model ensemble does not support image analysis yet. To analyze images, switch to Intelligent model routing and configure an image-capable model, or select an image-capable model under Fixed model.",
+      "candidateModelHint": "Ensemble supports text only. For images, use intelligent routing or a fixed model that supports images.",
       "ensembleFlowDesc": "Models draft in parallel; an aggregator merges them into one answer. Uses more calls.",
       "legacyDynamicNotice": "This legacy fusion plan follows the saved model tiers. Convert it to a custom lineup to edit its members here.",
       "legacyDynamicMigrate": "Convert to custom lineup",
@@ -1369,7 +1410,7 @@
       "aggregatorNote": "Fuses every draft into the final answer; the only member that can call tools",
       "aggregatorSectionLabel": "Aggregator",
       "aggregatorSectionDesc": "Exactly one aggregator produces the final answer. Pick the strongest model in your lineup.",
-      "aggregatorInheritedNote": "No aggregator assigned — the current chat model fuses the drafts",
+      "aggregatorInheritedNote": "Follows the current model",
       "proposerSectionLabel": "Proposers",
       "proposerRoleLabel": "Proposer",
       "aggregatorRoleLabel": "Aggregator",
@@ -1387,13 +1428,13 @@
       "replaceCandidateConfirm": "Replace",
       "candidateDuplicate": "This model is already in the proposer list.",
       "addProposer": "Add proposer",
-      "chooseAggregator": "Choose aggregator",
+      "chooseAggregator": "Change model",
       "aggregatorPickerTitle": "Choose the aggregator",
       "aggregatorFromProposers": "Use an existing proposer",
       "aggregatorOtherModel": "Or choose another model",
       "capacityWarn": "{calls} model calls per turn — cost grows linearly and fusion gains taper past 4 proposers.",
       "capacityFull": "Limit of {max} proposers reached — more drafts stop improving fusion; remove one before adding another.",
-      "diversityHint": "Several proposers share a model family — adding a different vendor usually improves fusion.",
+      "diversityHint": "Consider models from different families for more varied answers.",
       "effectiveSummary": "{proposers} proposers in parallel + 1 aggregator · about {calls} model calls per turn",
       "runtimeStrategyTitle": "Runtime strategy",
       "runtimeStrategyDesc": "Success threshold, fallback, and time limits",
@@ -1406,7 +1447,8 @@
       "proposerRetriesDesc": "Retryable failures only; the initial request is not counted as a retry.",
       "proposerRetriesOption": "At most {count} retries after the initial request",
       "runtimeLimitsLabel": "Time limits",
-      "runtimeLimits": "Proposers {proposerTimeout}s total · aggregator {aggregatorTimeout}s idle between provider events (configured {configuredAggregatorTimeout}s) · outer turn deadline separate"
+      "runtimeLimits": "Proposers {proposerTimeout}s total · aggregator {aggregatorTimeout}s idle between provider events (configured {configuredAggregatorTimeout}s) · outer turn deadline separate",
+      "fallbackModelLabel": "Fallback model"
     },
     "behavior": {
       "title": "Session behavior",
@@ -1686,6 +1728,8 @@
       "tokenLabel": "Token",
       "optional": "optional",
       "tokenDesc": "Bearer token for gateways that require auth. Stored in this tab only.",
+      "tokenRequired": "Token required",
+      "reasonTokenRequired": "Authentication failed. Automatic retries are paused. Enter a valid gateway token and choose Connect.",
       "reconnect": "Reconnect",
       "connect": "Connect",
       "disconnect": "Disconnect"
@@ -1905,7 +1949,9 @@
       "dataMaintenanceAria": "Open data maintenance",
       "runTraceLabel": "Run-trace drawer in Logs",
       "runTraceDesc": "Make log lines interactive and open a per-line node-step detail drawer in the Logs view.",
-      "runTraceAria": "Run-trace drawer in Logs (takes effect after reload)"
+      "runTraceAria": "Run-trace drawer in Logs (takes effect after reload)",
+      "configFileLabel": "Configuration file",
+      "configFileDesc": "More options can be adjusted in the configuration file."
     },
     "privacy": {
       "statusDisabledByEnv": "Disabled by an environment setting.",
@@ -2101,10 +2147,98 @@
           "label": "Debounce window (s)"
         },
         "transport_name": {
+          "label": "Connection method",
           "choices": {
             "polling": "Polling",
             "webhook": "Webhook"
           }
+        },
+        "access_token": {
+          "label": "Access token"
+        },
+        "agent_id_int": {
+          "label": "Agent id (int)"
+        },
+        "app_password": {
+          "label": "App password"
+        },
+        "app_token": {
+          "label": "App-level token (xapp-...)"
+        },
+        "application_id": {
+          "label": "Application id"
+        },
+        "cool_app_code": {
+          "label": "Cool App Code"
+        },
+        "corp_id": {
+          "label": "Corp id"
+        },
+        "default_channel_id": {
+          "label": "Default channel id"
+        },
+        "device_id": {
+          "label": "Device id"
+        },
+        "domain": {
+          "label": "Domain"
+        },
+        "drop_pending_updates": {
+          "label": "Drop pending updates"
+        },
+        "encoding_aes_key": {
+          "label": "Encoding AES key"
+        },
+        "encrypt_key": {
+          "label": "Encrypt key"
+        },
+        "encryption": {
+          "label": "Encryption"
+        },
+        "gateway_url": {
+          "label": "Gateway URL"
+        },
+        "intents": {
+          "label": "Intents bitmask"
+        },
+        "password": {
+          "label": "Password"
+        },
+        "poll_idle_sleep_s": {
+          "label": "Poll idle sleep (s)"
+        },
+        "poll_limit": {
+          "label": "Poll limit"
+        },
+        "poll_timeout_s": {
+          "label": "Polling timeout (s)"
+        },
+        "reply_in_thread": {
+          "label": "Reply in thread"
+        },
+        "robot_code": {
+          "label": "Robot Code"
+        },
+        "slack_channel_id": {
+          "label": "Default channel id"
+        },
+        "token": {
+          "label": "Bot token (xoxb-...)"
+        },
+        "verification_token": {
+          "label": "Verification token"
+        },
+        "webhook_path": {
+          "label": "Webhook path"
+        },
+        "webhook_secret_token": {
+          "label": "Webhook secret token"
+        },
+        "webhook_url": {
+          "label": "Webhook URL (webhook only)"
+        },
+        "websocket_url": {
+          "label": "WebSocket URL"
         }
       },
       "groups": {
@@ -2540,6 +2674,13 @@
       "enable": "Enable",
       "disable": "Disable",
       "notReported": "Not reported",
+      "transport": {
+        "polling": "Polling",
+        "webhook": "Webhook",
+        "websocket": "WebSocket",
+        "http_sync": "HTTP sync",
+        "mixed": "Multiple connection methods"
+      },
       "tabs": {
         "overview": "Overview",
         "pairings": "Members",
@@ -3605,6 +3746,7 @@
       "autoPauseLabel": "Auto-pause",
       "states": { "off": "Off", "waiting": "Waiting for a stable prefix", "scheduled": "Scheduled", "probing": "Probing", "paused": "Idle limit reached; waiting for the next message", "stopped": "Stopped after a miss or error" }
     },
+    "sendPending": "Sending…",
     "send": "Send",
     "sendQueues": "Send (queues for after current response)",
     "sendSteers": "Send (steers the current response now)",
@@ -3764,6 +3906,24 @@
     "subagentPrefix": "Subagent: ",
     "subagentCompletion": "Subagent completion",
     "turnFailed": "Turn failed",
+    "copyDiagnosticId": "Copy diagnostic ID",
+    "copiedDiagnosticId": "Diagnostic ID copied",
+    "copyDiagnosticFailed": "Copy failed. Select the ID above and copy it manually.",
+    "partialFailureNote": "The answer above was preserved, but this turn ended with an error.",
+    "providerFailure": {
+      "rate_limited": "The model provider is rate-limiting requests. Try again later.",
+      "provider_overloaded": "The model provider is temporarily busy. Try again later.",
+      "auth_invalid": "The model provider rejected the credentials. Check the provider credentials in settings.",
+      "context_overflow": "The request exceeds the model's context window. Shorten the request or choose a larger-context model.",
+      "unsupported_feature": "The model provider does not support this request. Check the selected model's capabilities.",
+      "insufficient_credits": "The provider account has insufficient credits. Check its balance or billing settings.",
+      "model_not_found": "The configured model is unavailable. Check the model name and your access permissions.",
+      "transport_transient": "The connection to the model provider was interrupted. Check your connection and provider status.",
+      "policy_refusal": "The provider refused this request under its policy. Review the request and provider policy.",
+      "empty_response": "The model provider returned no answer. Try again or choose another model.",
+      "malformed_response": "The model provider returned an invalid response. Try again or choose another model.",
+      "bad_request": "The model provider rejected the request. Check the request and model settings."
+    },
     "restartInterruptedTitle": "OpenSquilla restarted and interrupted this task.",
     "restartInterruptedGuidance": "This task won't continue automatically. Review any existing results or tool activity, then edit the original request or continue the conversation.",
     "usageAccountingBlockedTitle": "Usage accounting temporarily unavailable",
@@ -3814,6 +3974,8 @@
     "aiModelEnsembleRouter": "AI model ensemble router",
     "routerFx": {
       "selectedModel": "Router selected {model}",
+      "executionModel": "Currently executing {model}",
+      "executionModelCompleted": "Executed by {model}",
       "ensembleModel": "Multi-model fusion",
       "ensembleSelecting": "AI model ensemble router · selecting candidates",
       "ensembleHandedOff": "AI model ensemble router · handed off to agent",
@@ -4236,6 +4398,9 @@
       },
       "clearQueue": "Clear queue",
       "removeMessage": "Remove pending message {index}",
+      "offlineRejected": "The message was not accepted. Edit it to retry, or remove it.",
+      "offlineQueued": "Saved locally. Will send when the connection is restored.",
+      "identityChanged": "Connection identity changed. Reconnect to the original gateway and account to send this message.",
       "annotationUpgradeRequired": "This queued annotation uses the retired editor. Edit the message and select the page again before sending."
     },
     "metaRuns": {
@@ -4426,6 +4591,7 @@
       "waitCompactionBeforeCommand": "Wait for context compaction before running {command}.",
       "waitResponseBeforeCommand": "Wait for the current response before running {command}.",
       "promptAnnotationBusy": "Wait for the current response to finish before sending artifact instructions.",
+      "offlineQueueFailed": "Could not queue this message. Your draft was kept.",
       "queueFull": "Queue is full — wait for the current response to finish.",
       "queuePersistenceUnavailable": "Keep this message in the composer until the fork finishes; durable recovery is unavailable.",
       "messageStillSaving": "This message hasn't finished saving — try again in a moment.",

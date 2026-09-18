@@ -887,6 +887,47 @@
     }
   },
   "setup": {
+    "capacity": {
+      "customOpenAI": "自定义 · OpenAI 兼容",
+      "customAnthropic": "自定义 · Anthropic 兼容",
+      "partialSaved": "已保存：{saved}。未保存：{pending}。未保存的输入已保留。",
+      "providerPartialSaved": "服务商已保存；模型设置未保存，输入已保留。",
+      "backToRouting": "返回智能路由",
+      "editSharedEnsemble": "编辑共享融合方案",
+      "sharedEnsemble": "此阵容由 C3 和多模型融合共用。",
+      "title": "模型设置",
+      "forModel": "模型设置 — {model}",
+      "unknown": "上限待确认",
+      "contextWindow": "上下文窗口",
+      "maxOutputTokens": "最大输出长度",
+      "scope": "应用于该服务商下所有使用此模型的位置。",
+      "current": "当前采用 {value} Token · {source}",
+      "source": {
+        "catalog": "模型目录",
+        "default": "系统默认",
+        "config": "全局配置",
+        "override": "手动设置"
+      },
+      "autoValue": "自动（{value}）",
+      "autoHint": "留空使用自动值；填写正整数可手动设置。",
+      "requestHint": "模型支持的输出上限，实际回复可能更短。",
+      "localHint": "请与本地模型服务实际配置的上下文保持一致。",
+      "serverControlled": "输出长度由服务端控制。",
+      "restore": "恢复自动",
+      "positiveInteger": "请输入正整数，或留空使用自动值。",
+      "upgrade": "请升级网关后查看和编辑模型设置。现有模型设置仍可使用。",
+      "loadFailed": "无法读取模型设置，已保留你的修改。",
+      "retry": "重试",
+      "draftHint": "完成后，返回页面点击“保存更改”生效。",
+      "done": "完成",
+      "invalid": "请先检查模型设置的填写值。",
+      "saved": "模型设置已保存。",
+      "saveFailed": "模型设置保存失败，已保留未保存的值。",
+      "unknownHint": "未找到完整的上下文或输出上限，当前采用系统默认值。可在此查看并修改。",
+      "automaticSource": "自动 · {source}",
+      "unsaved": "未保存",
+      "effective": "实际采用上限：{value} Token"
+    },
     "cli": {
       "advancedTitle": "高级 · 内置 CLI",
       "hintBundled": "以下命令使用应用内置的 CLI，可直接粘贴到终端运行。",
@@ -1337,7 +1378,7 @@
       "openrouterFixedDesc": "当模型服务使用 {provider} 时，模型融合路由固定使用四个候选生成模型和一个融合模型。",
       "openrouterFixedProposer": "候选生成模型",
       "openrouterFixedAggregator": "融合模型",
-      "credentialReady": "已连接",
+      "credentialReady": "凭据可用",
       "credentialNeeded": "需要 {provider} 凭据",
       "credentialMissingEnv": "需要 {envKey}",
       "credentialUnknown": "凭据未检查",
@@ -1349,7 +1390,7 @@
       "removeCandidateAria": "移除 {model}",
       "ensembleEmpty": "暂无候选模型。请保存模型服务设置以生成模型分层，或手动添加候选模型。",
       "ensemblePipeline": "工作方式：提案模型并行起草，融合模型汇总草稿并产出最终回答；只有融合模型可以调用工具。",
-      "candidateModelHint": "多模型融合暂不支持图片分析。如需分析图片，请切换到“智能模型路由”并配置支持图片的模型，或在“固定模型”中选择支持图片的模型。",
+      "candidateModelHint": "融合仅支持文本。图片请使用智能路由或支持图片的固定模型。",
       "ensembleFlowDesc": "多个模型并行起草,融合模型合成最终回答;调用次数更多。",
       "legacyDynamicNotice": "当前为跟随已保存模型分层的旧融合方案；转换为自定义阵容后可在此编辑成员。",
       "legacyDynamicMigrate": "转换为自定义阵容",
@@ -1368,7 +1409,7 @@
       "aggregatorNote": "汇总全部草稿并产出最终回答；唯一可调用工具的成员",
       "aggregatorSectionLabel": "融合模型",
       "aggregatorSectionDesc": "有且只有一个融合模型产出最终回答,建议选阵容中最强的模型。",
-      "aggregatorInheritedNote": "未指定融合模型——由当前聊天模型汇总草稿",
+      "aggregatorInheritedNote": "跟随当前模型",
       "proposerSectionLabel": "候选模型",
       "proposerRoleLabel": "提案者",
       "aggregatorRoleLabel": "融合者",
@@ -1385,15 +1426,15 @@
       "replaceCandidateTitle": "替换 {model}",
       "replaceCandidateConfirm": "替换",
       "candidateDuplicate": "该模型已在提案模型列表中。",
-      "addProposer": "添加提案模型",
-      "chooseAggregator": "选择融合模型",
+      "addProposer": "添加候选模型",
+      "chooseAggregator": "更换模型",
       "aggregatorPickerTitle": "选择融合模型",
       "aggregatorFromProposers": "从现有提案模型中选择",
       "aggregatorOtherModel": "或选择其他模型",
       "capacityWarn": "每轮 {calls} 次模型调用——费用线性增长，超过 4 个提案模型后融合收益明显递减。",
       "capacityFull": "已达上限 {max} 个提案模型——更多草稿不会带来更好的融合结果，请先移除一个再添加。",
-      "diversityHint": "多个提案来自同一模型家族——添加不同厂商的模型通常能提升融合质量。",
-      "effectiveSummary": "{proposers} 个提案模型并行 + 1 个融合模型 · 预计每轮 {calls} 次调用",
+      "diversityHint": "可搭配不同模型家族，增加回答的多样性。",
+      "effectiveSummary": "{proposers} 个候选模型 + 1 个融合模型 · 每轮约 {calls} 次调用",
       "runtimeStrategyTitle": "运行策略",
       "runtimeStrategyDesc": "正常返回阈值、失败处理与时限",
       "successThresholdLabel": "最低通过条件",
@@ -1405,7 +1446,8 @@
       "proposerRetriesDesc": "仅重试可恢复的失败；首次请求不计为重试。",
       "proposerRetriesOption": "首次请求失败后最多重试 {count} 次",
       "runtimeLimitsLabel": "运行时限",
-      "runtimeLimits": "每个提案总时限 {proposerTimeout} 秒 · 融合模型事件间空闲时限 {aggregatorTimeout} 秒（配置值 {configuredAggregatorTimeout} 秒）· 整轮总时限另行控制"
+      "runtimeLimits": "每个提案总时限 {proposerTimeout} 秒 · 融合模型事件间空闲时限 {aggregatorTimeout} 秒（配置值 {configuredAggregatorTimeout} 秒）· 整轮总时限另行控制",
+      "fallbackModelLabel": "回退模型"
     },
     "behavior": {
       "title": "会话行为",
@@ -1685,6 +1727,8 @@
       "tokenLabel": "令牌",
       "optional": "可选",
       "tokenDesc": "用于需要鉴权的网关的 Bearer 令牌。仅存储在此标签页中。",
+      "tokenRequired": "需要令牌",
+      "reasonTokenRequired": "身份验证失败，已暂停自动重试。请输入有效的网关令牌，然后点击连接。",
       "reconnect": "重新连接",
       "connect": "连接",
       "disconnect": "断开"
@@ -1904,7 +1948,9 @@
       "dataMaintenanceAria": "打开数据维护",
       "runTraceLabel": "日志中的运行追踪抽屉",
       "runTraceDesc": "使日志行可交互，并在日志视图中为每行打开节点步骤详情抽屉。",
-      "runTraceAria": "日志中的运行追踪抽屉（重新加载后生效）"
+      "runTraceAria": "日志中的运行追踪抽屉（重新加载后生效）",
+      "configFileLabel": "配置文件",
+      "configFileDesc": "更多选项可在配置文件中调整。"
     },
     "privacy": {
       "statusDisabledByEnv": "已由环境设置关闭。",
@@ -2100,10 +2146,98 @@
           "label": "去抖窗口（秒）"
         },
         "transport_name": {
+          "label": "连接方式",
           "choices": {
             "polling": "轮询",
             "webhook": "Webhook（回调）"
           }
+        },
+        "access_token": {
+          "label": "访问令牌"
+        },
+        "agent_id_int": {
+          "label": "Agent id（整数）"
+        },
+        "app_password": {
+          "label": "应用密码"
+        },
+        "app_token": {
+          "label": "应用级令牌（xapp-...）"
+        },
+        "application_id": {
+          "label": "应用 ID"
+        },
+        "cool_app_code": {
+          "label": "酷应用 Code"
+        },
+        "corp_id": {
+          "label": "企业 ID"
+        },
+        "default_channel_id": {
+          "label": "默认频道 ID"
+        },
+        "device_id": {
+          "label": "设备 ID"
+        },
+        "domain": {
+          "label": "域名"
+        },
+        "drop_pending_updates": {
+          "label": "丢弃待处理更新"
+        },
+        "encoding_aes_key": {
+          "label": "Encoding AES 密钥"
+        },
+        "encrypt_key": {
+          "label": "加密密钥"
+        },
+        "encryption": {
+          "label": "加密方式"
+        },
+        "gateway_url": {
+          "label": "网关地址"
+        },
+        "intents": {
+          "label": "Intents 位掩码"
+        },
+        "password": {
+          "label": "密码"
+        },
+        "poll_idle_sleep_s": {
+          "label": "轮询空闲等待（秒）"
+        },
+        "poll_limit": {
+          "label": "单次轮询条数"
+        },
+        "poll_timeout_s": {
+          "label": "轮询超时（秒）"
+        },
+        "reply_in_thread": {
+          "label": "以话题回复"
+        },
+        "robot_code": {
+          "label": "机器人 Code"
+        },
+        "slack_channel_id": {
+          "label": "默认频道 ID"
+        },
+        "token": {
+          "label": "机器人令牌（xoxb-...）"
+        },
+        "verification_token": {
+          "label": "验证令牌"
+        },
+        "webhook_path": {
+          "label": "Webhook 路径"
+        },
+        "webhook_secret_token": {
+          "label": "Webhook 密钥令牌"
+        },
+        "webhook_url": {
+          "label": "Webhook URL（仅回调模式）"
+        },
+        "websocket_url": {
+          "label": "WebSocket 地址"
         }
       },
       "groups": {
@@ -2539,6 +2673,13 @@
       "enable": "启用",
       "disable": "禁用",
       "notReported": "未报告",
+      "transport": {
+        "polling": "轮询",
+        "webhook": "Webhook（回调）",
+        "websocket": "WebSocket 连接",
+        "http_sync": "HTTP 同步",
+        "mixed": "支持多种连接方式"
+      },
       "tabs": {
         "overview": "概览",
         "pairings": "成员",
@@ -3604,6 +3745,7 @@
       "autoPauseLabel": "自动暂停",
       "states": { "off": "已关闭", "waiting": "等待稳定前缀", "scheduled": "已计划", "probing": "正在探测", "paused": "空闲超时，等待下一条消息", "stopped": "未命中或出错后已停止" }
     },
+    "sendPending": "正在发送…",
     "send": "发送",
     "sendQueues": "发送（排队等待当前回复结束）",
     "sendSteers": "发送（立即引导当前回复）",
@@ -3763,6 +3905,24 @@
     "subagentPrefix": "子智能体：",
     "subagentCompletion": "子智能体完成",
     "turnFailed": "本轮失败",
+    "copyDiagnosticId": "复制诊断编号",
+    "copiedDiagnosticId": "诊断编号已复制",
+    "copyDiagnosticFailed": "复制失败，请选中上方编号手动复制。",
+    "partialFailureNote": "已保留上方回答，但本轮因错误而未正常完成。",
+    "providerFailure": {
+      "rate_limited": "模型服务正在限流，请稍后再试。",
+      "provider_overloaded": "模型服务暂时繁忙，请稍后再试。",
+      "auth_invalid": "模型服务拒绝了当前凭据，请在设置中检查服务商凭据。",
+      "context_overflow": "请求超出模型上下文长度，请缩短请求或选择更大上下文的模型。",
+      "unsupported_feature": "模型服务不支持此请求，请检查所选模型的能力。",
+      "insufficient_credits": "服务商账户额度不足，请检查余额或计费设置。",
+      "model_not_found": "配置的模型不可用，请检查模型名称和访问权限。",
+      "transport_transient": "与模型服务的连接已中断，请检查网络连接和服务商状态。",
+      "policy_refusal": "服务商因其政策拒绝了请求，请检查请求内容和服务商政策。",
+      "empty_response": "模型服务未返回回答，请重试或选择其他模型。",
+      "malformed_response": "模型服务返回了无效响应，请重试或选择其他模型。",
+      "bad_request": "模型服务拒绝了请求，请检查请求内容和模型设置。"
+    },
     "restartInterruptedTitle": "OpenSquilla 重启导致任务中断。",
     "restartInterruptedGuidance": "任务不会自动继续。请检查已有结果或工具操作，然后编辑原请求或继续对话。",
     "usageAccountingBlockedTitle": "用量记账暂时不可用",
@@ -3813,6 +3973,8 @@
     "aiModelEnsembleRouter": "AI 智能融合路由",
     "routerFx": {
       "selectedModel": "路由已选择 {model}",
+      "executionModel": "当前执行模型：{model}",
+      "executionModelCompleted": "实际执行模型：{model}",
       "ensembleModel": "多模型融合",
       "ensembleSelecting": "AI 智能融合路由 · 正在选择候选",
       "ensembleHandedOff": "AI 智能融合路由 · 已交给 Agent",
@@ -4235,6 +4397,9 @@
       },
       "clearQueue": "清空队列",
       "removeMessage": "移除待发送消息 {index}",
+      "offlineRejected": "消息未被接收。请编辑后重试，或移除消息。",
+      "offlineQueued": "已保存到本地，连接恢复后自动发送。",
+      "identityChanged": "连接身份已改变。请重新连接原来的网关和账号后发送此消息。",
       "annotationUpgradeRequired": "这条待发批注使用旧编辑器。请编辑消息，并重新选择页面后发送。"
     },
     "metaRuns": {
@@ -4425,6 +4590,7 @@
       "waitCompactionBeforeCommand": "请等待上下文压缩完成后再运行 {command}。",
       "waitResponseBeforeCommand": "请等待当前回复结束后再运行 {command}。",
       "promptAnnotationBusy": "请等待当前回复结束后，再发送产物修改指令。",
+      "offlineQueueFailed": "无法加入发送队列，草稿已保留。",
       "queueFull": "队列已满 — 请等待当前回复结束。",
       "queuePersistenceUnavailable": "请将此消息保留在输入框，等待分支完成；当前无法进行持久恢复。",
       "messageStillSaving": "这条消息尚未保存完成 — 请稍后再试。",
