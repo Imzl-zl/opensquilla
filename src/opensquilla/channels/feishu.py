@@ -850,7 +850,14 @@ class FeishuWebSocketTransport:
             result = disconnect()
             if inspect.iscoroutine(result):
                 sdk_loop = self._sdk_event_loop()
-                if sdk_loop is not None and sdk_loop.is_running():
+                worker_alive = self._thread is not None and self._thread.is_alive()
+                if (
+                    sdk_loop is not None
+                    and not sdk_loop.is_closed()
+                    and (worker_alive or sdk_loop.is_running())
+                ):
+                    # Client.start() pauses this loop between connect/reconnect
+                    # and _select. Its socket and lock still belong to it.
                     future = asyncio.run_coroutine_threadsafe(result, sdk_loop)
                     try:
                         await asyncio.wait_for(
@@ -867,11 +874,10 @@ class FeishuWebSocketTransport:
                         )
                         future.cancel()
                         self._stop_sdk_event_loop()
-                        retry = disconnect()
-                        if inspect.isawaitable(retry):
-                            await retry
-                        elif hasattr(retry, "close"):
-                            retry.close()
+                        # Cancellation/draining stays on the owning loop; a
+                        # caller-loop retry cannot safely close its transport.
+                elif sdk_loop is not None:
+                    result.close()
                 else:
                     await result
             elif inspect.isawaitable(result):

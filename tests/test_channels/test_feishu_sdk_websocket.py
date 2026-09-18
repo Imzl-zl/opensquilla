@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 from http import HTTPStatus
 from typing import Any
@@ -334,6 +335,103 @@ async def test_real_feishu_sdk_terminal_reconnect_stops_and_can_restart(
         finally:
             await transport.stop()
         assert transport._thread is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reject_first", [False, True], ids=["initial-connect", "reconnect"])
+async def test_real_feishu_sdk_stop_between_loop_phases_keeps_disconnect_on_worker(
+    monkeypatch: pytest.MonkeyPatch, real_sdk: Any, reject_first: bool,
+) -> None:
+    paused = threading.Event()
+    resume = threading.Event()
+    disconnect_loops: list[asyncio.AbstractEventLoop] = []
+    attempts = 0
+
+    def handshake(connection: ServerConnection, _request: Request) -> Response | None:
+        nonlocal attempts
+        attempts += 1
+        if reject_first and attempts == 1:
+            return connection.respond(HTTPStatus.SERVICE_UNAVAILABLE, "try again")
+        return None
+
+    async def accept(connection: ServerConnection) -> None:
+        await connection.wait_closed()
+
+    async def ignore_event(_event: Any) -> None:
+        pass
+
+    disconnect = real_sdk.Client._disconnect
+
+    async def observe_disconnect(client: Any) -> None:
+        disconnect_loops.append(asyncio.get_running_loop())
+        await disconnect(client)
+
+    monkeypatch.setattr(real_sdk.Client, "_disconnect", observe_disconnect)
+    async with serve(accept, "127.0.0.1", 0, process_request=handshake) as server:
+        port = server.sockets[0].getsockname()[1]
+
+        def endpoint(client: Any) -> str:
+            client._reconnect_nonce = 0
+            client._reconnect_interval = 0.01
+            return f"ws://127.0.0.1:{port}/callback?device_id=local&service_id=1"
+
+        monkeypatch.setattr(real_sdk.Client, "_get_conn_url", endpoint)
+        transport = FeishuWebSocketTransport(
+            FeishuChannelConfig(
+                app_id="local-test-app", app_secret="local-test-secret",
+                connection_mode="websocket",
+            )
+        )
+        bind = transport._bind_sdk_event_loop
+
+        def bind_and_pause_between_phases(loop: asyncio.AbstractEventLoop) -> None:
+            bind(loop)
+            run = loop.run_until_complete
+
+            def run_then_pause(future: Any) -> Any:
+                value = run(future)
+                if transport._ws_client._conn is not None and not paused.is_set():
+                    # The real SDK briefly stops its loop between connect (or
+                    # reconnect) and _select. Make that ownership race exact.
+                    paused.set()
+                    assert resume.wait(timeout=5), "test did not release SDK phase boundary"
+                return value
+
+            monkeypatch.setattr(loop, "run_until_complete", run_then_pause)
+
+        monkeypatch.setattr(transport, "_bind_sdk_event_loop", bind_and_pause_between_phases)
+        stopping: asyncio.Task[None] | None = None
+        try:
+            async with asyncio.timeout(10):
+                await transport.start(ignore_event)
+                while not paused.is_set():
+                    await asyncio.sleep(0.01)
+                worker = transport._thread
+                worker_loop = transport._worker_loop
+                assert worker is not None and worker.is_alive()
+                assert worker_loop is not None and not worker_loop.is_running()
+                stopping = asyncio.create_task(transport.stop())
+                await asyncio.sleep(0)
+                # Even a temporarily idle loop still owns its socket/lock.
+                assert all(loop is worker_loop for loop in disconnect_loops)
+                resume.set()
+                await stopping
+                assert not worker.is_alive()
+                assert worker_loop.is_closed()
+                assert not asyncio.all_tasks(worker_loop)
+                assert transport._ws_client._conn is None
+                assert transport._thread is None
+                assert "last_error" not in (await transport.health_check()).extra
+                assert disconnect_loops and all(loop is worker_loop for loop in disconnect_loops)
+
+                await transport.start(ignore_event)
+                assert (await transport.health_check()).connected
+                assert transport._thread is not worker
+        finally:
+            resume.set()
+            if stopping is not None:
+                await asyncio.gather(stopping, return_exceptions=True)
+            await transport.stop()
 
 
 @pytest.mark.asyncio
