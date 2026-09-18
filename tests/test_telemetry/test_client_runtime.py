@@ -43,6 +43,33 @@ async def offline_uploads(monkeypatch: pytest.MonkeyPatch):
         yield transport
 
 
+@pytest.fixture
+def expire_shutdown_deadline(monkeypatch: pytest.MonkeyPatch):
+    contexts: list[tuple[float, asyncio.Timeout]] = []
+
+    def controlled_timeout_at(deadline: float) -> asyncio.Timeout:
+        # Drive the real asyncio cancellation after the intended upload state
+        # is reached, independently of SQLite or worker scheduling latency.
+        timeout = asyncio.timeout(None)
+        contexts.append((deadline, timeout))
+        return timeout
+
+    monkeypatch.setattr(
+        runtime_module,
+        "asyncio",
+        SimpleNamespace(**(vars(asyncio) | {"timeout_at": controlled_timeout_at})),
+    )
+
+    def expire(runtime: ScopedTelemetryRuntime, *, cancel: bool = True) -> None:
+        assert contexts, "shutdown must install a bounded upload timeout"
+        assert all(deadline == runtime._shutdown_deadline for deadline, _ in contexts)
+        if cancel:
+            for _, timeout in contexts:
+                timeout.reschedule(asyncio.get_running_loop().time())
+
+    return expire
+
+
 def _accepted_response(request: httpx.Request) -> httpx.Response:
     payload = json.loads(request.content)
     return httpx.Response(
@@ -509,7 +536,8 @@ async def test_close_uploads_records_created_after_empty_startup_cycle(
 
 @pytest.mark.parametrize("cancel_close", [False, True])
 async def test_close_cancels_stalled_upload_and_preserves_unacknowledged_event(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offline_uploads, cancel_close: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offline_uploads, cancel_close: bool,
+    expire_shutdown_deadline,
 ) -> None:
     entered = asyncio.Event()
     cancelled = asyncio.Event()
@@ -526,13 +554,19 @@ async def test_close_cancels_stalled_upload_and_preserves_unacknowledged_event(
     await runtime.record(_turn_event())
     monkeypatch.setattr(runtime_module, "SHUTDOWN_UPLOAD_TIMEOUT_SECONDS", 0.05)
     closing = asyncio.create_task(runtime.close())
-    await asyncio.wait_for(entered.wait(), timeout=1)
-    if cancel_close:
-        closing.cancel()
-        with pytest.raises(asyncio.CancelledError):
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        expire_shutdown_deadline(runtime, cancel=not cancel_close)
+        if cancel_close:
+            closing.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(closing, timeout=1)
+        else:
             await asyncio.wait_for(closing, timeout=1)
-    else:
-        await asyncio.wait_for(closing, timeout=1)
+    finally:
+        if not closing.done():
+            closing.cancel()
+        await asyncio.gather(closing, return_exceptions=True)
 
     assert cancelled.is_set()
     assert runtime.opened_scopes == frozenset()
@@ -709,15 +743,20 @@ async def test_prepare_shutdown_releases_send_lock_and_keeps_producer_records_op
 
 
 async def test_close_uploads_other_scope_while_inflight_request_stalls(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offline_uploads
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offline_uploads, expire_shutdown_deadline
 ) -> None:
     entered = asyncio.Event()
     accepted_growth = asyncio.Event()
+    acknowledged_growth = asyncio.Event()
+    cancelled_reliability = asyncio.Event()
 
     async def stalled_reliability(request):
         if request.url.path == "/v1/reliability/events":
             entered.set()
-            await asyncio.Event().wait()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled_reliability.set()
         accepted_growth.set()
         return _accepted_response(request)
 
@@ -744,12 +783,32 @@ async def test_close_uploads_other_scope_while_inflight_request_stalls(
         strict=True,
     )
     await runtime.record(growth)
+    growth_runtime = await runtime._scope_runtime(TelemetryScope.GROWTH)
+    assert growth_runtime is not None
+    acknowledge = growth_runtime.outbox.acknowledge
+
+    async def acknowledge_growth(lease_id):
+        result = await acknowledge(lease_id)
+        acknowledged_growth.set()
+        return result
+
+    monkeypatch.setattr(growth_runtime.outbox, "acknowledge", acknowledge_growth)
     await runtime.start()
     await asyncio.wait_for(entered.wait(), timeout=1)
     monkeypatch.setattr(runtime_module, "SHUTDOWN_UPLOAD_TIMEOUT_SECONDS", 0.1)
-    await asyncio.wait_for(runtime.close(), timeout=1)
+    closing = asyncio.create_task(runtime.close())
+    try:
+        await asyncio.wait_for(acknowledged_growth.wait(), timeout=1)
+        assert not cancelled_reliability.is_set()
+        expire_shutdown_deadline(runtime)
+        await asyncio.wait_for(closing, timeout=1)
+    finally:
+        if not closing.done():
+            closing.cancel()
+        await asyncio.gather(closing, return_exceptions=True)
 
     assert accepted_growth.is_set()
+    assert cancelled_reliability.is_set()
     for scope, expected_pending in ((TelemetryScope.RELIABILITY, 1), (TelemetryScope.GROWTH, 0)):
         outbox = await TelemetryOutbox.open(tmp_path, scope)
         try:
