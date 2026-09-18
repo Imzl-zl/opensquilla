@@ -260,6 +260,7 @@ from opensquilla.sandbox.run_mode_policy import (
 )
 from opensquilla.session.keys import canonicalize_session_key, normalize_agent_id, parse_agent_id
 from opensquilla.session.models import (
+    AgentTaskRecord,
     AgentTaskStatus,
     SessionStatus,
 )
@@ -1922,6 +1923,38 @@ async def _overlay_runtime_task_snapshot(
             exc_info=True,
         )
         return
+
+    terminal_rows = getattr(snapshot, "terminal_tasks", ())
+    terminal_by_id = {
+        row.task_id: _task_summary(row)
+        for row in terminal_rows
+        if isinstance(row, AgentTaskRecord)
+        and row.session_key == session_key
+        and _enum_value(row.status) in {"succeeded", "failed", "cancelled", "timeout", "abandoned"}
+    } if isinstance(terminal_rows, (tuple, list)) else {}
+    if terminal_by_id:
+        # An explicit terminal record wins over an older ledger projection.
+        # Empty live ownership alone does not: acceptance may still be between
+        # its durable QUEUED write and runtime activation.
+        tasks = [
+            terminal_by_id.get(str(task.get("task_id") or ""), task)
+            if isinstance(task, dict) else task
+            for task in task_state.get("tasks", [])
+        ]
+        task_state["tasks"] = tasks
+        active = [task for task in tasks if task.get("status") in {"queued", "running"}]
+        running = [task for task in active if task.get("status") == "running"]
+        task_state["active_task"] = (
+            max(running, key=lambda task: task.get("created_at") or 0)
+            if running else min(active, key=lambda task: (
+                task.get("created_at") or 0, task.get("task_id") or "",
+            )) if active else None
+        )
+        if tasks:
+            task_state["last_task"] = max(tasks, key=lambda task: task.get("created_at") or 0)
+        task_state["run_status"] = _task_run_status(
+            task_state.get("active_task"), task_state.get("last_task"),
+        )
 
     running_value = getattr(snapshot, "running_task_id", None)
     running_task_id = (

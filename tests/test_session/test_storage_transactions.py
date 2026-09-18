@@ -345,10 +345,11 @@ async def test_concurrent_task_creates_do_not_share_a_transaction(tmp_path) -> N
 
 
 @pytest.mark.asyncio
-async def test_read_waits_instead_of_observing_an_uncommitted_task(tmp_path) -> None:
-    """Reads on the shared connection must not expose another operation's phantom."""
+@pytest.mark.parametrize("memory", [False, True])
+async def test_read_never_observes_an_uncommitted_task(tmp_path, memory) -> None:
+    """WAL reads see committed data; shared-connection fallbacks wait for commit."""
 
-    storage = await SessionStorage.open(str(tmp_path / "sessions.db"))
+    storage = await SessionStorage.open(":memory:" if memory else str(tmp_path / "sessions.db"))
     gate = _CommitGateConnection(storage.conn, commit_count=1)
     storage._conn = gate
     writer = asyncio.create_task(storage.create_agent_task(_agent_task("pending-task")))
@@ -357,15 +358,17 @@ async def test_read_waits_instead_of_observing_an_uncommitted_task(tmp_path) -> 
         await gate.wait_until_commit(0)
         reader = asyncio.create_task(storage.get_agent_task("pending-task"))
 
-        # A transaction-level operation gate keeps the read pending until the
-        # write is committed.  Without it, the same connection sees its own
-        # uncommitted INSERT and returns a phantom row.
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(asyncio.shield(reader), timeout=0.1)
+        if memory:
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(asyncio.shield(reader), timeout=0.1)
+        else:
+            assert await asyncio.wait_for(reader, timeout=0.1) is None
 
         gate.release_commit(0)
         await writer
-        assert (await reader) is not None
+        if memory:
+            assert (await reader) is not None
+        assert await storage.get_agent_task("pending-task") is not None
     finally:
         gate.release_all()
         pending: list[asyncio.Task[Any]] = [writer]
@@ -413,9 +416,9 @@ async def test_operation_gate_wait_is_bounded_by_the_write_busy_budget(tmp_path)
 
 @pytest.mark.asyncio
 async def test_read_operation_gate_wait_is_bounded_by_the_busy_budget(tmp_path) -> None:
-    """An explicitly interactive read returns busy instead of waiting forever."""
+    """An interactive shared-connection fallback still has a bounded gate wait."""
 
-    storage = await SessionStorage.open(str(tmp_path / "sessions.db"))
+    storage = await SessionStorage.open(":memory:")
     storage._busy_budget_seconds = 0.05
     await storage._operation_lock.acquire()
     with bounded_interactive_storage_reads():
@@ -444,9 +447,9 @@ async def test_read_operation_gate_wait_is_bounded_by_the_busy_budget(tmp_path) 
 async def test_internal_read_operation_gate_keeps_waiting_without_interactive_scope(
     tmp_path,
 ) -> None:
-    """Internal and CLI reads retain the pre-existing wait-for-writer contract."""
+    """Internal shared-connection fallbacks retain the wait-for-writer contract."""
 
-    storage = await SessionStorage.open(str(tmp_path / "sessions.db"))
+    storage = await SessionStorage.open(":memory:")
     storage._busy_budget_seconds = 0.01
     await storage._operation_lock.acquire()
     read = asyncio.create_task(storage.get_session("agent:main:webchat:internal-read"))

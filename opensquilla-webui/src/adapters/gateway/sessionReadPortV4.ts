@@ -474,7 +474,7 @@ export function createV4SessionReadPort(
       let closed = false
       let subscribedGeneration: number | null = null
 
-      const setup = (async (): Promise<OpenContext> => {
+      async function createContext(): Promise<OpenContext> {
         await rpc.ready?.({
           timeoutMs: READY_TIMEOUT_MS,
           signal: request.signal,
@@ -662,6 +662,11 @@ export function createV4SessionReadPort(
             // succeeded. Repeating that idempotent registration is safe; an
             // established subscription never takes the unsubscribe/open path.
             if (!acknowledgedSubscription) {
+              // Recovery may have just reacquired admission after ready failed.
+              // Join its in-flight registration before deciding to repeat it.
+              await subscribePromise.catch(() => {})
+            }
+            if (!acknowledgedSubscription) {
               const raw = await rpc.request(
                 SESSIONS_MESSAGES_SUBSCRIBE_METHOD,
                 subscribeParams,
@@ -779,12 +784,26 @@ export function createV4SessionReadPort(
           retryMetadata,
           reconcile,
         }
-      })().catch(error => {
-        throw mapSessionReadError(error)
-      })
-      void setup.catch(() => {})
+      }
+      let setup: Promise<OpenContext> | null = null
+      function acquireContext(): Promise<OpenContext> {
+        if (closed || request.signal.aborted) return Promise.reject(abortError())
+        if (setup) return setup
+        const pending = createContext().catch(error => { throw mapSessionReadError(error) })
+        setup = pending
+        // A failed ready/admission attempt has not established a subscription.
+        // Keep its original consumers failed, but let the next explicit retry
+        // acquire one fresh context instead of replaying a rejected promise.
+        void pending.catch(error => {
+          if (setup === pending && error instanceof SessionReadFailure && error.retryable) {
+            setup = null
+          }
+        })
+        return pending
+      }
+      const initialSetup = acquireContext()
 
-      const historyRead = (historyRequest: SessionReadPortHistoryRequest) => setup.then(
+      const historyRead = (historyRequest: SessionReadPortHistoryRequest) => acquireContext().then(
         context => context.readHistory(historyRequest),
       )
 
@@ -820,12 +839,12 @@ export function createV4SessionReadPort(
       }
 
       return Object.freeze({
-        criticalRequestsQueued: setup.then(context => context.criticalRequestsQueued),
-        live: setup.then(context => context.live),
-        metadata: setup.then(context => context.metadata),
+        criticalRequestsQueued: initialSetup.then(context => context.criticalRequestsQueued),
+        live: initialSetup.then(context => context.live),
+        metadata: initialSetup.then(context => context.metadata),
         readHistory: historyRead,
-        retryMetadata: () => setup.then(context => context.retryMetadata()),
-        reconcile: () => setup.then(context => context.reconcile()),
+        retryMetadata: () => acquireContext().then(context => context.retryMetadata()),
+        reconcile: () => acquireContext().then(context => context.reconcile()),
         close,
       })
     },

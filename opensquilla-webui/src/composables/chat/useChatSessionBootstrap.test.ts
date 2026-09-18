@@ -32,6 +32,7 @@ function createBootstrap(overrides: {
   criticalRequestsQueued?: () => Promise<void>
   reconcileSession?: (context: SessionBootstrapPhaseContext) => Promise<SessionSubscriptionOutcome>
   connectionState?: Ref<string>
+  metadataRecoveryError?: Ref<unknown>
 } = {}) {
   const loadHistoryImplementation = overrides.loadHistory || (async () => ({ ok: true }))
   const loadHistory = vi.fn(async (
@@ -71,6 +72,7 @@ function createBootstrap(overrides: {
     subscribeSession,
     reconcileSession: overrides.reconcileSession,
     connectionState: overrides.connectionState,
+    metadataRecoveryError: overrides.metadataRecoveryError,
     cancelHistory,
     cancelSubscription,
   })
@@ -125,6 +127,30 @@ describe('useChatSessionBootstrap', () => {
     expect(openSessionRead).toHaveBeenCalledOnce()
     expect(closeLease).not.toHaveBeenCalled()
     expect(api.livePhase.value).toBe('ready')
+    api.cancelSessionBootstrap()
+  })
+
+  it('reconciles terminal state after deferred metadata is busy on an otherwise ready subscription', async () => {
+    vi.useFakeTimers()
+    const metadataRecoveryError = ref<unknown>(null)
+    const reconcileSession = vi.fn(async () => {
+      metadataRecoveryError.value = null
+      return LIVE_READY
+    })
+    const { api, openSessionRead, closeLease } = createBootstrap({
+      connectionState: ref('connected'), metadataRecoveryError, reconcileSession,
+    })
+    const run = api.startSessionBootstrap()
+    await Promise.all([run.history, run.live])
+    expect(api.livePhase.value).toBe('ready')
+    metadataRecoveryError.value = new SessionReadFailure('busy', 'storage busy', true, 100)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(reconcileSession).toHaveBeenCalledOnce()
+    expect(api.livePhase.value).toBe('ready')
+    expect(openSessionRead).toHaveBeenCalledOnce()
+    expect(closeLease).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(reconcileSession).toHaveBeenCalledOnce()
     api.cancelSessionBootstrap()
   })
 
