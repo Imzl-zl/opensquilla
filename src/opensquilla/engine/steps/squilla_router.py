@@ -1042,6 +1042,9 @@ def _complete_request_estimated_tokens(
     history_messages = _token_estimate(
         metadata.get("routing_history_capacity_message_count")
     ) or 0
+    additional_context_tokens = _token_estimate(
+        metadata.get("routing_additional_request_context_tokens")
+    ) or 0
 
     fixed_payload: dict[str, Any] = {
         "system": _request_jsonable(ctx.system_prompt),
@@ -1079,7 +1082,7 @@ def _complete_request_estimated_tokens(
     )
 
     request_context_wrapper_tokens = 0
-    if (
+    if additional_context_tokens or (
         isinstance(ctx.system_prompt, tuple)
         and len(ctx.system_prompt) == 2
         and str(ctx.system_prompt[1] or "").strip()
@@ -1120,6 +1123,7 @@ def _complete_request_estimated_tokens(
         + history_tokens
         + fixed_tokens
         + skills_context_tokens
+        + additional_context_tokens
         + request_context_wrapper_tokens
         + runtime_context_tokens
         + framing_tokens

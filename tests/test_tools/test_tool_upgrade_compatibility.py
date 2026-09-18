@@ -163,12 +163,18 @@ def test_tool_context_appends_new_runtime_fields_after_legacy_fields() -> None:
         "execution_status_snapshot",
         "router_control_routing_revision",
         "skill_install_turn",
+        "suspend_compute_slot",
+        "update_progress",
+        "usage_root_turn_id",
         "workspace_files",
         "attachment_working_files",
         "persist_attachment_working_files",
     ]
 
     assert ToolContext().skill_install_turn is None
+    assert ToolContext().suspend_compute_slot is None
+    assert ToolContext().update_progress is None
+    assert ToolContext().usage_root_turn_id is None
 
 
 def test_tool_context_preserves_complete_legacy_positional_constructor() -> None:
@@ -248,6 +254,33 @@ def test_tool_context_preserves_install_receipt_positional_constructor() -> None
     context = ToolContext(*published_values)
 
     assert context.skill_install_turn is install_receipts
+    assert context.workspace_files == []
+    assert context.attachment_working_files == {}
+    assert context.persist_attachment_working_files is None
+    assert context.workspace_files is not defaults.workspace_files
+    assert context.attachment_working_files is not defaults.attachment_working_files
+
+
+def test_attachment_fields_follow_published_shared_runtime_positions() -> None:
+    defaults = ToolContext()
+    published_fields = fields(ToolContext)[:115]
+    assert [item.name for item in published_fields[-3:]] == [
+        "suspend_compute_slot", "update_progress", "usage_root_turn_id",
+    ]
+
+    def suspend():
+        return "suspended"
+
+    async def progress(**kwargs):
+        return kwargs
+
+    published_values = [getattr(defaults, item.name) for item in published_fields]
+    published_values[-3:] = [suspend, progress, "synthetic-root-turn"]
+    context = ToolContext(*published_values)
+
+    assert context.suspend_compute_slot is suspend
+    assert context.update_progress is progress
+    assert context.usage_root_turn_id == "synthetic-root-turn"
     assert context.workspace_files == []
     assert context.attachment_working_files == {}
     assert context.persist_attachment_working_files is None

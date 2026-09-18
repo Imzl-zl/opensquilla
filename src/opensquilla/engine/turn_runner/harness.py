@@ -281,6 +281,7 @@ class _TurnRunnerPipelineExecutionAdapter(PipelineExecutionPort):
         kwargs: dict[str, Any] = {
             "semantic_message": request.semantic_message,
             "routing_hint": request.routing_hint,
+            "additional_request_context_tokens": request.additional_request_context_tokens,
             "ingress_pipeline_steps": request.ingress_pipeline_steps,
             "prev_assistant_text": request.prev_assistant_text,
             "prev_assistant_usage": request.prev_assistant_usage,
@@ -1008,6 +1009,8 @@ class _TurnRunnerAgentFactoryAdapter(AgentFactoryPort):
                 execution_id=execution_id,
                 agent_run_id=execution_id,
                 turn_id=turn_id or None,
+                root_turn_id=getattr(tool_context, "usage_root_turn_id", None) or turn_id or None,
+                parent_turn_id=getattr(tool_context, "parent_task_id", None),
                 session_id=session_id,
                 session_epoch=max(0, int(session_epoch)),
                 agent_id=agent_id,
@@ -1564,7 +1567,13 @@ class _TurnRunnerSystemPromptRefreshAdapter(SystemPromptRefreshPort):
         refreshed_prompt = (
             assembled[0] if isinstance(assembled, tuple) else assembled
         )
-        agent.refresh_system_prompt(refreshed_prompt)
+        from opensquilla.engine.collaboration_prompt import with_collaboration_instructions
+
+        refreshed_with_intent = with_collaboration_instructions(
+            refreshed_prompt, getattr(agent, "_tool_context", None),
+        )
+        assert isinstance(refreshed_with_intent, str)
+        agent.refresh_system_prompt(refreshed_with_intent)
 
 class _TurnRunnerMemorySyncNotifyAdapter(MemorySyncNotifyPort):
     """Notify ``sync_manager.notify_message(byte_count)`` post-stream.

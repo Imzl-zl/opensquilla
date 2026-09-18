@@ -93,6 +93,84 @@ async def test_working_file_survives_rematerialization_and_new_context(tmp_path:
         current_tool_context.reset(token)
 
 
+@pytest.mark.parametrize("collaboration_mode", ["default", "plan"])
+async def test_shared_dispatch_preserves_attachment_owner_across_storage_restart(
+    tmp_path: Path, collaboration_mode: str,
+) -> None:
+    from opensquilla.engine.runtime import TurnRunner
+    from opensquilla.engine.types import ToolCall
+    from opensquilla.session.manager import SessionManager
+    from opensquilla.session.storage import SessionStorage
+    from opensquilla.tools.dispatch import build_tool_handler
+    from opensquilla.tools.registry import get_default_registry
+
+    database = str(tmp_path / "attachment-dispatch.db")
+    storage = SessionStorage(database)
+    await storage.connect()
+    source_bytes = b"immutable input\n"
+    try:
+        manager = SessionManager(storage, inject_time_prefix=False)
+        session = await manager.create("agent:main:attachment-dispatch")
+        materializer = AttachmentWorkspaceMaterializer(
+            media_root=tmp_path, workspace_dir=tmp_path,
+        )
+        original = materializer.materialize_bytes(
+            source_bytes, name="notes.txt", mime="text/plain", session_id=session.session_id,
+        )
+        assert original.rel_path
+        runner = TurnRunner(provider_selector=None, session_manager=manager)
+        context = await runner._with_artifact_context(ToolContext(
+            workspace_dir=str(tmp_path), run_mode="full", workspace_strict=True,
+            collaboration_mode=collaboration_mode, allowed_tools={"read_file", "edit_file"},
+            usage_root_turn_id="synthetic-shared-turn",
+        ), session.session_key)
+        assert context.usage_root_turn_id == "synthetic-shared-turn"
+        result = await build_tool_handler(get_default_registry(), context)(ToolCall(
+            tool_use_id="owned-edit", tool_name="edit_file",
+            arguments={"path": original.rel_path, "old_text": "immutable", "new_text": "edited"},
+        ))
+        assert not result.is_error, result.content
+        assert (tmp_path / original.rel_path).read_bytes() == source_bytes
+        work_record = context.attachment_working_files[original.rel_path]
+        work_path = tmp_path / work_record["path"]
+        assert work_path.read_text() == "edited input\n"
+        assert work_record["session_id"] == session.session_id
+    finally:
+        await storage.close()
+
+    restored_storage = SessionStorage(database)
+    await restored_storage.connect()
+    try:
+        restored_runner = TurnRunner(
+            provider_selector=None, session_manager=SessionManager(restored_storage),
+        )
+        restored = await restored_runner._with_artifact_context(ToolContext(
+            workspace_dir=str(tmp_path), run_mode="full", workspace_strict=True,
+            collaboration_mode=collaboration_mode, allowed_tools={"read_file", "edit_file"},
+        ), session.session_key)
+        assert restored.attachment_working_files[original.rel_path] == work_record
+        handler = build_tool_handler(get_default_registry(), restored)
+        read = await handler(ToolCall(
+            tool_use_id="restored-read", tool_name="read_file",
+            arguments={"path": original.rel_path},
+        ))
+        assert not read.is_error, read.content
+        assert "edited input" in read.content
+
+        # Collaboration intent cannot override the current tool denylist.
+        restored.denied_tools.add("edit_file")
+        denied = await handler(ToolCall(
+            tool_use_id="denied-edit", tool_name="edit_file",
+            arguments={"path": original.rel_path, "old_text": "edited", "new_text": "denied"},
+        ))
+        assert denied.is_error
+        assert json.loads(denied.content)["error_class"] == "PolicyDenied"
+        assert work_path.read_text() == "edited input\n"
+        assert (tmp_path / original.rel_path).read_bytes() == source_bytes
+    finally:
+        await restored_storage.close()
+
+
 @pytest.mark.parametrize("tool_name", ["write_file", "edit_file", "edit_source"])
 @pytest.mark.parametrize("existing_workfile", [False, True])
 @pytest.mark.parametrize("missing_binding", ["epoch", "persistence"])
@@ -176,10 +254,18 @@ async def test_managed_lookup_failure_blocks_attachment_workfile_but_allows_ordi
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("collaboration_mode", ["default", "plan"])
+@pytest.mark.parametrize("denied", [False, True])
 async def test_document_read_runs_inside_filesystem_executor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    collaboration_mode: str,
+    denied: bool,
 ) -> None:
+    from opensquilla.engine.types import ToolCall
+    from opensquilla.tools.dispatch import build_tool_handler
+    from opensquilla.tools.registry import get_default_registry
+
     target = tmp_path / "sample.docx"
     _docx(target, ["first", "second", "third"])
     calls = []
@@ -192,11 +278,21 @@ async def test_document_read_runs_inside_filesystem_executor(
         )
 
     monkeypatch.setattr(filesystem, "_run_sandbox_operation_if_required", execute)
-    token = current_tool_context.set(ToolContext(workspace_dir=str(tmp_path)))
-    try:
-        result = json.loads(await filesystem.read_file("sample.docx", offset=2, limit=1))
-    finally:
-        current_tool_context.reset(token)
+    context = ToolContext(
+        workspace_dir=str(tmp_path), run_mode="full", collaboration_mode=collaboration_mode,
+        denied_tools={"read_file"} if denied else set(),
+    )
+    output = await build_tool_handler(get_default_registry(), context)(ToolCall(
+        tool_use_id="document-read", tool_name="read_file",
+        arguments={"path": "sample.docx", "offset": 2, "limit": 1},
+    ))
+    result = json.loads(output.content)
+    if denied:
+        assert output.is_error
+        assert result["error_class"] == "PolicyDenied"
+        assert calls == []
+        return
+    assert not output.is_error
     assert calls == ["read_file"]
     assert result["unit"] == "paragraph"
     assert result["range"] == [2]

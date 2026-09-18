@@ -128,6 +128,8 @@ class RunPipelineRequest:
         default=None,
         repr=False,
     )
+    # Reference data appended after routing, excluding the base prompt's dynamic suffix.
+    additional_request_context_tokens: int = 0
 
 # ---------------------------------------------------------------------------
 # Ports — narrow Protocols so the stage is unit-testable without the full
@@ -424,17 +426,34 @@ class PromptAssemblerStage:
         # Local imports keep the module import-cycle-free.
         from opensquilla.engine.turn_runner.outcome import StageOutcome
 
+        extra_context = inp.extra_prompt_context
+        plan_reference_parts: list[str] = []
+        reference_keys = {
+            "Current Plan Revision", "Approved Plan Proposal", "Previous Plan Progress",
+        }
+        if extra_context and reference_keys.intersection(extra_context):
+            extra_context = dict(extra_context)
+            for key in tuple(extra_context):
+                if key in reference_keys:
+                    plan_reference_parts.append(f"## {key}\n\n{extra_context.pop(key)}")
         prompt_metadata: dict[str, Any] = {}
         base_prompt = self._prompt_assembler.assemble_prompt(
             inp.agent_id,
             inp.tool_defs,
             session_key=inp.session_key,
             semantic_message=inp.semantic_input,
-            extra_context=(inp.extra_prompt_context),
+            extra_context=extra_context,
             prompt_metadata=prompt_metadata,
             bootstrap_context_mode=(inp.bootstrap_context_mode),
             fresh_user_session=inp.fresh_user_session,
             workspace_dir=(getattr(inp.effective_tool_context, "workspace_dir", None)),
+        )
+        from opensquilla.engine.collaboration_prompt import with_collaboration_instructions
+        from opensquilla.token_estimation import estimate_tokens
+
+        base_prompt = with_collaboration_instructions(base_prompt, inp.effective_tool_context)
+        additional_request_context_tokens = (
+            estimate_tokens("\n\n".join(plan_reference_parts)) if plan_reference_parts else 0
         )
 
         # 2. Fetch router context (transcript-driven)
@@ -518,6 +537,7 @@ class PromptAssemblerStage:
             cloned_selector=inp.cloned_selector,
             tool_defs=inp.tool_defs,
             base_prompt=base_prompt,
+            additional_request_context_tokens=additional_request_context_tokens,
             attachments=inp.attachments,
             attachment_materialization=inp.attachment_materialization,
             semantic_message=inp.semantic_input,
@@ -638,6 +658,15 @@ class PromptAssemblerStage:
             cache_breakpoints,
             request_context_prompt,
         ) = self._prompt_config_resolver.resolve_prompt_config(turn)
+        # Proposal text is reference data even when prompt caching is off.
+        # Never combine it into the system block that owns collaboration intent.
+        if plan_reference_parts:
+            request_context_prompt = "\n\n".join(
+                [
+                    *([request_context_prompt] if request_context_prompt else []),
+                    *plan_reference_parts,
+                ]
+            )
 
         # 8. Resolve session_id and build prompt report
         session_id_for_log = await self._session_id_resolver.resolve_session_id_for_log(

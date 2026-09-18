@@ -647,6 +647,25 @@ async def test_complete_estimate_replaces_legacy_fixed_headroom_at_boundary(
     assert "large_context_request_reminder_tokens" not in routed.metadata
 
 
+@pytest.mark.parametrize("dynamic_suffix", [False, True])
+def test_additional_request_context_capacity_is_counted_once(dynamic_suffix: bool) -> None:
+    ctx = make_context("Inspect the attachment.", attachments=[{"type": "text/plain"}])
+    ctx.system_prompt = ("Stable system", "Daily context") if dynamic_suffix else "Stable system"
+    ctx.metadata["attachment_material_estimated_tokens"] = 1_000
+    before = squilla_router_step._complete_request_estimated_tokens(ctx, ctx.message)
+    ctx.metadata["routing_additional_request_context_tokens"] = 8_000
+
+    after = squilla_router_step._complete_request_estimated_tokens(ctx, ctx.message)
+
+    # A dynamic suffix already reserves the one request-context wrapper.
+    # Proposal text extends that same message; repeated admission is not additive.
+    new_wrapper = (
+        0 if dynamic_suffix else ctx.metadata["large_context_request_context_wrapper_tokens"]
+    )
+    assert after == before + 8_000 + new_wrapper
+    assert squilla_router_step._complete_request_estimated_tokens(ctx, ctx.message) == after
+
+
 @pytest.mark.asyncio
 async def test_same_attachment_fits_short_history_but_long_history_is_filtered(
     monkeypatch: pytest.MonkeyPatch,

@@ -328,6 +328,60 @@ async def test_live_workspace_image_uses_original_path_and_complete_readmission(
     assert stack["agents"][0].config.metadata["attachment_image_count"] == 1
 
 
+@pytest.mark.parametrize("cache_enabled", [False, True])
+async def test_attachment_route_counts_plan_reference_without_promoting_or_repeating_it(
+    attachment_retry_stack: dict[str, Any], monkeypatch: pytest.MonkeyPatch,
+    cache_enabled: bool,
+) -> None:
+    from opensquilla.engine import steps
+    from opensquilla.session.plans import new_plan_revision
+
+    stack = attachment_retry_stack
+    stack["config"].prompt_cache.mode = "on" if cache_enabled else "off"
+    stack["catalog"]._populate_from_data([
+        {"id": model, "architecture": {"input_modalities": ["text", "image"]}}
+        for model in ("synthetic-image", "synthetic-image-large")
+    ])
+    stack["catalog"].set_user_overrides({
+        "openai/synthetic-base": {"context_window": 200_000, "max_output_tokens": 1_024},
+        "openai/synthetic-image": {"context_window": 128_000, "max_output_tokens": 1_024},
+        "openai/synthetic-image-large": {"context_window": 200_000, "max_output_tokens": 1_024},
+    })
+    stack["config"].squilla_router.tiers["c2"] = {
+        "provider": "openai", "model": "synthetic-image-large", "thinking_level": "off",
+    }
+    route = steps.apply_squilla_router
+
+    async def route_with_large_image_candidate(turn: Any) -> Any:
+        turn = await route(turn)
+        turn.metadata["router_image_tier_support"]["c2"] = "supported"
+        return turn
+
+    monkeypatch.setattr(steps, "apply_squilla_router", route_with_large_image_candidate)
+    proposal = "SYNTHETIC_PLAN_REFERENCE " + "Synthetic agreed step. " * 4_000
+    revision = new_plan_revision(
+        source_session_key=stack["key"], source_session_id=stack["session"].session_id,
+        source_epoch=0, title="Synthetic proposal", markdown=proposal,
+        steps=[{"title": "Inspect the current image"}],
+    )
+    stack["tool_context"] = ToolContext(
+        is_owner=True, caller_kind=CallerKind.CLI,
+        plan_run_id="synthetic-plan-run", plan_revision=revision,
+    )
+
+    events = await _run(stack)
+    assert not [event for event in events if getattr(event, "kind", "") == "error"]
+    assert len(stack["calls"]) == 1
+    assert stack["calls"][0]["model"] == "synthetic-image-large"
+    assert not stack["summaries"]
+    call = stack["calls"][0]
+    assert "SYNTHETIC_PLAN_REFERENCE" not in (call["config"].system or "")
+    assert sum(
+        message.content.count("SYNTHETIC_PLAN_REFERENCE")
+        for message in call["messages"] if isinstance(message.content, str)
+    ) == 1
+
+
 @pytest.mark.parametrize("explicit_model", [
     "synthetic-base", "synthetic-image", "synthetic-other-small",
 ])
